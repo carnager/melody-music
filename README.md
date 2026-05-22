@@ -1,95 +1,88 @@
-# melody
+# Melody
 
-Music queue and playback manager for [Navidrome](https://www.navidrome.org/) with multi-device support.
+A personal music server that plays your local music library across all your devices.
 
-Spiritual successor to [clerk](https://github.com/carnager/clerk-modular), replacing MPD with Navidrome's Subsonic API.
+## What it does
 
-## Architecture
+Melody scans your music folder and lets you browse, search, queue, and play your music from anywhere — your terminal, your phone, or any other machine on your network.
 
-Melody uses a hub-and-spoke model inspired by Spotify Connect. The server owns all state; devices are playback endpoints; clients are remote controls.
+Pick a song on your phone, switch playback to your desktop speakers without missing a beat, then control everything from the couch using the terminal UI. All your devices see the same queue and stay in sync.
 
-```
-  [Clients: TUI / Web UI / Android / CLI]
-           |
-           | HTTP API
-           v
-  [Server: melodyd]  -----> [Navidrome]
-      |          |
-      | local    | HTTP/SSE
-      | mpv IPC  |
-      v          v
-  [local mpv]   [Agent / Android / Browser]
-```
+## How it works
 
-**Server (melodyd)** is the central hub:
-- Connects to Navidrome and caches the music library
-- Manages the play queue, ratings, and scrobbling
-- Runs a local mpv instance for direct audio output
-- Tracks registered devices with heartbeat and online status
-- Routes playback commands to the active device
-- Handles seamless device handoff with position preservation
-- Generates per-device stream URLs with transcoding options
-- Serves the embedded web UI
+**melodyd** is the server. Point it at your music folder and it takes care of the rest — scanning, indexing, and playing through mpv. It speaks the MPD protocol, so standard MPD tools (like scrobblers) work out of the box.
 
-**Agents (melody-agent)** are lightweight remote playback endpoints:
-- Run their own mpv instance on a different machine
-- Register with the server and heartbeat every 10 seconds
-- Expose a small HTTP API for the server to control playback
-- Declare preferred audio format and bitrate for transcoding
+**melody-agent** turns any machine into a playback target. Install it on your living room PC, your laptop, wherever — each one shows up as an output device you can switch to.
 
-**Clients** are remote controls that talk to the server's HTTP API:
-- **melody-tui** -- Terminal UI with library browser, queue management, ratings, search
-- **melodyc** -- Minimal CLI for playback control
-- **melody-rofi** -- Rofi/dmenu client for album/track selection
-- **melody-musiclist** -- Static music list exporter
-- **Web UI** -- Embedded browser-based client with full playback
-- **Android app** -- Material 3 app with streaming playback and device switching
+**melody-tui** is a terminal interface for browsing your library, managing the queue, rating tracks, and controlling playback.
 
-## Features
+**The Android app** does everything the TUI does, plus streaming playback directly on your phone with offline download support.
 
-- Browse artists, albums, and tracks from Navidrome
-- Queue management (add, insert, replace, reorder, clear)
-- Multi-device playback with seamless handoff (Spotify Connect-like)
-- Per-device audio transcoding (format and bitrate)
-- Per-device custom Navidrome URL (for mobile network access)
-- ReplayGain support (off, track, album) for all device types
-- Track and album ratings (1-10)
-- Search across albums and tracks
-- Random album and random tracks
-- Last.fm scrobbling
-- Keyboard-driven TUI with comprehensive hotkeys
-- Material 3 Android app with background service for persistent device discovery
+**melody-rofi** gives you quick album and track selection from a rofi/dmenu launcher.
 
-## Components
+**melody-musiclist** exports your library as a static HTML page.
 
-| Binary | Description |
-|--------|-------------|
-| `melodyd` | Server daemon with embedded web UI |
-| `melody-agent` | Remote playback agent (mpv wrapper) |
-| `melody-tui` | Terminal UI (Bubble Tea) |
-| `melodyc` | CLI client |
-| `melody-rofi` | Rofi/dmenu integration |
-| `melody-musiclist` | Music list exporter |
-| `android/` | Android app (Kotlin/Compose) |
+## Getting started
 
-## Build
-
-### Go binaries
+### Build
 
 ```sh
 ./build
 ```
 
-Binaries are placed in `bin/`. Requires Go 1.24+.
+Binaries go into `bin/`. Needs Go 1.24+.
+
+### Configure the server
+
+Config lives at `~/.config/melody/melodyd.toml`. Set your music directory:
+
+```toml
+[library]
+music_dir = "/path/to/your/music"
+```
+
+Start it:
+
+```sh
+./bin/melodyd
+```
+
+Or install the systemd service for auto-start:
+
+```sh
+cp melodyd/melodyd.service ~/.config/systemd/user/
+systemctl --user enable --now melodyd
+```
+
+### Connect a client
+
+The TUI connects to localhost by default. For a remote server, edit `~/.config/melody/melody-tui.toml`:
+
+```toml
+mpd_host = "192.168.1.10"
+mpd_port = 6600
+```
+
+### Add a remote speaker
+
+Install melody-agent on another machine and edit `~/.config/melody/melody-agent.toml`:
+
+```toml
+[agent]
+name = "living-room"
+master = "192.168.1.10:6600"
+```
+
+It shows up as an output device in the TUI (press `D`) and the Android app.
 
 ### Android
 
 ```sh
 cd android
-./gradlew assembleDebug
+./gradlew installDebug
 ```
 
-The APK is at `android/app/build/outputs/apk/debug/app-debug.apk`.
+Enter your server address in the app settings.
 
 ### Arch Linux
 
@@ -97,68 +90,9 @@ The APK is at `android/app/build/outputs/apk/debug/app-debug.apk`.
 makepkg -si
 ```
 
-## Configuration
+## Scrobbling
 
-### Server
-
-Config file: `$XDG_CONFIG_HOME/melody/melodyd.toml`
-
-```toml
-[server]
-bind_to_address = ["0.0.0.0:6701", "/run/user/1000/melody/melody.sock"]
-
-[navidrome]
-url = "http://localhost:4533"
-username = "admin"
-password = "your-password"
-
-[mpv]
-socket = "/run/user/1000/melody/mpv.sock"
-executable = "mpv"
-replaygain = ""  # "track", "album", or "" for off
-
-[random]
-tracks = 20
-
-[cache]
-poll_interval = 300
-
-[scrobble]
-enabled = true
-```
-
-### Agent
-
-Config file: `$XDG_CONFIG_HOME/melody/melody-agent.toml`
-
-```toml
-[agent]
-name = "living-room"
-bind = "0.0.0.0:6702"
-master = "192.168.1.10:6701"
-format = "opus"       # optional: "", "opus", "mp3", "aac", "flac"
-max_bitrate = 128     # optional: 0 = original quality
-```
-
-### Android
-
-Settings are configured in-app: server address, Navidrome URL override (for mobile networks), device name, audio format, bitrate, and ReplayGain mode.
-
-## Systemd
-
-```sh
-cp melodyd/melodyd.service ~/.config/systemd/user/
-systemctl --user enable --now melodyd
-```
-
-## Device Types
-
-| Type | Transport | Audio | ReplayGain |
-|------|-----------|-------|------------|
-| Server (local) | mpv IPC | Direct | mpv native |
-| Agent | HTTP | Remote mpv | mpv native |
-| Browser/Web UI | SSE | Browser audio | Volume adjustment |
-| Android | SSE | ExoPlayer | Volume adjustment |
+Melody speaks MPD, so any MPD scrobbler works. [mpdscribble](https://github.com/MusicPlayerDaemon/mpdscribble) is a good choice — just point it at melodyd's port.
 
 ## License
 

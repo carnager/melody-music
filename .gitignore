@@ -4,7 +4,6 @@ bin/
 melodyd/melodyd
 cmd/*/melody*
 !cmd/*/main.go
-melodyd-bin
 *.png
 
 # Android

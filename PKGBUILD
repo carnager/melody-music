@@ -1,5 +1,5 @@
 # Maintainer: Rasmus Steinke <rasi at xssn dot at>
-pkgname=('melodyd' 'melody-agent' 'melody-tui' 'melodyc' 'melody-rofi' 'melody-musiclist')
+pkgname=('melodyd' 'melody-agent' 'melody-tui' 'melody-rofi' 'melody-musiclist')
 pkgver=0.5.0
 pkgrel=1
 arch=('x86_64')
@@ -39,13 +39,6 @@ package_melody-tui() {
   depends=('melodyd')
   install -Dm755 "$srcdir/melody/bin/melody-tui" \
                   "$pkgdir/usr/bin/melody-tui"
-}
-
-package_melodyc() {
-  pkgdesc="CLI client for Melody"
-  optdepends=('melodyd: local daemon')
-  install -Dm755 "$srcdir/melody/bin/melodyc" \
-                  "$pkgdir/usr/bin/melodyc"
 }
 
 package_melody-rofi() {
