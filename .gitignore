@@ -1,0 +1,17 @@
+bin/
+.gomodcache/
+.gobuild/
+melodyd/melodyd
+cmd/*/melody*
+!cmd/*/main.go
+melodyd-bin
+*.png
+
+# Android
+android/local.properties
+android/.gradle/
+android/.gobuild/
+android/.gomodcache/
+android/build/
+android/app/build/
+android/app/release/

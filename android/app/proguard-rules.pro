@@ -1,0 +1,3 @@
+-keepattributes *Annotation*
+-keep class com.melody.app.** { *; }
+-dontwarn okhttp3.**

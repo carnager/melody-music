@@ -1,0 +1,12 @@
+[Unit]
+Description=Melody daemon (Navidrome/mpv music manager)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/melodyd
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
