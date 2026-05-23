@@ -17,8 +17,10 @@ class MainViewModel : ViewModel() {
 
     // Playback status
     var status by mutableStateOf<PlaybackStatus?>(null); private set
+    var lastPlayingStatus by mutableStateOf<PlaybackStatus?>(null); private set
     var queue by mutableStateOf<List<QueueItem>>(emptyList()); private set
     var currentTrackOffline by mutableStateOf(false); private set
+    var codecInfo by mutableStateOf(""); private set
 
     // Library
     var libView by mutableStateOf(LibView.Artists); private set
@@ -68,6 +70,7 @@ class MainViewModel : ViewModel() {
     var downloadedAlbums by mutableStateOf<Set<String>>(emptySet()); private set
 
     private var pollJob: Job? = null
+    private var playbackPollJob: Job? = null
     private var downloadJob: Job? = null
     private var lastPlaylistVersion = 0
 
@@ -103,6 +106,9 @@ class MainViewModel : ViewModel() {
     private suspend fun refresh() {
         try {
             status = mpd.getStatus()
+            if (status != null && (status!!.title.isNotBlank() || status!!.artist.isNotBlank())) {
+                lastPlayingStatus = status
+            }
             val curPos = status?.currentSongPos ?: -1
             val plVersion = status?.playlistVersion ?: 0
             if (plVersion != lastPlaylistVersion || queue.isEmpty()) {
@@ -114,9 +120,34 @@ class MainViewModel : ViewModel() {
             }
         } catch (_: Exception) {}
         currentTrackOffline = PlaybackService.instance?.isCurrentTrackOffline ?: false
+        codecInfo = PlaybackService.instance?.codecInfo ?: ""
+        updatePlaybackPolling()
         // Retry loading artists if connection recovered
         if (artists.isEmpty() && mpd.connected) {
             try { artists = mpd.getArtists() } catch (_: Exception) {}
+        }
+    }
+
+    private fun updatePlaybackPolling() {
+        if (status?.state == "playing") {
+            if (playbackPollJob?.isActive != true) {
+                playbackPollJob = viewModelScope.launch {
+                    while (true) {
+                        delay(1000)
+                        try {
+                            val s = mpd.getStatus()
+                            status = s
+                            if (s != null && (s.title.isNotBlank() || s.artist.isNotBlank())) {
+                                lastPlayingStatus = s
+                            }
+                            codecInfo = PlaybackService.instance?.codecInfo ?: ""
+                        } catch (_: Exception) {}
+                        if (status?.state != "playing") break
+                    }
+                }
+            }
+        } else {
+            playbackPollJob?.cancel()
         }
     }
 

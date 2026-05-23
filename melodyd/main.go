@@ -1133,9 +1133,10 @@ func (a *app) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	format := r.URL.Query().Get("format")
 	maxBitrate := intFromAny(r.URL.Query().Get("max_bitrate"), 0)
+	startTime, _ := strconv.ParseFloat(r.URL.Query().Get("start"), 64)
 
 	if format != "" || maxBitrate > 0 {
-		a.streamTranscoded(w, r, idStr, path, format, maxBitrate)
+		a.streamTranscoded(w, r, idStr, path, format, maxBitrate, startTime)
 		return
 	}
 
@@ -1193,24 +1194,31 @@ func transcodeContentType(format string) string {
 	}
 }
 
-func (a *app) streamTranscoded(w http.ResponseWriter, r *http.Request, songID, path, format string, maxBitrate int) {
+func (a *app) streamTranscoded(w http.ResponseWriter, r *http.Request, songID, path, format string, maxBitrate int, startTime float64) {
 	if format == "" {
 		format = "mp3"
 	}
 
 	cachePath := a.transcodeCachePath(songID, format, maxBitrate)
 
-	// Check cache: serve if cached file exists and is newer than source
-	if cInfo, err := os.Stat(cachePath); err == nil {
-		if sInfo, err := os.Stat(path); err == nil && !sInfo.ModTime().After(cInfo.ModTime()) {
-			w.Header().Set("Content-Type", transcodeContentType(format))
-			http.ServeFile(w, r, cachePath)
-			return
+	// Serve from cache if available and fresh (only for full-file requests)
+	if startTime == 0 {
+		if cInfo, err := os.Stat(cachePath); err == nil {
+			if sInfo, err := os.Stat(path); err == nil && !sInfo.ModTime().After(cInfo.ModTime()) {
+				w.Header().Set("Content-Type", transcodeContentType(format))
+				http.ServeFile(w, r, cachePath)
+				return
+			}
 		}
 	}
 
-	// Transcode to temp file, then rename to cache
-	args := []string{"-i", path, "-v", "quiet", "-vn"}
+	// Stream ffmpeg output directly to client, tee to cache for full-file requests
+	var args []string
+	if startTime > 0 {
+		args = []string{"-ss", strconv.FormatFloat(startTime, 'f', 3, 64), "-i", path, "-v", "quiet", "-vn"}
+	} else {
+		args = []string{"-i", path, "-v", "quiet", "-vn"}
+	}
 	switch format {
 	case "mp3":
 		args = append(args, "-f", "mp3", "-codec:a", "libmp3lame")
@@ -1224,36 +1232,9 @@ func (a *app) streamTranscoded(w http.ResponseWriter, r *http.Request, songID, p
 	if maxBitrate > 0 {
 		args = append(args, "-b:a", strconv.Itoa(maxBitrate*1000))
 	}
-
-	tmpFile, err := os.CreateTemp(a.paths.TranscodeCacheDir, "transcode_*.tmp")
-	if err != nil {
-		// Fallback: stream directly without caching
-		a.streamTranscodedDirect(w, path, format, maxBitrate, args)
-		return
-	}
-	tmpPath := tmpFile.Name()
-
-	args = append(args, tmpPath)
-	tmpFile.Close() // ffmpeg will write to it
+	args = append(args, "pipe:1")
 
 	cmd := exec.Command("ffmpeg", args...)
-	cmd.Stderr = nil
-	if err := cmd.Run(); err != nil {
-		os.Remove(tmpPath)
-		http.Error(w, "transcode error", http.StatusInternalServerError)
-		return
-	}
-
-	os.Rename(tmpPath, cachePath)
-
-	w.Header().Set("Content-Type", transcodeContentType(format))
-	http.ServeFile(w, r, cachePath)
-}
-
-func (a *app) streamTranscodedDirect(w http.ResponseWriter, path, format string, maxBitrate int, args []string) {
-	pipeArgs := append(append([]string{}, args...), "pipe:1")
-
-	cmd := exec.Command("ffmpeg", pipeArgs...)
 	cmd.Stderr = nil
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -1264,10 +1245,29 @@ func (a *app) streamTranscodedDirect(w http.ResponseWriter, path, format string,
 		http.Error(w, "transcode start error", http.StatusInternalServerError)
 		return
 	}
-	defer cmd.Wait()
+
 	w.Header().Set("Content-Type", transcodeContentType(format))
 	w.Header().Set("Transfer-Encoding", "chunked")
-	io.Copy(w, stdout)
+
+	// Tee to cache file for full-file requests (skip cache for offset seeks)
+	tmpFile, tmpErr := os.CreateTemp(a.paths.TranscodeCacheDir, "transcode_*.tmp")
+	if tmpErr == nil && startTime == 0 {
+		reader := io.TeeReader(stdout, tmpFile)
+		io.Copy(w, reader)
+		tmpFile.Close()
+		if err := cmd.Wait(); err == nil {
+			os.Rename(tmpFile.Name(), cachePath)
+		} else {
+			os.Remove(tmpFile.Name())
+		}
+	} else {
+		if tmpFile != nil {
+			tmpFile.Close()
+			os.Remove(tmpFile.Name())
+		}
+		io.Copy(w, stdout)
+		cmd.Wait()
+	}
 }
 
 func (a *app) handleCoverArt(w http.ResponseWriter, r *http.Request) {
@@ -1391,12 +1391,22 @@ func (a *app) switchDevice(newID string) error {
 	copy(queue, a.playQueue)
 	a.playQueueMu.Unlock()
 
+	isTranscoding := newDev.Format != "" || newDev.MaxBitRate > 0
 	for i, songID := range queue {
 		loadMode := "append"
 		if i == 0 {
 			loadMode = "replace"
 		}
 		streamURL := a.streamURLForDevice(songID, newDev.Format, newDev.MaxBitRate, "")
+		// Bake start time into URL for the current track when transcoding,
+		// so ffmpeg starts at the right position (Subsonic-style timeOffset).
+		if isTranscoding && i == playlistPos && timePos > 0 {
+			sep := "?"
+			if strings.Contains(streamURL, "?") {
+				sep = "&"
+			}
+			streamURL += sep + "start=" + strconv.FormatFloat(timePos, 'f', 3, 64)
+		}
 		if err := newTarget.loadFile(streamURL, loadMode, a.replayGainMeta(songID)); err != nil {
 			a.logger.Printf("device handoff: failed to load song %s: %v", songID, err)
 		}
@@ -1407,7 +1417,12 @@ func (a *app) switchDevice(newID string) error {
 		switch {
 		case newDev.Type == "agent":
 			at := newTarget.(*agentTarget)
-			if err := at.handoff(playlistPos, timePos, wasPaused); err != nil {
+			if isTranscoding {
+				// Seek baked into URL via ffmpeg -ss; tell agent to just set position
+				if err := at.handoff(playlistPos, 0, wasPaused); err != nil {
+					a.logger.Printf("device handoff: agent handoff failed: %v", err)
+				}
+			} else if err := at.handoff(playlistPos, timePos, wasPaused); err != nil {
 				a.logger.Printf("device handoff: agent handoff failed: %v", err)
 			}
 		default: // local mpv

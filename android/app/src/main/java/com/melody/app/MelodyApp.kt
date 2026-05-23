@@ -37,37 +37,41 @@ class MelodyApp : Application() {
         android.util.Log.d("MelodyApp", "Network: onHome=$onHome server=$server ssid=${getCurrentSSID()}")
 
         // Parse host:port — handle plain "host:port" and URLs like "https://host:port"
-        val (host, port) = parseServerAddress(server)
+        val addr = parseServerAddress(server)
 
         if (::mpd.isInitialized) {
             val oldHost = mpd.serverHost
             val oldPort = mpd.serverPort
-            if (host != oldHost || port != oldPort) {
-                android.util.Log.d("MelodyApp", "Switching MPD: $oldHost:$oldPort -> $host:$port")
+            if (addr.host != oldHost || addr.port != oldPort) {
+                android.util.Log.d("MelodyApp", "Switching MPD: $oldHost:$oldPort -> ${addr.host}:${addr.port}")
                 mpd.disconnect()
-                mpd = MpdClient(host, port)
-                if (host.isNotBlank()) mpd.connect()
+                mpd = MpdClient(addr.host, addr.port, addr.ssl)
+                if (addr.host.isNotBlank()) mpd.connect()
                 PlaybackService.instance?.reconnect()
             }
         } else {
-            mpd = MpdClient(host, port)
-            if (host.isNotBlank()) mpd.connect()
-            android.util.Log.d("MelodyApp", "Initial MPD: $host:$port")
+            mpd = MpdClient(addr.host, addr.port, addr.ssl)
+            if (addr.host.isNotBlank()) mpd.connect()
+            android.util.Log.d("MelodyApp", "Initial MPD: ${addr.host}:${addr.port}")
         }
     }
 
-    private fun parseServerAddress(server: String): Pair<String, Int> {
-        if (server.isBlank()) return "" to 6701
+    private data class ServerAddress(val host: String, val port: Int, val ssl: Boolean)
+
+    private fun parseServerAddress(server: String): ServerAddress {
+        if (server.isBlank()) return ServerAddress("", 6701, false)
+        val ssl = server.startsWith("https://")
+        val defaultPort = if (ssl) 443 else 6701
         // Strip protocol prefix if present
         val stripped = server.replace(Regex("^https?://"), "")
         // Split remaining "host:port" or just "host"
         val lastColon = stripped.lastIndexOf(':')
         return if (lastColon > 0) {
             val host = stripped.substring(0, lastColon)
-            val port = stripped.substring(lastColon + 1).toIntOrNull() ?: 6701
-            host to port
+            val port = stripped.substring(lastColon + 1).toIntOrNull() ?: defaultPort
+            ServerAddress(host, port, ssl)
         } else {
-            stripped to 6701
+            ServerAddress(stripped, defaultPort, ssl)
         }
     }
 
@@ -75,7 +79,7 @@ class MelodyApp : Application() {
         val prefs = getSharedPreferences("melody", Context.MODE_PRIVATE)
         val homeSSID = prefs.getString("home_wifi_ssid", "") ?: ""
         if (homeSSID.isBlank()) return true
-        val currentSSID = getCurrentSSID() ?: return true // unknown = assume home
+        val currentSSID = getCurrentSSID() ?: return false // no WiFi = not home
         return currentSSID == homeSSID
     }
 

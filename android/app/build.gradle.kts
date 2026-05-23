@@ -50,8 +50,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
 
-    // libmpv for audio playback
-    implementation("dev.jdtech.mpv:libmpv:1.0.0")
+    // ExoPlayer for audio playback (HLS, seeking, all formats)
+    implementation("androidx.media3:media3-exoplayer:1.6.1")
 
     // Networking
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

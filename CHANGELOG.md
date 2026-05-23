@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.0 (2026-05-23)
+
+### Features
+
+- Replace libmpv with ExoPlayer for Android audio playback
+- Transcoded stream seeking via Subsonic-style start= offset (seek-by-reload)
+- 1-second playback polling for smooth seekbar updates during active playback
+- Agent stops playback immediately when server connection drops
+
+### Bug Fixes
+
+- Fix transcoded seek using locale-dependent decimal separator (comma instead of dot)
+- Use database duration for agent targets to avoid incorrect stream-reported durations
+- Fix device handoff with transcoding double-reloading the stream
+
 ## 0.6.1 (2026-05-23)
 
 ### Bug Fixes

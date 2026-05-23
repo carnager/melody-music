@@ -183,12 +183,17 @@ func cmdStatus(c *mpdConn, args []string) *mpdError {
 		if songPos < len(a.queueIDs) {
 			c.writeKV("songid", a.queueIDs[songPos])
 		}
-		// Fallback: get duration from DB if mpv reports 0 during track transition
-		if duration == 0 && songPos < len(a.playQueue) {
+		// Use DB duration for agent targets (HLS reports segment duration, not track duration)
+		// and as fallback when mpv reports 0 during track transitions
+		if songPos < len(a.playQueue) {
+			dev := a.activeDeviceInfo()
+			isAgent := dev != nil && !dev.IsLocal
 			if trackID, err := strconv.ParseInt(a.playQueue[songPos], 10, 64); err == nil {
 				if track, err := a.db.trackByID(trackID); err == nil {
-					if d, ok := track["duration"].(float64); ok {
-						duration = d
+					if d, ok := track["duration"].(float64); ok && d > 0 {
+						if duration == 0 || isAgent {
+							duration = d
+						}
 					}
 				}
 			}

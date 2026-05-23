@@ -13,7 +13,7 @@ import java.util.concurrent.TimeUnit
  *
  * HTTP is used only for audio streaming and cover art (binary payloads).
  */
-class MpdClient(val serverHost: String, val serverPort: Int = 6701) {
+class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: Boolean = serverPort == 443) {
     private var ws: WebSocket? = null
     private var lines = Channel<String>(Channel.UNLIMITED)
     private val mutex = Mutex()
@@ -38,8 +38,11 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701) {
     val isConfigured: Boolean
         get() = serverHost.isNotBlank()
 
+    private val scheme: String get() = if (useSSL) "https" else "http"
+    private val wsScheme: String get() = if (useSSL) "wss" else "ws"
+
     val httpBaseUrl: String
-        get() = "http://$serverHost:$serverPort/api/v1"
+        get() = "$scheme://$serverHost:$serverPort/api/v1"
 
     // ---- Connection ----
 
@@ -55,7 +58,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701) {
         lines = Channel(Channel.UNLIMITED)
         partialLine.clear()
 
-        val wsUrl = "ws://$serverHost:$serverPort/mpd"
+        val wsUrl = "$wsScheme://$serverHost:$serverPort/mpd"
         val request = Request.Builder().url(wsUrl).build()
         ws = httpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -159,7 +162,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701) {
         idleLines = Channel(Channel.UNLIMITED)
         idlePartialLine.clear()
 
-        val wsUrl = "ws://$serverHost:$serverPort/mpd"
+        val wsUrl = "$wsScheme://$serverHost:$serverPort/mpd"
         val request = Request.Builder().url(wsUrl).build()
         val latch = CompletableDeferred<Boolean>()
 
@@ -457,7 +460,8 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701) {
             ))
             val aa = g["AlbumArtist"] ?: g["Artist"] ?: ""
             val alb = g["Album"] ?: ""
-            val key = "$aa\u0000$alb"
+            val date = g["Date"] ?: ""
+            val key = "$aa\u0000$alb\u0000$date"
             if (alb.isNotBlank() && key !in albumSet) {
                 // Only show album if artist or album name matches the text query
                 val albumText = "$aa $alb".lowercase()

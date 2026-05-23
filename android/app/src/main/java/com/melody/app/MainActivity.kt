@@ -459,8 +459,7 @@ fun MainScreen(vm: MainViewModel) {
 
 @Composable
 fun MiniPlayerBar(vm: MainViewModel, onClick: () -> Unit) {
-    val st = vm.status ?: return
-    if (st.title.isBlank() && st.artist.isBlank()) return
+    val st = vm.lastPlayingStatus ?: return
 
     val dur = st.duration
     val pos = st.timePos
@@ -535,14 +534,26 @@ fun MiniPlayerBar(vm: MainViewModel, onClick: () -> Unit) {
                             )
                         }
                     }
-                    if (st.artist.isNotBlank()) {
-                        Text(
-                            st.artist,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (st.artist.isNotBlank()) {
+                            Text(
+                                st.artist,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                        }
+                        if (vm.codecInfo.isNotBlank()) {
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                vm.codecInfo,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline,
+                                maxLines = 1
+                            )
+                        }
                     }
                 }
                 IconButton(onClick = { vm.playPrev() }) {
@@ -2155,7 +2166,6 @@ fun SettingsScreen(onDismiss: () -> Unit) {
     )
     var server by remember { mutableStateOf(prefs.getString("server", "") ?: "") }
     var externalServer by remember { mutableStateOf(prefs.getString("external_server", "") ?: "") }
-    var navidromeUrl by remember { mutableStateOf(prefs.getString("navidrome_url", "") ?: "") }
     var homeWifiSsid by remember { mutableStateOf(prefs.getString("home_wifi_ssid", "") ?: "") }
     var deviceName by remember {
         mutableStateOf(
@@ -2173,10 +2183,15 @@ fun SettingsScreen(onDismiss: () -> Unit) {
     var editValue by remember { mutableStateOf("") }
 
     fun saveAll() {
+        // Check if agent-relevant settings changed before saving
+        val oldName = prefs.getString("device_name", "") ?: ""
+        val oldFormat = prefs.getString("audio_format", "") ?: ""
+        val oldBitrate = prefs.getInt("audio_bitrate", 0)
+        val agentChanged = deviceName != oldName || format != oldFormat || bitrate != oldBitrate
+
         prefs.edit()
             .putString("server", server)
             .putString("external_server", externalServer)
-            .putString("navidrome_url", navidromeUrl)
             .putString("home_wifi_ssid", homeWifiSsid)
             .putString("device_name", deviceName)
             .putString("audio_format", format)
@@ -2185,6 +2200,9 @@ fun SettingsScreen(onDismiss: () -> Unit) {
             .putString("device_secret", deviceSecret)
             .apply()
         MelodyApp.instance.applyServerForCurrentNetwork()
+        if (agentChanged) {
+            PlaybackService.instance?.reconnect()
+        }
     }
 
     // Edit dialog
@@ -2192,7 +2210,6 @@ fun SettingsScreen(onDismiss: () -> Unit) {
         val fieldLabel = when (editingField) {
             "server" -> "Local server address"
             "external_server" -> "External server address"
-            "navidrome_url" -> "External Navidrome URL"
             "home_wifi_ssid" -> "Home WiFi SSID"
             "device_name" -> "Device name"
             "device_secret" -> "Device secret"
@@ -2211,8 +2228,7 @@ fun SettingsScreen(onDismiss: () -> Unit) {
                         placeholder = {
                             Text(when (editingField) {
                                 "server" -> "192.168.1.10:6701"
-                                "external_server" -> "melody.example.com:6701"
-                                "navidrome_url" -> "https://music.example.com"
+                                "external_server" -> "https://music.example.com"
                                 "home_wifi_ssid" -> "MyHomeNetwork"
                                 else -> ""
                             })
@@ -2243,7 +2259,6 @@ fun SettingsScreen(onDismiss: () -> Unit) {
                     when (editingField) {
                         "server" -> server = editValue
                         "external_server" -> externalServer = editValue
-                        "navidrome_url" -> navidromeUrl = editValue
                         "home_wifi_ssid" -> homeWifiSsid = editValue
                         "device_name" -> deviceName = editValue
                         "device_secret" -> deviceSecret = editValue
@@ -2305,17 +2320,6 @@ fun SettingsScreen(onDismiss: () -> Unit) {
                         onClick = {
                             editValue = externalServer
                             editingField = "external_server"
-                        }
-                    )
-                }
-                item {
-                    SettingsTextItem(
-                        title = "External Navidrome URL",
-                        value = navidromeUrl.ifBlank { "Not set" },
-                        subtitle = "For streaming on external network",
-                        onClick = {
-                            editValue = navidromeUrl
-                            editingField = "navidrome_url"
                         }
                     )
                 }
