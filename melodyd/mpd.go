@@ -125,6 +125,11 @@ type mpdConn struct {
 	idling   bool
 	idleSubs map[string]struct{}
 	idleCh   chan []string
+
+	// Window support for search/find commands
+	windowStart int
+	windowEnd   int // -1 = no window
+	windowPos   int
 }
 
 func (c *mpdConn) writeLine(line string) {

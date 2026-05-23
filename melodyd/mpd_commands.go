@@ -160,6 +160,11 @@ func cmdStatus(c *mpdConn, args []string) *mpdError {
 	queueVer := a.queueVersion
 	a.playQueueMu.Unlock()
 
+	// Clamp songPos to valid queue range
+	if songPos >= queueLen {
+		songPos = -1
+	}
+
 	if volume >= 0 {
 		c.writeKV("volume", volume)
 	} else {
@@ -418,12 +423,18 @@ func cmdPlaylistInfo(c *mpdConn, args []string) *mpdError {
 
 	for i := start; i < end; i++ {
 		track := a.findTrackBySongID(queue[i])
-		if track == nil {
-			continue
-		}
 		mpdID := 0
 		if i < len(ids) {
 			mpdID = ids[i]
+		}
+		if track == nil {
+			// Write minimal placeholder so item count matches playlistlength
+			c.writeKV("file", "unknown")
+			c.writeKV("Pos", i)
+			if mpdID > 0 {
+				c.writeKV("Id", mpdID)
+			}
+			continue
 		}
 		c.writeTrack(track, i, mpdID)
 	}
@@ -458,10 +469,10 @@ func cmdPlChanges(c *mpdConn, args []string) *mpdError {
 	currentVer := c.app.queueVersion
 	c.app.playQueueMu.Unlock()
 
-	if ver >= currentVer {
+	if ver > 0 && ver >= currentVer {
 		return nil // no changes
 	}
-	// Return full playlist on any version mismatch
+	// Return full playlist on version 0 or any version mismatch
 	return cmdPlaylistInfo(c, nil)
 }
 
@@ -841,6 +852,36 @@ func cmdSearchOrFind(c *mpdConn, args []string, cmdName string, caseInsensitive 
 }
 
 func cmdSearchOrFindInner(c *mpdConn, args []string, cmdName string, caseInsensitive, addToQueue bool) *mpdError {
+	// Extract "window" parameter if present (window START:END)
+	var windowStart, windowEnd int = 0, -1
+	var filteredArgs []string
+	for i := 0; i < len(args); i++ {
+		if strings.ToLower(args[i]) == "window" && i+1 < len(args) {
+			parts := strings.SplitN(args[i+1], ":", 2)
+			if len(parts) == 2 {
+				windowStart, _ = strconv.Atoi(parts[0])
+				windowEnd, _ = strconv.Atoi(parts[1])
+			}
+			i++ // skip the value
+			continue
+		}
+		filteredArgs = append(filteredArgs, args[i])
+	}
+	args = filteredArgs
+	if len(args) == 0 {
+		return nil
+	}
+
+	// Save window state for writeTrack filtering
+	c.windowStart = windowStart
+	c.windowEnd = windowEnd
+	c.windowPos = 0
+	defer func() {
+		c.windowStart = 0
+		c.windowEnd = -1
+		c.windowPos = 0
+	}()
+
 	// Check if all args are filter expressions (start with paren)
 	allFilters := true
 	for _, a := range args {
@@ -952,6 +993,25 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 		if cond.op == "contains" {
 			hasContains = true
 		}
+	}
+
+	// "filename"/"file" with empty value = list all tracks
+	if v, ok := tags["filename"]; ok && v == "" {
+		delete(tags, "filename")
+		conditions = nil
+	}
+	if v, ok := tags["file"]; ok && v == "" {
+		delete(tags, "file")
+		conditions = nil
+	}
+
+	// If no conditions remain, return all tracks
+	if len(conditions) == 0 && ratingFilter == nil && albumRatingFilter == nil {
+		tracks, err := a.db.allTracks()
+		if err != nil {
+			return mpdErr(errSystem, cmdName, err.Error())
+		}
+		return writeOrAddFilteredTracks(c, a, tracks, nil, nil, cmdName, addToQueue)
 	}
 
 	// Rating/albumrating-only query
@@ -1119,6 +1179,17 @@ func writeOrAddFilteredTracks(c *mpdConn, a *app, tracks []map[string]any, ratin
 		if addToQueue {
 			allSongIDs = append(allSongIDs, stringify(track["song_id"]))
 		} else {
+			// Apply window filtering
+			if c.windowEnd > 0 {
+				if c.windowPos < c.windowStart {
+					c.windowPos++
+					continue
+				}
+				if c.windowPos >= c.windowEnd {
+					break
+				}
+				c.windowPos++
+			}
 			c.writeTrack(track, -1, 0)
 		}
 	}
@@ -1927,7 +1998,14 @@ func getCoverArt(trackPath string) ([]byte, string) {
 func writeBinaryResponse(c *mpdConn, data []byte, mimeType string, offset int) *mpdError {
 	total := len(data)
 	if offset >= total {
-		return mpdErr(errArg, "", "offset beyond end of data")
+		// Transfer complete — return size with zero-length binary chunk
+		c.writeKV("size", total)
+		if mimeType != "" {
+			c.writeKV("type", mimeType)
+		}
+		c.writeKV("binary", 0)
+		c.writef("\n")
+		return nil
 	}
 
 	chunk := data[offset:]

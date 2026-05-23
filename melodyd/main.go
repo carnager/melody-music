@@ -205,6 +205,9 @@ func main() {
 		a.queueIDCounter++
 		a.queueIDs = append(a.queueIDs, a.queueIDCounter)
 	}
+	if len(a.playQueue) > 0 {
+		a.queueVersion = 1
+	}
 	a.playQueueMu.Unlock()
 
 	// Initial library scan

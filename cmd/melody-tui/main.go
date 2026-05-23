@@ -2,8 +2,16 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"compress/zlib"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"image"
+	"image/draw"
+	_ "image/jpeg"
+	_ "image/png"
+	"io"
 	"math"
 	"math/rand"
 	"net"
@@ -14,6 +22,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	_ "golang.org/x/image/webp"
 
 	"github.com/BurntSushi/toml"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -151,6 +161,80 @@ func (c *mpdClient) cmd(command string) ([]string, error) {
 	}
 }
 
+// cmdBinary sends a command that returns binary data (albumart, readpicture).
+// It reads key-value lines, then the binary chunk, reassembling across multiple
+// requests if the data is larger than the server's chunk size.
+func (c *mpdClient) cmdBinary(command string) ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var result []byte
+	offset := 0
+	totalSize := -1
+
+	for {
+		c.conn.SetDeadline(time.Now().Add(10 * time.Second))
+		cmd := fmt.Sprintf("%s %d", command, offset)
+		_, err := c.w.WriteString(cmd + "\n")
+		if err != nil {
+			return nil, err
+		}
+		if err := c.w.Flush(); err != nil {
+			return nil, err
+		}
+
+		var binaryLen int
+		for {
+			line, err := c.r.ReadString('\n')
+			if err != nil {
+				return nil, err
+			}
+			line = strings.TrimRight(line, "\r\n")
+			if line == "OK" {
+				// No binary data (empty art)
+				return result, nil
+			}
+			if strings.HasPrefix(line, "ACK ") {
+				return nil, fmt.Errorf("mpd: %s", line)
+			}
+			if strings.HasPrefix(line, "size: ") {
+				fmt.Sscanf(line, "size: %d", &totalSize)
+			} else if strings.HasPrefix(line, "binary: ") {
+				fmt.Sscanf(line, "binary: %d", &binaryLen)
+				break
+			}
+		}
+
+		if binaryLen == 0 {
+			// Read trailing newline + OK
+			c.r.ReadString('\n') // empty line after 0-length binary
+			c.r.ReadString('\n') // OK
+			return result, nil
+		}
+
+		chunk := make([]byte, binaryLen)
+		_, err = io.ReadFull(c.r, chunk)
+		if err != nil {
+			return nil, err
+		}
+		// Read trailing newline after binary data
+		c.r.ReadByte()
+		// Read OK line
+		okLine, _ := c.r.ReadString('\n')
+		okLine = strings.TrimRight(okLine, "\r\n")
+		if strings.HasPrefix(okLine, "ACK ") {
+			return nil, fmt.Errorf("mpd: %s", okLine)
+		}
+
+		result = append(result, chunk...)
+		offset += binaryLen
+
+		if totalSize >= 0 && offset >= totalSize {
+			return result, nil
+		}
+	}
+}
+
 // cmdBatch sends multiple commands in a command_list_ok_begin block.
 func (c *mpdClient) cmdBatch(commands []string) ([][]string, error) {
 	c.mu.Lock()
@@ -256,8 +340,12 @@ func mpdFilterEq(tag, value string) string {
 }
 
 var mpd *mpdClient
-var idleConn *mpdClient      // dedicated connection for MPD idle
-var lastQueueVersion int     // tracks MPD playlist version to skip redundant queue fetches
+var idleConn *mpdClient  // dedicated connection for MPD idle
+var lastQueueVersion int // tracks MPD playlist version to skip redundant queue fetches
+
+// Track last transmitted art to avoid re-transmitting on every render
+var artTxFile string
+var artTxCols, artTxRows int
 var statusFetchTime time.Time // when status was last fetched (for elapsed interpolation)
 
 func reconnectMPD() {
@@ -379,6 +467,14 @@ type devicesMsg struct {
 	active  int // output ID of enabled device, -1 if none
 }
 
+type albumArtMsg struct {
+	data []byte
+	file string
+	w, h int
+}
+
+type artTransmittedMsg struct{}
+
 type errMsg string
 
 // ---------------------------------------------------------------------------
@@ -425,8 +521,11 @@ type model struct {
 	curAlbum           *albumEntry
 	albumRating        int
 	albumComputedRating float64
-	libCursor          int
+	libCursor    int
 	libOffset    int
+	libFiltering bool  // true when filter input is active
+	libFilter    string // fzf-style filter text
+	libFiltered  []int  // indices into the source list matching filter
 	// saved positions for back navigation
 	savedArtistCursor int
 	savedArtistOffset int
@@ -485,6 +584,12 @@ type model struct {
 	devices      []deviceInfo
 	activeDevice int // output ID
 	devCursor    int
+
+	// album art (kitty protocol)
+	artData    []byte // raw image data for current track
+	artFile    string // URI of track whose art is loaded
+	artW, artH int    // pixel dimensions of the image
+	artRGBA    []byte // zlib-compressed RGBA pixels (cached for re-transmit)
 
 	err string
 }
@@ -657,6 +762,25 @@ func fetchStatus() tea.Msg {
 
 	lastQueueVersion = qVersion
 	return statusMsg{status: ps, queue: queue, queueVersion: qVersion, queueChanged: true}
+}
+
+func fetchAlbumArt(file string) tea.Cmd {
+	return func() tea.Msg {
+		if mpd == nil || file == "" {
+			return albumArtMsg{}
+		}
+		data, err := mpd.cmdBinary(fmt.Sprintf(`albumart "%s"`, file))
+		if err != nil || len(data) == 0 {
+			return albumArtMsg{}
+		}
+		// Decode to get dimensions
+		r := bytes.NewReader(data)
+		cfg, _, err := image.DecodeConfig(r)
+		if err != nil {
+			return albumArtMsg{data: data, file: file, w: 300, h: 300}
+		}
+		return albumArtMsg{data: data, file: file, w: cfg.Width, h: cfg.Height}
+	}
 }
 
 func fetchArtists() tea.Msg {
@@ -1309,12 +1433,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.queue[i].Current = m.queue[i].Position == m.status.SongPos
 			}
 		}
+		// Fetch album art if track changed
+		curFile := ""
+		for _, q := range m.queue {
+			if q.Current {
+				curFile = q.File
+				break
+			}
+		}
+		if curFile != "" && curFile != m.artFile {
+			return m, fetchAlbumArt(curFile)
+		}
+		return m, nil
+
+	case albumArtMsg:
+		m.artFile = msg.file
+		m.artW = msg.w
+		m.artH = msg.h
+		artTxFile = ""
+		artTxCols = 0
+		artTxRows = 0
+		if len(msg.data) > 0 {
+			m.artData = msg.data
+			m.artRGBA, m.artW, m.artH = prepareArtRGBA(msg.data)
+		} else {
+			m.artData = nil
+			m.artRGBA = nil
+		}
 		return m, nil
 
 	case artistsMsg:
 		m.artists = msg
 		m.libCursor = 0
 		m.libOffset = 0
+		m.libFiltering = false
+		m.libFilter = ""
+		m.libFiltered = nil
 		return m, nil
 
 	case albumsMsg:
@@ -1322,6 +1476,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.libMode = libAlbums
 		m.libCursor = 0
 		m.libOffset = 0
+		m.libFiltering = false
+		m.libFilter = ""
+		m.libFiltered = nil
 		return m, tea.ClearScreen
 
 	case tracksMsg:
@@ -1329,6 +1486,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.libMode = libTracks
 		m.libCursor = 0
 		m.libOffset = 0
+		m.libFiltering = false
+		m.libFilter = ""
+		m.libFiltered = nil
 		return m, tea.ClearScreen
 
 	case albumRatingMsg:
@@ -1347,6 +1507,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.libMode = libPlaylists
 		m.libCursor = 0
 		m.libOffset = 0
+		m.libFiltering = false
+		m.libFilter = ""
+		m.libFiltered = nil
 		return m, tea.ClearScreen
 
 	case playlistTracksMsg:
@@ -1354,6 +1517,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.libMode = libPlaylistTracks
 		m.libCursor = 0
 		m.libOffset = 0
+		m.libFiltering = false
+		m.libFilter = ""
+		m.libFiltered = nil
 		return m, tea.ClearScreen
 
 	case plPickerReadyMsg:
@@ -1387,12 +1553,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseMsg:
 		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
-			seekY := m.height - 2
+			seekY := m.height - 3
 			if msg.Y == seekY && m.status.Dur > 0 {
+				// Offset for album art on the left
+				artOffset := 0
+				if len(m.artRGBA) > 0 {
+					artOffset = 3*2 + 1 // artCols (rows*2) + gap
+				}
 				posStr := fmtTime(m.status.TimePos)
 				durStr := fmtTime(m.status.Dur)
-				barStart := len(posStr) + 1
-				barW := m.width - len(posStr) - len(durStr) - 6
+				infoW := m.width - artOffset
+				if infoW < 20 {
+					infoW = 20
+				}
+				barStart := artOffset + len(posStr) + 1
+				barW := infoW - len(posStr) - len(durStr) - 6
 				if barW < 5 {
 					barW = 5
 				}
@@ -1419,7 +1594,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+c" {
 		return m, tea.Quit
 	}
-	if key == "q" && !m.searching && !m.showMenu && !m.showHelp && !m.showRating {
+	if key == "q" && !m.searching && !m.showMenu && !m.showHelp && !m.showRating && !m.libFiltering {
 		return m, tea.Quit
 	}
 
@@ -1448,6 +1623,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleSearchKey(msg, key)
 	}
 
+	// Library filter mode — intercept all keys
+	if m.libFiltering {
+		return m.handleLibFilterKey(msg, key)
+	}
+
 	// Global hotkeys
 	switch key {
 	case "/":
@@ -1471,18 +1651,15 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "R":
 		return m, doRandomTracks()
 	case "*":
-		// Open rating popup — context-aware
 		m.showRating = true
 		m.ratingIsAlbum = false
-		// Determine current rating to position cursor
 		if m.focus == panelQueue && m.qCursor < len(m.queue) {
 			m.ratingCursor = m.queue[m.qCursor].Rating
 		} else if m.focus == panelLibrary && m.libMode == libAlbums {
-			// Rating an album from the album list
 			di := m.dataIndex()
 			if di >= 0 && di < len(m.albums) {
 				m.ratingIsAlbum = true
-				m.ratingCursor = 0 // will be fetched
+				m.ratingCursor = 0
 				a := m.albums[di]
 				m.ratingAlbum = &a
 				return m, fetchAlbumRatingForPopup(a.AlbumArtist, a.Album, a.Date)
@@ -1492,7 +1669,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if di >= 0 && di < len(m.tracks) && m.tracks[di].XSongID != "" {
 				m.ratingCursor = m.tracks[di].Rating
 			} else {
-				// No track under cursor, default to current song
 				m.ratingCursor = m.status.Rating
 			}
 		} else {
@@ -1621,6 +1797,13 @@ func (m model) handleLibKey(key string) (tea.Model, tea.Cmd) {
 			m.libCursor = 0
 		}
 		return m, nil
+	case "f":
+		m.libFiltering = true
+		m.libFilter = ""
+		m.libFiltered = nil
+		m.libCursor = 0
+		m.libOffset = 0
+		return m, nil
 	case "enter":
 		di := m.dataIndex()
 		if di < 0 {
@@ -1664,14 +1847,138 @@ func (m model) handleLibKey(key string) (tea.Model, tea.Cmd) {
 			m.libSortMtime = !m.libSortMtime
 			m.libCursor = 0
 			m.libOffset = 0
-			// MPD doesn't have mtime sort directly; just re-fetch
 			return m, fetchArtists
 		}
 	}
 	return m, nil
 }
 
+func (m model) handleLibFilterKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
+	listLen := m.libListLen()
+
+	switch key {
+	case "esc":
+		m.libFiltering = false
+		m.libFilter = ""
+		m.libFiltered = nil
+		m.libCursor = 0
+		m.libOffset = 0
+		return m, nil
+	case "backspace":
+		if len(m.libFilter) > 0 {
+			m.libFilter = m.libFilter[:len(m.libFilter)-1]
+			m.libCursor = 0
+			m.libOffset = 0
+			m.rebuildLibFilter()
+		} else {
+			// Empty filter + backspace exits filter mode
+			m.libFiltering = false
+			m.libCursor = 0
+			m.libOffset = 0
+		}
+		return m, nil
+	case "down", "ctrl+n":
+		if m.libCursor < listLen-1 {
+			m.libCursor++
+		}
+		return m, nil
+	case "up", "ctrl+p":
+		if m.libCursor > 0 {
+			m.libCursor--
+		}
+		return m, nil
+	case "enter":
+		// Show popup menu (same as normal mode)
+		di := m.dataIndex()
+		if di < 0 {
+			return m, nil
+		}
+		m.showMenu = true
+		m.menuCursor = 0
+		m.menuSource = "library"
+		return m, nil
+	case "right":
+		di := m.dataIndex()
+		if di < 0 {
+			return m, nil
+		}
+		m.libFiltering = false
+		m.libFilter = ""
+		m.libFiltered = nil
+		m.libCursor = di
+		return m.libDrillIn()
+	case "left":
+		m.libFiltering = false
+		m.libFilter = ""
+		m.libFiltered = nil
+		return m.libBack()
+	default:
+		// Printable chars extend filter
+		if len(key) == 1 && key[0] >= 32 && key[0] < 127 {
+			m.libFilter += key
+			m.libCursor = 0
+			m.libOffset = 0
+			m.rebuildLibFilter()
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+func (m *model) rebuildLibFilter() {
+	if m.libFilter == "" {
+		m.libFiltered = nil
+		return
+	}
+	query := strings.ToLower(m.libFilter)
+	var indices []int
+	switch m.libMode {
+	case libArtists:
+		for i, a := range m.artists {
+			if strings.Contains(strings.ToLower(a), query) {
+				indices = append(indices, i)
+			}
+		}
+	case libAlbums:
+		for i, a := range m.albums {
+			label := a.Album
+			if a.Date != "" {
+				label = a.Date + " " + a.Album
+			}
+			if strings.Contains(strings.ToLower(label), query) {
+				indices = append(indices, i)
+			}
+		}
+	case libTracks:
+		for i, t := range m.tracks {
+			if strings.Contains(strings.ToLower(t.Title), query) {
+				indices = append(indices, i)
+			}
+		}
+	case libPlaylists:
+		for i, pl := range m.playlists {
+			if strings.Contains(strings.ToLower(pl.Name), query) {
+				indices = append(indices, i)
+			}
+		}
+	case libPlaylistTracks:
+		for i, t := range m.playlistTracks {
+			label := t.Title + " " + t.Artist
+			if strings.Contains(strings.ToLower(label), query) {
+				indices = append(indices, i)
+			}
+		}
+	}
+	m.libFiltered = indices
+	if m.libCursor >= len(indices) {
+		m.libCursor = 0
+	}
+}
+
 func (m model) libListLen() int {
+	if m.libFilter != "" {
+		return len(m.libFiltered)
+	}
 	switch m.libMode {
 	case libArtists:
 		return len(m.artists)
@@ -1688,6 +1995,12 @@ func (m model) libListLen() int {
 }
 
 func (m model) dataIndex() int {
+	if m.libFilter != "" && len(m.libFiltered) > 0 {
+		if m.libCursor < len(m.libFiltered) {
+			return m.libFiltered[m.libCursor]
+		}
+		return -1
+	}
 	return m.libCursor
 }
 
@@ -2252,22 +2565,27 @@ func (m model) View() string {
 		return m.searchView()
 	}
 
-	playerH := 3
+	playerH := 4
 	mainH := m.height - playerH
 	if mainH < 3 {
 		mainH = 3
 	}
 
-	libW := m.width * 35 / 100
-	if libW < 20 {
-		libW = 20
+	libW := m.width * 25 / 100
+	if libW < 25 {
+		libW = 25
+	}
+	if libW > 55 {
+		libW = 55
 	}
 	queueW := m.width - libW
 	if queueW < 20 {
 		queueW = 20
 	}
 
-	lib := m.libraryView(libW-2, mainH-2)
+	libH := mainH - 2
+
+	lib := m.libraryView(libW-2, libH)
 	que := m.queueView(queueW-2, mainH-2)
 
 	libBorder := panelBorder
@@ -2278,10 +2596,10 @@ func (m model) View() string {
 		queBorder = focusBorder
 	}
 
-	libPanel := libBorder.Width(libW - 2).Height(mainH - 2).Render(lib)
+	leftPanel := libBorder.Width(libW - 2).Height(libH).Render(lib)
 	quePanel := queBorder.Width(queueW - 2).Height(mainH - 2).Render(que)
 
-	main := lipgloss.JoinHorizontal(lipgloss.Top, libPanel, quePanel)
+	main := lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, quePanel)
 	player := m.playerView()
 
 	return main + "\n" + player
@@ -2289,13 +2607,21 @@ func (m model) View() string {
 
 func (m model) libraryView(w, h int) string {
 	var breadcrumbs []string
-	var items []string
+
+	// Build all items, then select visible subset based on filter
+	type libItem struct {
+		text   string
+		prefix string
+		rating int
+		srcIdx int // index into source data
+	}
+	var allItems []libItem
 
 	switch m.libMode {
 	case libArtists:
 		breadcrumbs = []string{fmt.Sprintf("Artists (%d)", len(m.artists))}
 		for i, a := range m.artists {
-			items = append(items, m.libRow(i, a+" >", "", 0, w))
+			allItems = append(allItems, libItem{text: a, srcIdx: i})
 		}
 	case libAlbums:
 		breadcrumbs = []string{"Artists", m.curArtist, fmt.Sprintf("Albums (%d)", len(m.albums))}
@@ -2304,7 +2630,7 @@ func (m model) libraryView(w, h int) string {
 			if a.Date != "" && a.Date != "0000" {
 				label = a.Date + " " + a.Album
 			}
-			items = append(items, m.libRow(i, label+" >", "", 0, w))
+			allItems = append(allItems, libItem{text: label, srcIdx: i})
 		}
 	case libTracks:
 		albumName := ""
@@ -2325,8 +2651,10 @@ func (m model) libraryView(w, h int) string {
 		}
 		breadcrumbs = []string{"Artists", m.curArtist, albumName}
 		for i, t := range m.tracks {
-			num := fmt.Sprintf("%2d", t.TrackNumber)
-			items = append(items, m.libRow(i, t.Title, num, t.Rating, w))
+			allItems = append(allItems, libItem{
+				text: t.Title, prefix: fmt.Sprintf("%2d", t.TrackNumber),
+				rating: t.Rating, srcIdx: i,
+			})
 		}
 	case libPlaylists:
 		breadcrumbs = []string{fmt.Sprintf("Playlists (%d)", len(m.playlists))}
@@ -2335,21 +2663,35 @@ func (m model) libraryView(w, h int) string {
 			if pl.SongCount > 0 {
 				label += fmt.Sprintf(" (%d)", pl.SongCount)
 			}
-			items = append(items, m.libRow(i, label+" >", "", 0, w))
+			allItems = append(allItems, libItem{text: label, srcIdx: i})
 		}
 	case libPlaylistTracks:
 		breadcrumbs = []string{"Playlists", m.curPlaylist, fmt.Sprintf("Tracks (%d)", len(m.playlistTracks))}
 		for i, t := range m.playlistTracks {
-			num := fmt.Sprintf("%2d", i+1)
 			label := t.Title
 			if t.Artist != "" {
 				label += " - " + t.Artist
 			}
-			items = append(items, m.libRow(i, label, num, t.Rating, w))
+			allItems = append(allItems, libItem{
+				text: label, prefix: fmt.Sprintf("%2d", i+1),
+				rating: t.Rating, srcIdx: i,
+			})
 		}
 	}
 
-	// Build breadcrumb bar as plain text, truncate to fit.
+	// Apply filter
+	var items []libItem
+	if m.libFilter != "" && len(m.libFiltered) > 0 {
+		for _, idx := range m.libFiltered {
+			if idx < len(allItems) {
+				items = append(items, allItems[idx])
+			}
+		}
+	} else if m.libFilter == "" {
+		items = allItems
+	}
+
+	// Build breadcrumb bar
 	title := strings.Join(breadcrumbs, " > ")
 	title = truncate(title, w-2)
 	hdr := headerStyle.Width(w).Render(title)
@@ -2358,17 +2700,24 @@ func (m model) libraryView(w, h int) string {
 		visH = 1
 	}
 
-	// Context hint — always reserve the line to keep layout stable
-	var hint string
-	switch m.libMode {
-	case libArtists:
-		hint = "[enter]browse  [/]search  [?]help"
-	case libAlbums:
-		hint = "[enter]browse  [bksp]back"
-	case libTracks, libPlaylistTracks:
-		hint = "[enter]add  [p]playlist  [bksp]back"
-	case libPlaylists:
-		hint = "[enter]browse  [bksp]back"
+	// Context hint or filter bar
+	var hintLine string
+	if m.libFiltering {
+		filterText := fmt.Sprintf("> %s_ %d/%d", m.libFilter, len(items), len(allItems))
+		hintLine = lipgloss.NewStyle().Foreground(accentColor).Width(w).Render(truncate(filterText, w))
+	} else {
+		var hint string
+		switch m.libMode {
+		case libArtists:
+			hint = "[enter]browse  [f]filter  [?]help"
+		case libAlbums:
+			hint = "[enter]browse  [f]filter  [bksp]back"
+		case libTracks, libPlaylistTracks:
+			hint = "[enter]add  [f]filter  [bksp]back"
+		case libPlaylists:
+			hint = "[enter]browse  [f]filter  [bksp]back"
+		}
+		hintLine = dimStyle.Width(w).Render(hint)
 	}
 
 	bodyH := visH - 1
@@ -2376,13 +2725,19 @@ func (m model) libraryView(w, h int) string {
 		bodyH = 1
 	}
 
-	m.libOffset = scrollOffset(m.libCursor, m.libOffset, bodyH, len(items))
+	// Render visible items
+	var rows []string
+	for i, it := range items {
+		rows = append(rows, m.libRow(i, it.text, it.prefix, it.rating, w))
+	}
+
+	m.libOffset = scrollOffset(m.libCursor, m.libOffset, bodyH, len(rows))
 
 	end := m.libOffset + bodyH
-	if end > len(items) {
-		end = len(items)
+	if end > len(rows) {
+		end = len(rows)
 	}
-	visible := items[m.libOffset:end]
+	visible := rows[m.libOffset:end]
 
 	body := strings.Join(visible, "\n")
 	emptyRow := strings.Repeat(" ", w)
@@ -2391,7 +2746,6 @@ func (m model) libraryView(w, h int) string {
 		visible = append(visible, "")
 	}
 
-	hintLine := dimStyle.Width(w).Render(hint)
 	return hdr + "\n" + body + "\n" + hintLine
 }
 
@@ -2526,10 +2880,144 @@ func (m model) queueView(w, h int) string {
 	return hdr + "\n" + body
 }
 
+// prepareArtRGBA decodes image data to RGBA and zlib-compresses it.
+// Returns the compressed bytes and pixel dimensions.
+func prepareArtRGBA(data []byte) ([]byte, int, int) {
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, 0, 0
+	}
+	bounds := img.Bounds()
+	rgba := image.NewRGBA(bounds)
+	draw.Draw(rgba, rgba.Bounds(), img, bounds.Min, draw.Src)
+
+	var compressed bytes.Buffer
+	zw, _ := zlib.NewWriterLevel(&compressed, 6)
+	zw.Write(rgba.Pix)
+	zw.Close()
+
+	return compressed.Bytes(), bounds.Dx(), bounds.Dy()
+}
+
+// transmitArtToTerminal writes the Kitty graphics protocol escape sequence
+// directly to stdout, specifying cell dimensions c/r so the image scales.
+func transmitArtToTerminal(rgbaData []byte, pixW, pixH, cols, rows int) {
+	b64 := base64.StdEncoding.EncodeToString(rgbaData)
+
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "\033_Ga=d,d=A,q=2\033\\")
+	const chunkSize = 4096
+	for i := 0; i < len(b64); i += chunkSize {
+		end := i + chunkSize
+		if end > len(b64) {
+			end = len(b64)
+		}
+		more := 1
+		if end >= len(b64) {
+			more = 0
+		}
+		if i == 0 {
+			fmt.Fprintf(&buf, "\033_Gi=1,f=32,U=1,t=d,a=T,q=2,o=z,s=%d,v=%d,c=%d,r=%d,m=%d;%s\033\\",
+				pixW, pixH, cols, rows, more, b64[i:end])
+		} else {
+			fmt.Fprintf(&buf, "\033_Gm=%d;%s\033\\", more, b64[i:end])
+		}
+	}
+	os.Stdout.Write(buf.Bytes())
+}
+
+// kittyDiacritics is the table of combining characters used by the Kitty
+// graphics protocol for Unicode placeholder row/column encoding.
+// Derived from kitty's rowcolumn-diacritics.txt (Unicode 6.0.0, class 230).
+var kittyDiacritics = [...]rune{
+	0x0305, 0x030D, 0x030E, 0x0310, 0x0312, 0x033D, 0x033E, 0x033F,
+	0x0346, 0x034A, 0x034B, 0x034C, 0x0350, 0x0351, 0x0352, 0x0357,
+	0x035B, 0x0363, 0x0364, 0x0365, 0x0366, 0x0367, 0x0368, 0x0369,
+	0x036A, 0x036B, 0x036C, 0x036D, 0x036E, 0x036F, 0x0483, 0x0484,
+	0x0485, 0x0486, 0x0487, 0x0592, 0x0593, 0x0594, 0x0595, 0x0597,
+	0x0598, 0x0599, 0x059C, 0x059D, 0x059E, 0x059F, 0x05A0, 0x05A1,
+	0x05A8, 0x05A9, 0x05AB, 0x05AC, 0x05AF, 0x05C4, 0x0610, 0x0611,
+	0x0612, 0x0613, 0x0614, 0x0615, 0x0616, 0x0617, 0x0657, 0x0658,
+	0x0659, 0x065A, 0x065B, 0x065D, 0x065E, 0x06D6, 0x06D7, 0x06D8,
+	0x06D9, 0x06DA, 0x06DB, 0x06DC, 0x06DF, 0x06E0, 0x06E1, 0x06E2,
+	0x06E4, 0x06E7, 0x06E8, 0x06EB, 0x06EC, 0x0730, 0x0732, 0x0733,
+	0x0735, 0x0736, 0x073A, 0x073D, 0x073F, 0x0740, 0x0741, 0x0743,
+	0x0745, 0x0747, 0x0749, 0x074A, 0x07EB, 0x07EC, 0x07ED, 0x07EE,
+	0x07EF, 0x07F0, 0x07F1, 0x07F3, 0x0816, 0x0817, 0x0818, 0x0819,
+	0x081B, 0x081C, 0x081D, 0x081E, 0x081F, 0x0820, 0x0821, 0x0822,
+	0x0823, 0x0825, 0x0826, 0x0827, 0x0829, 0x082A, 0x082B, 0x082C,
+	0x082D, 0x0951, 0x0953, 0x0954, 0x0F82, 0x0F83, 0x0F86, 0x0F87,
+	0x135D, 0x135E, 0x135F, 0x17DD, 0x193A, 0x1A17, 0x1A75, 0x1A76,
+	0x1A77, 0x1A78, 0x1A79, 0x1A7A, 0x1A7B, 0x1A7C, 0x1B6B, 0x1B6D,
+	0x1B6E, 0x1B6F, 0x1B70, 0x1B71, 0x1B72, 0x1B73, 0x1CD0, 0x1CD1,
+	0x1CD2, 0x1CDA, 0x1CDB, 0x1CE0, 0x1DC0, 0x1DC1, 0x1DC3, 0x1DC4,
+	0x1DC5, 0x1DC6, 0x1DC7, 0x1DC8, 0x1DC9, 0x1DCB, 0x1DCC, 0x1DD1,
+	0x1DD2, 0x1DD3, 0x1DD4, 0x1DD5, 0x1DD6, 0x1DD7, 0x1DD8, 0x1DD9,
+	0x1DDA, 0x1DDB, 0x1DDC, 0x1DDD, 0x1DDE, 0x1DDF, 0x1DE0, 0x1DE1,
+	0x1DE2, 0x1DE3, 0x1DE4, 0x1DE5, 0x1DE6, 0x1DFE, 0x20D0, 0x20D1,
+	0x20D4, 0x20D5, 0x20D6, 0x20D7, 0x20DB, 0x20DC, 0x20E1, 0x20E7,
+	0x20E9, 0x20F0, 0x2CEF, 0x2CF0, 0x2CF1, 0x2DE0, 0x2DE1, 0x2DE2,
+	0x2DE3, 0x2DE4, 0x2DE5, 0x2DE6, 0x2DE7, 0x2DE8, 0x2DE9, 0x2DEA,
+	0x2DEB, 0x2DEC, 0x2DED, 0x2DEE, 0x2DEF, 0x2DF0, 0x2DF1, 0x2DF2,
+	0x2DF3, 0x2DF4, 0x2DF5, 0x2DF6, 0x2DF7, 0x2DF8, 0x2DF9, 0x2DFA,
+	0x2DFB, 0x2DFC, 0x2DFD, 0x2DFE, 0x2DFF, 0xA66F, 0xA67C, 0xA67D,
+	0xA6F0, 0xA6F1, 0xA8E0, 0xA8E1, 0xA8E2, 0xA8E3, 0xA8E4, 0xA8E5,
+	0xA8E6, 0xA8E7, 0xA8E8, 0xA8E9, 0xA8EA, 0xA8EB, 0xA8EC, 0xA8ED,
+	0xA8EE, 0xA8EF, 0xA8F0, 0xA8F1, 0xAAB0, 0xAAB2, 0xAAB3, 0xAAB7,
+	0xAAB8, 0xAABE, 0xAABF, 0xAAC1, 0xFE20, 0xFE21, 0xFE22, 0xFE23,
+	0xFE24, 0xFE25, 0xFE26, 0x10A0F, 0x10A38, 0x1D185, 0x1D186,
+	0x1D187, 0x1D188, 0x1D189, 0x1D1AA, 0x1D1AB, 0x1D1AC, 0x1D1AD,
+	0x1D242, 0x1D243, 0x1D244,
+}
+
+// kittyPlaceholders returns Unicode placeholder characters (U+10EEEE) with
+// diacritics encoding row/column positions. Kitty renders these as the
+// transmitted image (id=1). These survive bubbletea redraws.
+func kittyPlaceholders(cols, rows int) string {
+	var sb strings.Builder
+	maxIdx := len(kittyDiacritics)
+	for r := 0; r < rows && r < maxIdx; r++ {
+		if r > 0 {
+			sb.WriteRune('\n')
+		}
+		// Foreground color encodes the image ID (1)
+		sb.WriteString("\033[38;5;1m")
+		for c := 0; c < cols && c < maxIdx; c++ {
+			sb.WriteRune('\U0010EEEE')
+			sb.WriteRune(kittyDiacritics[r]) // row
+			sb.WriteRune(kittyDiacritics[c]) // column
+		}
+		sb.WriteString("\033[39m")
+	}
+	return sb.String()
+}
+
 func (m model) playerView() string {
 	w := m.width
 	if w < 10 {
 		w = 10
+	}
+
+	// Album art: 3 rows tall, cols = rows * 2 (cells are ~2:1)
+	artCols := 0
+	artRows := 3
+	if len(m.artRGBA) > 0 {
+		artCols = artRows * 2
+		if m.artFile != artTxFile || artCols != artTxCols || artRows != artTxRows {
+			artTxFile = m.artFile
+			artTxCols = artCols
+			artTxRows = artRows
+			transmitArtToTerminal(m.artRGBA, m.artW, m.artH, artCols, artRows)
+		}
+	}
+
+	// Width available for player text (subtract art + gap)
+	infoW := w
+	if artCols > 0 {
+		infoW = w - artCols - 1
+	}
+	if infoW < 20 {
+		infoW = 20
 	}
 
 	np := "\u2014"
@@ -2552,7 +3040,7 @@ func (m model) playerView() string {
 
 	posStr := fmtTime(m.status.TimePos)
 	durStr := fmtTime(m.status.Dur)
-	barW := w - len(posStr) - len(durStr) - 6
+	barW := infoW - len(posStr) - len(durStr) - 6
 	if barW < 5 {
 		barW = 5
 	}
@@ -2578,12 +3066,24 @@ func (m model) playerView() string {
 	if m.status.Rating > 0 {
 		ratingStr = " " + lipgloss.NewStyle().Foreground(lipgloss.Color("#e6b422")).Render(renderRating(m.status.Rating))
 	}
-	line1 := titleStyle.Render(stateIcon) + " " + truncate(np, w-4-12) + ratingStr
+	line1 := titleStyle.Render(stateIcon) + " " + truncate(np, infoW-4-12) + ratingStr
 	line2 := timeL + " " + bar + " " + timeR
-
 	hints := dimStyle.Render("[/]search [?]help [space]play [<>]prev/next [s]stop [r]album [R]tracks [P]playlists [D]devices [*]rate [q]quit")
+	line3 := truncate(hints, infoW)
 
-	return line1 + "\n" + line2 + "\n" + hints
+	playerRight := line1 + "\n" + line2 + "\n" + line3
+
+	if artCols > 0 {
+		artStr := kittyPlaceholders(artCols, artRows)
+		// Pad art to 3 lines
+		artLines := strings.Split(artStr, "\n")
+		for len(artLines) < artRows {
+			artLines = append(artLines, strings.Repeat(" ", artCols))
+		}
+		artBlock := strings.Join(artLines, "\n")
+		return lipgloss.JoinHorizontal(lipgloss.Top, artBlock, " ", playerRight)
+	}
+	return playerRight
 }
 
 func (m model) helpView() string {
