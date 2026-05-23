@@ -162,9 +162,6 @@ func main() {
 	if err != nil {
 		logger.Fatalf("open database: %v", err)
 	}
-	if err := db.rebuildFTS(); err != nil {
-		logger.Printf("warning: FTS rebuild failed: %v", err)
-	}
 
 	a := &app{
 		cfg:    cfg,
