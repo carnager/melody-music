@@ -286,21 +286,21 @@ func (c *mpdConn) handleIdle(subs []string) {
 		}
 		c.writeLine("OK")
 		c.flush()
-		// Drain the reader goroutine — it will get the next command
-		// which we need to handle after idle returns
-		select {
-		case nextLine := <-lineCh:
-			if nextLine != "" && nextLine != "noidle" {
-				cmd, args := parseCommand(nextLine)
-				if err := c.dispatch(cmd, args); err != nil {
-					c.writeACK(err)
-				} else {
-					c.writeLine("OK")
-				}
+		// Wait for the reader goroutine to finish — it may have already
+		// consumed the next line from the connection. We must handle it
+		// here to avoid a data race on c.reader in serve().
+		nextLine := <-lineCh
+		if nextLine != "" && nextLine != "noidle" {
+			cmd, args := parseCommand(nextLine)
+			if cmd == "idle" {
+				c.handleIdle(args)
+			} else if err := c.dispatch(cmd, args); err != nil {
+				c.writeACK(err)
+				c.flush()
+			} else {
+				c.writeLine("OK")
 				c.flush()
 			}
-		default:
-			// Reader hasn't produced a line yet, that's fine
 		}
 
 	case line := <-lineCh:

@@ -708,6 +708,12 @@ func fetchStatus() tea.Msg {
 	ps.State = st["state"]
 	ps.TimePos, _ = strconv.ParseFloat(st["elapsed"], 64)
 	ps.Dur, _ = strconv.ParseFloat(st["duration"], 64)
+	if ps.Dur == 0 {
+		ps.Dur, _ = strconv.ParseFloat(cs["duration"], 64)
+	}
+	if ps.Dur == 0 {
+		ps.Dur, _ = strconv.ParseFloat(cs["Time"], 64)
+	}
 	ps.Volume, _ = strconv.Atoi(st["volume"])
 	ps.Title = cs["Title"]
 	ps.Artist = cs["Artist"]

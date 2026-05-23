@@ -219,6 +219,7 @@ func main() {
 	go a.scanner.watchForChanges()
 
 	go a.ensureMPV()
+	go a.watchMPVTrackChanges()
 	go a.deviceCleanup()
 	if a.cfg.MPD.Port > 0 {
 		go func() {
@@ -599,6 +600,34 @@ func (a *app) ensureMPV() {
 		}
 		a.logger.Printf("mpv: started, ipc at %s", a.mpv.socketPath)
 		time.Sleep(5 * time.Second)
+	}
+}
+
+// watchMPVTrackChanges polls mpv's playlist-pos to detect natural track
+// advances (e.g. when a song ends and mpv moves to the next). When a change
+// is detected, it notifies idle MPD clients so they can refresh.
+func (a *app) watchMPVTrackChanges() {
+	lastPos := -1
+	for {
+		time.Sleep(1 * time.Second)
+		t := a.target()
+		if t == nil {
+			lastPos = -1
+			continue
+		}
+		posRaw, err := t.getProperty("playlist-pos")
+		if err != nil {
+			lastPos = -1
+			continue
+		}
+		pos := -1
+		if f, ok := posRaw.(float64); ok {
+			pos = int(f)
+		}
+		if pos >= 0 && pos != lastPos && lastPos >= 0 {
+			a.mpdHub.notify(SubPlayer)
+		}
+		lastPos = pos
 	}
 }
 

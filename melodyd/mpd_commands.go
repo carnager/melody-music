@@ -183,6 +183,16 @@ func cmdStatus(c *mpdConn, args []string) *mpdError {
 		if songPos < len(a.queueIDs) {
 			c.writeKV("songid", a.queueIDs[songPos])
 		}
+		// Fallback: get duration from DB if mpv reports 0 during track transition
+		if duration == 0 && songPos < len(a.playQueue) {
+			if trackID, err := strconv.ParseInt(a.playQueue[songPos], 10, 64); err == nil {
+				if track, err := a.db.trackByID(trackID); err == nil {
+					if d, ok := track["duration"].(float64); ok {
+						duration = d
+					}
+				}
+			}
+		}
 		a.playQueueMu.Unlock()
 		c.writef("elapsed: %.3f\n", elapsed)
 		c.writef("duration: %.3f\n", duration)
