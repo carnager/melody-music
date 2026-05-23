@@ -40,6 +40,16 @@ class MainViewModel : ViewModel() {
     var searchResult by mutableStateOf(SearchResult(emptyList(), emptyList())); private set
     private var searchJob: Job? = null
 
+    // Rating filter (structured)
+    var searchRatingType by mutableStateOf("rating"); private set       // "rating" or "albumrating"
+    var searchRatingOp by mutableStateOf(">="); private set
+    var searchRatingValue by mutableStateOf<Int?>(null); private set    // null = no filter
+
+    // Multi-select
+    var searchSelectionMode by mutableStateOf(false); private set
+    var selectedSearchAlbums by mutableStateOf<Set<Album>>(emptySet()); private set
+    var selectedSearchTracks by mutableStateOf<Set<String>>(emptySet()); private set // keyed by URI
+
     // Devices
     var devices by mutableStateOf<List<DeviceInfo>>(emptyList()); private set
 
@@ -59,10 +69,12 @@ class MainViewModel : ViewModel() {
 
     private var pollJob: Job? = null
     private var downloadJob: Job? = null
+    private var lastPlaylistVersion = 0
 
     init {
         downloadedAlbums = offline.getDownloadedAlbumIds()
         startPolling()
+        startIdle()
         loadArtists()
     }
 
@@ -71,16 +83,35 @@ class MainViewModel : ViewModel() {
         pollJob = viewModelScope.launch {
             while (true) {
                 refresh()
-                delay(800)
+                delay(5000) // Slow poll as fallback; idle handles instant updates
             }
         }
+    }
+
+    private var idleRefreshJob: Job? = null
+
+    private fun startIdle() {
+        mpd.onIdleNotification = { _ ->
+            // Coalesce rapid idle notifications into a single refresh
+            if (idleRefreshJob?.isActive != true) {
+                idleRefreshJob = viewModelScope.launch { refresh() }
+            }
+        }
+        mpd.startIdle()
     }
 
     private suspend fun refresh() {
         try {
             status = mpd.getStatus()
             val curPos = status?.currentSongPos ?: -1
-            queue = mpd.getQueue().map { it.copy(current = it.position == curPos) }
+            val plVersion = status?.playlistVersion ?: 0
+            if (plVersion != lastPlaylistVersion || queue.isEmpty()) {
+                queue = mpd.getQueue().map { it.copy(current = it.position == curPos) }
+                lastPlaylistVersion = plVersion
+            } else {
+                // Just update current position markers
+                queue = queue.map { it.copy(current = it.position == curPos) }
+            }
         } catch (_: Exception) {}
         currentTrackOffline = PlaybackService.instance?.isCurrentTrackOffline ?: false
         // Retry loading artists if connection recovered
@@ -247,17 +278,113 @@ class MainViewModel : ViewModel() {
 
     // --- Search ---
 
+    private fun buildCompositeQuery(): String {
+        var q = searchQuery.trim()
+        val rv = searchRatingValue
+        if (rv != null) {
+            q = "$q ${searchRatingType}${searchRatingOp}$rv"
+        }
+        return q
+    }
+
     fun updateSearch(query: String) {
         searchQuery = query
+        triggerSearch()
+    }
+
+    fun setRatingFilter(type: String, op: String, value: Int?) {
+        searchRatingType = type
+        searchRatingOp = op
+        searchRatingValue = value
+        triggerSearch()
+    }
+
+    fun clearRatingFilter() {
+        searchRatingValue = null
+        triggerSearch()
+    }
+
+    private fun triggerSearch() {
         searchJob?.cancel()
-        if (query.isBlank()) {
+        val composite = buildCompositeQuery()
+        if (composite.isBlank()) {
             searchResult = SearchResult(emptyList(), emptyList())
             return
         }
         searchJob = viewModelScope.launch {
-            delay(200)
-            try { searchResult = mpd.search(query) } catch (_: Exception) {}
+            delay(300)
+            try {
+                val result = mpd.search(composite)
+                if (buildCompositeQuery() == composite) {
+                    searchResult = result
+                }
+            } catch (_: Exception) {
+                if (buildCompositeQuery() == composite) {
+                    searchResult = SearchResult(emptyList(), emptyList())
+                }
+            }
         }
+    }
+
+    // --- Multi-select ---
+
+    fun enterSearchSelectionMode(album: Album? = null, trackUri: String? = null) {
+        searchSelectionMode = true
+        if (album != null) selectedSearchAlbums = setOf(album)
+        if (trackUri != null) selectedSearchTracks = setOf(trackUri)
+    }
+
+    fun exitSearchSelectionMode() {
+        searchSelectionMode = false
+        selectedSearchAlbums = emptySet()
+        selectedSearchTracks = emptySet()
+    }
+
+    fun toggleSearchAlbum(album: Album) {
+        selectedSearchAlbums = if (album in selectedSearchAlbums)
+            selectedSearchAlbums - album else selectedSearchAlbums + album
+    }
+
+    fun toggleSearchTrack(uri: String) {
+        selectedSearchTracks = if (uri in selectedSearchTracks)
+            selectedSearchTracks - uri else selectedSearchTracks + uri
+    }
+
+    fun selectAllSearchAlbums() {
+        selectedSearchAlbums = searchResult.albums.toSet()
+    }
+
+    fun selectAllSearchTracks() {
+        selectedSearchTracks = searchResult.tracks.map { it.uri }.toSet()
+    }
+
+    fun deselectAllSearchAlbums() { selectedSearchAlbums = emptySet() }
+    fun deselectAllSearchTracks() { selectedSearchTracks = emptySet() }
+
+    val searchSelectionCount: Int
+        get() = selectedSearchAlbums.size + selectedSearchTracks.size
+
+    fun executeBatchAction(mode: String) {
+        val albums = selectedSearchAlbums.toList()
+        val trackUris = selectedSearchTracks.toList()
+        viewModelScope.launch {
+            try {
+                if (mode == "replace") {
+                    mpd.queueClear()
+                }
+                val addMode = if (mode == "replace") "add" else mode
+                for (album in albums) {
+                    mpd.addAlbum(album.albumArtist, album.album, addMode)
+                }
+                for (uri in trackUris) {
+                    mpd.addTrack(uri, addMode)
+                }
+                if (mode == "replace") {
+                    mpd.resume()
+                }
+            } catch (_: Exception) {}
+        }
+        exitSearchSelectionMode()
     }
 
     // --- Playback ---

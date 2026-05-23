@@ -54,6 +54,7 @@ func loadTUIConfig() tuiConfig {
 	if _, err := toml.DecodeFile(configPath, &c); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: config: %v\n", err)
 	}
+	applyMPDEnv(&c)
 	if c.MPDHost == "" {
 		c.MPDHost = "localhost"
 	}
@@ -61,6 +62,20 @@ func loadTUIConfig() tuiConfig {
 		c.MPDPort = 6600
 	}
 	return c
+}
+
+func applyMPDEnv(c *tuiConfig) {
+	if h := os.Getenv("MPD_HOST"); h != "" {
+		if host, port, ok := strings.Cut(h, ":"); ok {
+			c.MPDHost = host
+			fmt.Sscanf(port, "%d", &c.MPDPort)
+		} else {
+			c.MPDHost = h
+		}
+	}
+	if p := os.Getenv("MPD_PORT"); p != "" {
+		fmt.Sscanf(p, "%d", &c.MPDPort)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +256,9 @@ func mpdFilterEq(tag, value string) string {
 }
 
 var mpd *mpdClient
+var idleConn *mpdClient      // dedicated connection for MPD idle
+var lastQueueVersion int     // tracks MPD playlist version to skip redundant queue fetches
+var statusFetchTime time.Time // when status was last fetched (for elapsed interpolation)
 
 func reconnectMPD() {
 	if mpd != nil {
@@ -259,16 +277,18 @@ func reconnectMPD() {
 // ---------------------------------------------------------------------------
 
 type playbackStatus struct {
-	State   string
-	Title   string
-	Artist  string
-	Album   string
-	Date    string
-	TimePos float64
-	Dur     float64
-	Volume  int
-	Rating  int
-	SongID  string // X-SongId for rating commands
+	State       string
+	Title       string
+	Artist      string
+	AlbumArtist string
+	Album       string
+	Date        string
+	TimePos     float64
+	Dur         float64
+	Volume      int
+	Rating      int
+	SongID      string // X-SongId for rating commands
+	SongPos     int    // current song position in queue
 }
 
 type queueItem struct {
@@ -323,10 +343,13 @@ type searchResult struct {
 // ---------------------------------------------------------------------------
 
 type tickMsg time.Time
+type idleMsg []string // changed subsystems
 
 type statusMsg struct {
-	status playbackStatus
-	queue  []queueItem
+	status       playbackStatus
+	queue        []queueItem
+	queueVersion int
+	queueChanged bool
 }
 
 type artistsMsg []string
@@ -340,7 +363,10 @@ type albumRatingMsg struct {
 	computed float64
 }
 
+type ratingPopupMsg struct{ rating int }
+
 type searchMsg searchResult
+type searchDebounceMsg struct{ gen int }
 
 type playlistsMsg []playlistEntry
 
@@ -415,6 +441,7 @@ type model struct {
 	qSelected    map[int]bool
 	confirmClear bool
 	qFirstSongID string
+	queueVersion int // MPD playlist version, used to skip redundant queue fetches
 
 	// playlists
 	playlists        []playlistEntry
@@ -422,12 +449,14 @@ type model struct {
 	curPlaylist      string
 
 	// search
-	searching   bool
-	searchInput textinput.Model
-	searchRes   searchResult
-	srCursor    int
-	srOffset    int
-	srTotal     int
+	searching      bool
+	searchInput    textinput.Model
+	searchRes      searchResult
+	srCursor       int
+	srOffset       int
+	srTotal        int
+	searchPending  string // pending debounced query
+	searchDebounce int    // debounce generation counter
 
 	// action menu
 	showMenu   bool
@@ -444,6 +473,12 @@ type model struct {
 
 	// help
 	showHelp bool
+
+	// rating popup
+	showRating    bool
+	ratingCursor  int         // 0=unrate, 1-10 = rating values
+	ratingIsAlbum bool        // true when rating an album
+	ratingAlbum   *albumEntry // album being rated (from album list)
 
 	// devices (outputs)
 	showDevices  bool
@@ -477,6 +512,7 @@ func (m model) Init() tea.Cmd {
 		fetchArtists,
 		fetchStatus,
 		tickCmd(),
+		listenIdle,
 	)
 }
 
@@ -485,9 +521,64 @@ func (m model) Init() tea.Cmd {
 // ---------------------------------------------------------------------------
 
 func tickCmd() tea.Cmd {
-	return tea.Tick(800*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+func connectIdle() {
+	if idleConn != nil {
+		idleConn.close()
+		idleConn = nil
+	}
+	c, err := newMPDClient(cfg.MPDHost, cfg.MPDPort)
+	if err != nil {
+		return
+	}
+	idleConn = c
+}
+
+func listenIdle() tea.Msg {
+	if idleConn == nil {
+		connectIdle()
+		if idleConn == nil {
+			time.Sleep(2 * time.Second)
+			return idleMsg(nil)
+		}
+	}
+
+	// Send idle command (no mutex needed — this connection is exclusively for idle)
+	idleConn.conn.SetDeadline(time.Time{}) // no deadline for idle
+	_, err := idleConn.w.WriteString("idle player playlist mixer options database stored_playlist\n")
+	if err != nil {
+		idleConn.close()
+		idleConn = nil
+		return idleMsg(nil)
+	}
+	if err := idleConn.w.Flush(); err != nil {
+		idleConn.close()
+		idleConn = nil
+		return idleMsg(nil)
+	}
+
+	// Block until server responds with changed subsystems
+	var changed []string
+	for {
+		line, err := idleConn.r.ReadString('\n')
+		if err != nil {
+			idleConn.close()
+			idleConn = nil
+			return idleMsg(nil)
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "OK" {
+			break
+		}
+		if strings.HasPrefix(line, "changed: ") {
+			changed = append(changed, line[9:])
+		}
+	}
+	return idleMsg(changed)
 }
 
 func fetchStatus() tea.Msg {
@@ -498,8 +589,9 @@ func fetchStatus() tea.Msg {
 		}
 	}
 
-	results, err := mpd.cmdBatch([]string{"status", "currentsong", "playlistinfo"})
-	if err != nil || len(results) < 3 {
+	// First fetch status + currentsong
+	results, err := mpd.cmdBatch([]string{"status", "currentsong"})
+	if err != nil || len(results) < 2 {
 		reconnectMPD()
 		return statusMsg{}
 	}
@@ -514,17 +606,33 @@ func fetchStatus() tea.Msg {
 	ps.Volume, _ = strconv.Atoi(st["volume"])
 	ps.Title = cs["Title"]
 	ps.Artist = cs["Artist"]
+	ps.AlbumArtist = cs["AlbumArtist"]
 	ps.Album = cs["Album"]
 	ps.Date = cs["Date"]
 	ps.Rating, _ = strconv.Atoi(cs["X-Rating"])
 	ps.SongID = cs["X-SongId"]
-
-	curPos := -1
+	ps.SongPos = -1
 	if v, ok := st["song"]; ok {
-		curPos, _ = strconv.Atoi(v)
+		ps.SongPos, _ = strconv.Atoi(v)
+	}
+	statusFetchTime = time.Now()
+
+	curPos := ps.SongPos
+
+	// Check if queue version changed
+	qVersion, _ := strconv.Atoi(st["playlist"])
+	if qVersion == lastQueueVersion && lastQueueVersion > 0 {
+		// Queue unchanged — return status only, update current position
+		return statusMsg{status: ps, queueVersion: qVersion, queueChanged: false}
 	}
 
-	groups := parseGroups(results[2], "file")
+	// Queue changed — fetch it
+	qResults, err := mpd.cmdBatch([]string{"playlistinfo"})
+	if err != nil || len(qResults) < 1 {
+		return statusMsg{status: ps, queueVersion: qVersion, queueChanged: false}
+	}
+
+	groups := parseGroups(qResults[0], "file")
 	queue := make([]queueItem, 0, len(groups))
 	for _, g := range groups {
 		pos, _ := strconv.Atoi(g["Pos"])
@@ -547,7 +655,8 @@ func fetchStatus() tea.Msg {
 		})
 	}
 
-	return statusMsg{status: ps, queue: queue}
+	lastQueueVersion = qVersion
+	return statusMsg{status: ps, queue: queue, queueVersion: qVersion, queueChanged: true}
 }
 
 func fetchArtists() tea.Msg {
@@ -658,6 +767,25 @@ func fetchAlbumRating(albumArtist, album, date string) tea.Cmd {
 	}
 }
 
+func fetchAlbumRatingForPopup(albumArtist, album, date string) tea.Cmd {
+	return func() tea.Msg {
+		if mpd == nil {
+			return ratingPopupMsg{}
+		}
+		lines, err := mpd.cmd("getalbumrating " + mpdEscape(albumArtist) + " " + mpdEscape(album) + " " + mpdEscape(date))
+		if err != nil {
+			return ratingPopupMsg{}
+		}
+		var rating int
+		for _, l := range lines {
+			if strings.HasPrefix(l, "rating: ") {
+				rating, _ = strconv.Atoi(strings.TrimPrefix(l, "rating: "))
+			}
+		}
+		return ratingPopupMsg{rating: rating}
+	}
+}
+
 func fetchPlaylists() tea.Msg {
 	if mpd == nil {
 		return playlistsMsg(nil)
@@ -757,16 +885,88 @@ func addToPlaylist(playlistName, uri string) tea.Cmd {
 	}
 }
 
+func parseRatingFilter(w string) (tag, op, value string, ok bool) {
+	wl := strings.ToLower(w)
+	for _, prefix := range []string{"albumrating", "rating"} {
+		if !strings.HasPrefix(wl, prefix) {
+			continue
+		}
+		rest := w[len(prefix):]
+		for _, op := range []string{">=", "<=", ">", "<", "="} {
+			if strings.HasPrefix(rest, op) {
+				val := rest[len(op):]
+				if val != "" {
+					mpdOp := op
+					if mpdOp == "=" {
+						mpdOp = "=="
+					}
+					return prefix, mpdOp, val, true
+				}
+			}
+		}
+	}
+	return "", "", "", false
+}
+
+func buildSearchCmd(q string) string {
+	words := strings.Fields(q)
+	var textParts []string
+	var filters []string
+	for _, w := range words {
+		if tag, op, val, ok := parseRatingFilter(w); ok {
+			filters = append(filters, "("+tag+" "+op+" '"+val+"')")
+		} else {
+			textParts = append(textParts, w)
+		}
+	}
+	if len(filters) == 0 {
+		return "search any " + mpdEscape(strings.Join(textParts, " "))
+	}
+	var parts []string
+	if len(textParts) > 0 {
+		parts = append(parts, "\"(any contains '"+mpdEscapeFilter(strings.Join(textParts, " "))+"')\"")
+	}
+	for _, f := range filters {
+		parts = append(parts, "\""+f+"\"")
+	}
+	return "search " + strings.Join(parts, " ")
+}
+
+func mpdEscapeFilter(s string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(s, "\\", "\\\\"), "'", "\\'")
+}
+
+func matchesAll(text string, terms []string) bool {
+	for _, t := range terms {
+		if !strings.Contains(text, t) {
+			return false
+		}
+	}
+	return true
+}
+
+func searchTextTerms(q string) []string {
+	var terms []string
+	for _, w := range strings.Fields(q) {
+		if _, _, _, ok := parseRatingFilter(w); !ok {
+			terms = append(terms, strings.ToLower(w))
+		}
+	}
+	return terms
+}
+
 func doSearch(q string) tea.Cmd {
 	return func() tea.Msg {
 		if mpd == nil {
 			return searchMsg(searchResult{})
 		}
-		lines, err := mpd.cmd("search any " + mpdEscape(q))
+		cmd := buildSearchCmd(q)
+		lines, err := mpd.cmd(cmd)
 		if err != nil {
 			return searchMsg(searchResult{})
 		}
 		groups := parseGroups(lines, "file")
+		terms := searchTextTerms(q)
 
 		// Deduplicate albums and collect tracks
 		albumSeen := map[string]bool{}
@@ -790,13 +990,17 @@ func doSearch(q string) tea.Cmd {
 			}
 			key := aa + "\x00" + g["Album"] + "\x00" + g["Date"]
 			if !albumSeen[key] && g["Album"] != "" {
-				albumSeen[key] = true
-				albums = append(albums, albumEntry{
-					ID:          key,
-					AlbumArtist: aa,
-					Album:       g["Album"],
-					Date:        g["Date"],
-				})
+				// Only show album if artist or album name matches the text query
+				albumText := strings.ToLower(aa + " " + g["Album"])
+				if matchesAll(albumText, terms) {
+					albumSeen[key] = true
+					albums = append(albums, albumEntry{
+						ID:          key,
+						AlbumArtist: aa,
+						Album:       g["Album"],
+						Date:        g["Date"],
+					})
+				}
 			}
 		}
 		return searchMsg(searchResult{Albums: albums, Tracks: tracks})
@@ -1070,21 +1274,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		return m, tea.Batch(tea.Cmd(fetchStatus), tickCmd())
+		// Tick is only for elapsed time interpolation redraws — no status fetch
+		if m.status.State == "playing" {
+			m.status.TimePos += time.Since(statusFetchTime).Seconds()
+			statusFetchTime = time.Now()
+			if m.status.TimePos > m.status.Dur && m.status.Dur > 0 {
+				m.status.TimePos = m.status.Dur
+			}
+		}
+		return m, tickCmd()
+
+	case idleMsg:
+		// Server notified us of changes — fetch status immediately
+		return m, tea.Batch(tea.Cmd(fetchStatus), tea.Cmd(listenIdle))
 
 	case statusMsg:
 		m.status = msg.status
-		newFirstID := ""
-		if len(msg.queue) > 0 {
-			newFirstID = msg.queue[0].SongID
+		m.queueVersion = msg.queueVersion
+		if msg.queueChanged {
+			newFirstID := ""
+			if len(msg.queue) > 0 {
+				newFirstID = msg.queue[0].SongID
+			}
+			if newFirstID != m.qFirstSongID {
+				m.qCursor = 0
+				m.qOffset = 0
+				m.qSelected = nil
+				m.qFirstSongID = newFirstID
+			}
+			m.queue = msg.queue
+		} else if len(m.queue) > 0 {
+			// Update current position markers without refetching queue
+			for i := range m.queue {
+				m.queue[i].Current = m.queue[i].Position == m.status.SongPos
+			}
 		}
-		if newFirstID != m.qFirstSongID {
-			m.qCursor = 0
-			m.qOffset = 0
-			m.qSelected = nil
-			m.qFirstSongID = newFirstID
-		}
-		m.queue = msg.queue
 		return m, nil
 
 	case artistsMsg:
@@ -1112,6 +1336,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.albumComputedRating = msg.computed
 		return m, nil
 
+	case ratingPopupMsg:
+		if m.showRating {
+			m.ratingCursor = msg.rating
+		}
+		return m, nil
+
 	case playlistsMsg:
 		m.playlists = msg
 		m.libMode = libPlaylists
@@ -1137,6 +1367,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.searchRes = searchResult(msg)
 		m.srTotal = len(m.searchRes.Albums) + len(m.searchRes.Tracks)
 		m.srCursor = 0
+		return m, nil
+
+	case searchDebounceMsg:
+		if msg.gen == m.searchDebounce && m.searchPending != "" {
+			q := m.searchPending
+			m.searchPending = ""
+			return m, doSearch(q)
+		}
 		return m, nil
 
 	case devicesMsg:
@@ -1181,13 +1419,17 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+c" {
 		return m, tea.Quit
 	}
-	if key == "q" && !m.searching && !m.showMenu && !m.showHelp {
+	if key == "q" && !m.searching && !m.showMenu && !m.showHelp && !m.showRating {
 		return m, tea.Quit
 	}
 
 	if m.showHelp {
 		m.showHelp = false
 		return m, nil
+	}
+
+	if m.showRating {
+		return m.handleRatingKey(key)
 	}
 
 	if m.showPlPicker {
@@ -1228,6 +1470,35 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, doRandomAlbum()
 	case "R":
 		return m, doRandomTracks()
+	case "*":
+		// Open rating popup — context-aware
+		m.showRating = true
+		m.ratingIsAlbum = false
+		// Determine current rating to position cursor
+		if m.focus == panelQueue && m.qCursor < len(m.queue) {
+			m.ratingCursor = m.queue[m.qCursor].Rating
+		} else if m.focus == panelLibrary && m.libMode == libAlbums {
+			// Rating an album from the album list
+			di := m.dataIndex()
+			if di >= 0 && di < len(m.albums) {
+				m.ratingIsAlbum = true
+				m.ratingCursor = 0 // will be fetched
+				a := m.albums[di]
+				m.ratingAlbum = &a
+				return m, fetchAlbumRatingForPopup(a.AlbumArtist, a.Album, a.Date)
+			}
+		} else if m.focus == panelLibrary && m.libMode == libTracks {
+			di := m.dataIndex()
+			if di >= 0 && di < len(m.tracks) && m.tracks[di].XSongID != "" {
+				m.ratingCursor = m.tracks[di].Rating
+			} else {
+				// No track under cursor, default to current song
+				m.ratingCursor = m.status.Rating
+			}
+		} else {
+			m.ratingCursor = m.status.Rating
+		}
+		return m, nil
 	case "u":
 		return m, mpdCommand("update")
 	case "?":
@@ -1244,26 +1515,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.focus = panelQueue
 		} else {
 			m.focus = panelLibrary
-		}
-		return m, nil
-	case "0", "1", "2", "3", "4", "5":
-		// Rate: context-aware
-		if m.focus == panelQueue && m.qCursor < len(m.queue) {
-			q := m.queue[m.qCursor]
-			if q.XSongID != "" {
-				return m, rateTrack(q.XSongID, key)
-			}
-		} else if m.focus == panelLibrary && m.libMode == libTracks {
-			di := m.dataIndex()
-			if di >= 0 && di < len(m.tracks) && m.tracks[di].XSongID != "" {
-				return m, rateTrack(m.tracks[di].XSongID, key)
-			}
-			// On back row or track without SongID → rate album
-			if m.curAlbum != nil {
-				return m, rateAlbum(m.curAlbum.AlbumArtist, m.curAlbum.Album, m.curAlbum.Date, key)
-			}
-		} else if m.status.SongID != "" {
-			return m, rateTrack(m.status.SongID, key)
 		}
 		return m, nil
 	}
@@ -1769,8 +2020,21 @@ func (m model) handleSearchKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd) 
 	prev := m.searchInput.Value()
 	m.searchInput, cmd = m.searchInput.Update(msg)
 	cur := m.searchInput.Value()
-	if cur != prev && strings.TrimSpace(cur) != "" {
-		return m, tea.Batch(cmd, doSearch(strings.TrimSpace(cur)))
+	if cur != prev {
+		q := strings.TrimSpace(cur)
+		if q != "" {
+			m.searchDebounce++
+			m.searchPending = q
+			gen := m.searchDebounce
+			debounceCmd := tea.Tick(300*time.Millisecond, func(time.Time) tea.Msg {
+				return searchDebounceMsg{gen: gen}
+			})
+			return m, tea.Batch(cmd, debounceCmd)
+		}
+		// Cleared input — reset results
+		m.searchRes = searchResult{}
+		m.srTotal = 0
+		m.srCursor = 0
 	}
 	return m, cmd
 }
@@ -1802,7 +2066,11 @@ func (m model) searchDrillIn() (tea.Model, tea.Cmd) {
 	if idx < nAlbums {
 		a := m.searchRes.Albums[idx]
 		m.searching = false
-		return m, fetchTracks(a.ID)
+		m.curArtist = a.AlbumArtist
+		m.curAlbum = &a
+		m.albumRating = 0
+		m.albumComputedRating = 0
+		return m, tea.Batch(fetchTracks(a.ID), fetchAlbumRating(a.AlbumArtist, a.Album, a.Date))
 	}
 	return m, nil
 }
@@ -1828,6 +2096,98 @@ func (m model) handleDeviceKey(key string) (tea.Model, tea.Cmd) {
 			m.showDevices = false
 			return m, setActiveDevice(dev.ID)
 		}
+	}
+	return m, nil
+}
+
+func (m model) handleRatingKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc", "q", "*":
+		m.showRating = false
+		return m, nil
+	case "j", "down":
+		if m.ratingCursor < 10 {
+			m.ratingCursor++
+		}
+		return m, nil
+	case "k", "up":
+		if m.ratingCursor > 0 {
+			m.ratingCursor--
+		}
+		return m, nil
+	case "tab":
+		// Toggle track/album mode
+		m.ratingIsAlbum = !m.ratingIsAlbum
+		if m.ratingIsAlbum {
+			// Determine album context and fetch its rating
+			var aa, al, dt string
+			if m.ratingAlbum != nil {
+				aa, al, dt = m.ratingAlbum.AlbumArtist, m.ratingAlbum.Album, m.ratingAlbum.Date
+			} else if m.curAlbum != nil {
+				aa, al, dt = m.curAlbum.AlbumArtist, m.curAlbum.Album, m.curAlbum.Date
+				m.ratingCursor = m.albumRating
+				return m, nil
+			} else if m.status.Album != "" {
+				aa, al, dt = m.status.AlbumArtist, m.status.Album, m.status.Date
+			}
+			if aa != "" {
+				m.ratingAlbum = &albumEntry{AlbumArtist: aa, Album: al, Date: dt}
+				return m, fetchAlbumRatingForPopup(aa, al, dt)
+			}
+			// No album context, revert
+			m.ratingIsAlbum = false
+		} else {
+			// Switch back to track
+			m.ratingAlbum = nil
+			if m.focus == panelQueue && m.qCursor < len(m.queue) {
+				m.ratingCursor = m.queue[m.qCursor].Rating
+			} else if m.focus == panelLibrary && m.libMode == libTracks {
+				di := m.dataIndex()
+				if di >= 0 && di < len(m.tracks) {
+					m.ratingCursor = m.tracks[di].Rating
+				} else {
+					m.ratingCursor = m.status.Rating
+				}
+			} else {
+				m.ratingCursor = m.status.Rating
+			}
+		}
+		return m, nil
+	case "enter":
+		m.showRating = false
+		ratingStr := strconv.Itoa(m.ratingCursor)
+		if m.ratingIsAlbum {
+			// Album rating — from album list or track view
+			if m.ratingAlbum != nil {
+				return m, rateAlbum(m.ratingAlbum.AlbumArtist, m.ratingAlbum.Album, m.ratingAlbum.Date, ratingStr)
+			}
+			if m.curAlbum != nil {
+				return m, rateAlbum(m.curAlbum.AlbumArtist, m.curAlbum.Album, m.curAlbum.Date, ratingStr)
+			}
+			return m, nil
+		}
+		// Track rating — same context logic as before
+		if m.focus == panelQueue && m.qCursor < len(m.queue) {
+			q := m.queue[m.qCursor]
+			if q.XSongID != "" {
+				return m, rateTrack(q.XSongID, ratingStr)
+			}
+		} else if m.focus == panelLibrary && m.libMode == libTracks {
+			di := m.dataIndex()
+			if di >= 0 && di < len(m.tracks) && m.tracks[di].XSongID != "" {
+				return m, rateTrack(m.tracks[di].XSongID, ratingStr)
+			}
+		} else if m.status.SongID != "" {
+			return m, rateTrack(m.status.SongID, ratingStr)
+		}
+		return m, nil
+	case "0":
+		m.ratingCursor = 0
+		return m, nil
+	case "1", "2", "3", "4", "5":
+		n, _ := strconv.Atoi(key)
+		m.ratingCursor = n * 2 // Jump to the full star value
+		return m, nil
 	}
 	return m, nil
 }
@@ -1875,6 +2235,9 @@ func (m model) View() string {
 
 	if m.showHelp {
 		return m.helpView()
+	}
+	if m.showRating {
+		return m.ratingView()
 	}
 	if m.showPlPicker {
 		return m.plPickerView()
@@ -1953,8 +2316,8 @@ func (m model) libraryView(w, h int) string {
 			displayRating = int(math.Round(m.albumComputedRating))
 			if displayRating < 1 {
 				displayRating = 1
-			} else if displayRating > 5 {
-				displayRating = 5
+			} else if displayRating > 10 {
+				displayRating = 10
 			}
 		}
 		if displayRating > 0 {
@@ -2218,7 +2581,7 @@ func (m model) playerView() string {
 	line1 := titleStyle.Render(stateIcon) + " " + truncate(np, w-4-12) + ratingStr
 	line2 := timeL + " " + bar + " " + timeR
 
-	hints := dimStyle.Render("[/]search [?]help [space]play [<>]prev/next [s]stop [r]album [R]tracks [P]playlists [D]devices [0-5]rate [q]quit")
+	hints := dimStyle.Render("[/]search [?]help [space]play [<>]prev/next [s]stop [r]album [R]tracks [P]playlists [D]devices [*]rate [q]quit")
 
 	return line1 + "\n" + line2 + "\n" + hints
 }
@@ -2238,7 +2601,7 @@ func (m model) helpView() string {
 			"  u          Update library",
 			"  P          Playlists",
 			"  D          Device picker",
-			"  0-5        Rate track (0=unrate)",
+			"  *          Rate track/album",
 			"  Tab        Switch panel focus",
 			"  q          Quit",
 		}, "\n")},
@@ -2366,34 +2729,90 @@ func (m model) deviceView() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
-func (m model) menuView() string {
-	di := m.dataIndex()
-	var label string
-	switch m.libMode {
-	case libArtists:
-		if di >= 0 && di < len(m.artists) {
-			label = m.artists[di]
-		}
-	case libAlbums:
-		if di >= 0 && di < len(m.albums) {
-			a := m.albums[di]
-			label = a.Album
-			if a.Date != "" && a.Date != "0000" {
-				label = a.Date + " " + a.Album
+func (m model) ratingView() string {
+	label := "Track Rating"
+	if m.ratingIsAlbum {
+		label = "Album Rating"
+	}
+	header := titleStyle.Render(label) + "\n\n"
+
+	var items []string
+	// 0 = unrate
+	for i := 0; i <= 10; i++ {
+		var line string
+		if i == 0 {
+			line = "  No rating"
+		} else {
+			line = "  " + renderRating(i)
+			// Add numeric label
+			if i%2 == 0 {
+				line += fmt.Sprintf("  %d", i/2)
+			} else {
+				line += fmt.Sprintf("  %d.5", i/2)
 			}
 		}
-	case libTracks:
-		if di >= 0 && di < len(m.tracks) {
-			label = m.tracks[di].Title
+
+		s := lipgloss.NewStyle()
+		if i == m.ratingCursor {
+			s = s.Background(selectedBg).Foreground(lipgloss.Color("#ffffff")).Bold(true)
+		}
+		items = append(items, s.Render(line))
+	}
+
+	hintStr := "[↑↓]navigate [1-5]jump [tab]track/album [enter]confirm [esc]cancel"
+	hints := "\n\n" + dimStyle.Render(hintStr)
+	content := header + strings.Join(items, "\n") + hints
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(accentColor).
+		Padding(1, 3).
+		Render(content)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+func (m model) menuView() string {
+	var label string
+	optCount := m.menuOptionCount()
+
+	if m.menuSource == "search" {
+		idx := m.srCursor
+		nAlbums := len(m.searchRes.Albums)
+		if idx < nAlbums {
+			a := m.searchRes.Albums[idx]
+			label = a.AlbumArtist + " - " + a.Album
+			if a.Date != "" && a.Date != "0000" {
+				label = a.AlbumArtist + " - " + a.Date + " " + a.Album
+			}
+		} else if idx-nAlbums < len(m.searchRes.Tracks) {
+			t := m.searchRes.Tracks[idx-nAlbums]
+			label = t.Artist + " - " + t.Title
+		}
+	} else {
+		di := m.dataIndex()
+		switch m.libMode {
+		case libArtists:
+			if di >= 0 && di < len(m.artists) {
+				label = m.artists[di]
+			}
+		case libAlbums:
+			if di >= 0 && di < len(m.albums) {
+				a := m.albums[di]
+				label = a.Album
+				if a.Date != "" && a.Date != "0000" {
+					label = a.Date + " " + a.Album
+				}
+			}
+		case libTracks:
+			if di >= 0 && di < len(m.tracks) {
+				label = m.tracks[di].Title
+			}
 		}
 	}
 
 	header := titleStyle.Render("Action") + "  " + label + "\n\n"
 	var items []string
-	optCount := len(menuOptions)
-	if m.libMode == libTracks {
-		optCount = 3
-	}
 	for i := 0; i < optCount; i++ {
 		prefix := "  "
 		if i == m.menuCursor {
@@ -2501,7 +2920,10 @@ func renderRating(r int) string {
 	if r <= 0 {
 		return ""
 	}
-	return strings.Repeat("★", r) + strings.Repeat("☆", 5-r)
+	full := r / 2
+	half := r % 2
+	empty := 5 - full - half
+	return strings.Repeat("★", full) + strings.Repeat("⯪", half) + strings.Repeat("☆", empty)
 }
 
 func fmtTime(s float64) string {

@@ -178,8 +178,8 @@ func (s *scanner) fullScan() error {
 			return fmt.Errorf("prepare album stmt: %w", err)
 		}
 		stmtTrack, err := tx.Prepare(`INSERT INTO tracks(album_id, artist, title, track_number, disc_number,
-			duration, path, file_modified, replay_gain_track, replay_gain_album, peak_track, peak_album)
-			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			duration, path, file_modified, replay_gain_track, replay_gain_album, peak_track, peak_album, rating_hash)
+			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(path) DO UPDATE SET
 				album_id = excluded.album_id,
 				artist = excluded.artist,
@@ -191,7 +191,8 @@ func (s *scanner) fullScan() error {
 				replay_gain_track = excluded.replay_gain_track,
 				replay_gain_album = excluded.replay_gain_album,
 				peak_track = excluded.peak_track,
-				peak_album = excluded.peak_album`)
+				peak_album = excluded.peak_album,
+				rating_hash = excluded.rating_hash`)
 		if err != nil {
 			tx.Rollback()
 			return fmt.Errorf("prepare track stmt: %w", err)
@@ -219,9 +220,10 @@ func (s *scanner) fullScan() error {
 				continue
 			}
 
+			rHash := trackRatingHash(t.albumArtist, t.album, t.Title, t.TrackNumber)
 			_, err := stmtTrack.Exec(albumID, t.Artist, t.Title, t.TrackNumber, t.DiscNumber,
 				t.Duration, t.Path, t.FileModified,
-				t.ReplayGainTrack, t.ReplayGainAlbum, t.PeakTrack, t.PeakAlbum)
+				t.ReplayGainTrack, t.ReplayGainAlbum, t.PeakTrack, t.PeakAlbum, rHash)
 			if err != nil {
 				scanErrors++
 				if scanErrors <= 10 {

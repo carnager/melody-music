@@ -1,10 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,14 +13,13 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/carnager/melody/internal/shared"
 )
 
 type config struct {
-	API struct {
-		Address string `toml:"address"`
-		Secret  string `toml:"secret"`
-	} `toml:"api"`
+	MPD struct {
+		Host string `toml:"host"`
+		Port int    `toml:"port"`
+	} `toml:"mpd"`
 	Upload struct {
 		Host string `toml:"host"`
 		Path string `toml:"path"`
@@ -31,123 +30,208 @@ type config struct {
 }
 
 type exportAlbum struct {
-	ID      string `json:"id"`
-	Artist  string `json:"artist"`
-	Album   string `json:"album"`
-	Year    string `json:"year"`
-	YearInt int    `json:"year_int"`
-	Rating  int    `json:"rating"`
+	Artist  string  `json:"artist"`
+	Album   string  `json:"album"`
+	Year    string  `json:"year"`
+	YearInt int     `json:"year_int"`
+	Rating  int     `json:"rating"`
+	Computed float64 `json:"computed"`
 }
 
-type apiAlbum struct {
-	ID          string `json:"id"`
-	AlbumArtist string `json:"albumartist"`
-	Album       string `json:"album"`
-	Date        string `json:"date"`
-	Rating      any    `json:"rating"`
+// ---------------------------------------------------------------------------
+// MPD client (minimal, just what we need)
+// ---------------------------------------------------------------------------
+
+type mpdClient struct {
+	conn net.Conn
+	r    *bufio.Reader
+	w    *bufio.Writer
 }
+
+func newMPDClient(host string, port int) (*mpdClient, error) {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	c := &mpdClient{conn: conn, r: bufio.NewReader(conn), w: bufio.NewWriter(conn)}
+	line, err := c.r.ReadString('\n')
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if !strings.HasPrefix(line, "OK MPD") {
+		conn.Close()
+		return nil, fmt.Errorf("unexpected greeting: %s", strings.TrimSpace(line))
+	}
+	return c, nil
+}
+
+func (c *mpdClient) cmd(command string) ([]string, error) {
+	c.conn.SetDeadline(time.Now().Add(30 * time.Second))
+	if _, err := c.w.WriteString(command + "\n"); err != nil {
+		return nil, err
+	}
+	if err := c.w.Flush(); err != nil {
+		return nil, err
+	}
+	var lines []string
+	for {
+		line, err := c.r.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "OK" {
+			return lines, nil
+		}
+		if strings.HasPrefix(line, "ACK ") {
+			return nil, fmt.Errorf("mpd: %s", line)
+		}
+		lines = append(lines, line)
+	}
+}
+
+func (c *mpdClient) close() { c.conn.Close() }
+
+func mpdQuote(s string) string {
+	return `"` + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `"`, `\"`) + `"`
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 
 func main() {
 	start := time.Now()
-	logf(start, "Script started. Initializing configuration...")
+	logf(start, "Starting...")
 
 	cfg, err := loadConfig()
 	if err != nil {
 		fatal(start, err)
 	}
 
-	syncTargetHTML := filepath.Join(cfg.Upload.Host+":"+cfg.Upload.Path, "index.html")
-	tempHTMLFile := cfg.Output.TempFile
-
-	logf(start, "Loading albums from Melody API...")
-	albumsRaw, err := fetchAlbums(cfg.API.Address, cfg.API.Secret)
+	logf(start, "Connecting to melodyd at %s:%d...", cfg.MPD.Host, cfg.MPD.Port)
+	mpd, err := newMPDClient(cfg.MPD.Host, cfg.MPD.Port)
 	if err != nil {
-		fatal(start, fmt.Errorf("fetch albums: %w", err))
+		fatal(start, fmt.Errorf("connect: %w", err))
+	}
+	defer mpd.close()
+
+	logf(start, "Fetching albums...")
+	lines, err := mpd.cmd("list Album group AlbumArtist group Date")
+	if err != nil {
+		fatal(start, fmt.Errorf("list albums: %w", err))
 	}
 
-	albums := make([]exportAlbum, 0, len(albumsRaw))
-	for _, raw := range albumsRaw {
-		year := stringify(raw["date"])
-		yearInt, _ := strconv.Atoi(year)
-		albums = append(albums, exportAlbum{
-			ID:      stringify(raw["id"]),
-			Artist:  fallback(stringify(raw["albumartist"]), "Unknown Artist"),
-			Album:   fallback(stringify(raw["album"]), "Unknown Album"),
-			Year:    fallback(year, "N/A"),
+	type rawAlbum struct {
+		AlbumArtist, Album, Date string
+	}
+	var raws []rawAlbum
+	var cur rawAlbum
+	for _, l := range lines {
+		k, v, ok := strings.Cut(l, ": ")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "AlbumArtist":
+			cur.AlbumArtist = v
+		case "Date":
+			cur.Date = v
+		case "Album":
+			cur.Album = v
+			raws = append(raws, cur)
+		}
+	}
+	logf(start, "Found %d albums, fetching ratings...", len(raws))
+
+	albums := make([]exportAlbum, 0, len(raws))
+	for _, raw := range raws {
+		yearInt, _ := strconv.Atoi(raw.Date)
+		ea := exportAlbum{
+			Artist:  fallback(raw.AlbumArtist, "Unknown Artist"),
+			Album:   fallback(raw.Album, "Unknown Album"),
+			Year:    fallback(raw.Date, "N/A"),
 			YearInt: yearInt,
-			Rating:  ratingInt(raw["rating"]),
-		})
+		}
+
+		ratingLines, err := mpd.cmd("getalbumrating " + mpdQuote(raw.AlbumArtist) + " " + mpdQuote(raw.Album) + " " + mpdQuote(raw.Date))
+		if err == nil {
+			for _, rl := range ratingLines {
+				if strings.HasPrefix(rl, "rating: ") {
+					ea.Rating, _ = strconv.Atoi(strings.TrimPrefix(rl, "rating: "))
+				}
+				if strings.HasPrefix(rl, "computed: ") {
+					ea.Computed, _ = strconv.ParseFloat(strings.TrimPrefix(rl, "computed: "), 64)
+				}
+			}
+		}
+		albums = append(albums, ea)
 	}
 
 	payload, err := json.Marshal(albums)
 	if err != nil {
-		fatal(start, fmt.Errorf("marshal album payload: %w", err))
+		fatal(start, fmt.Errorf("marshal: %w", err))
 	}
-	if err := os.WriteFile(tempHTMLFile, []byte(renderHTML(string(payload))), 0o644); err != nil {
+
+	tempFile := cfg.Output.TempFile
+	if err := os.WriteFile(tempFile, []byte(renderHTML(string(payload))), 0o644); err != nil {
 		fatal(start, fmt.Errorf("write html: %w", err))
 	}
-	logf(start, "HTML generation complete.")
+	logf(start, "HTML generated (%d albums)", len(albums))
 
-	logf(start, "Syncing HTML to %s...", syncTargetHTML)
-	cmd := exec.Command("scp", tempHTMLFile, syncTargetHTML)
+	target := cfg.Upload.Host + ":" + cfg.Upload.Path + "/index.html"
+	logf(start, "Uploading to %s...", target)
+	cmd := exec.Command("scp", tempFile, target)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		_ = os.Remove(tempHTMLFile)
+		_ = os.Remove(tempFile)
 		fatal(start, fmt.Errorf("scp failed: %s", strings.TrimSpace(string(output))))
 	}
-	_ = os.Remove(tempHTMLFile)
-	logf(start, "Script finished successfully.")
+	_ = os.Remove(tempFile)
+	logf(start, "Done.")
 }
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
 
 func loadConfig() (config, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return config{}, err
 	}
-	xdgConfig := getenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	confDir := filepath.Join(xdgConfig, "melody")
-	confPath := filepath.Join(confDir, "melody-musiclist.toml")
-	if err := os.MkdirAll(confDir, 0o755); err != nil {
+	xdgConfig := os.Getenv("XDG_CONFIG_HOME")
+	if xdgConfig == "" {
+		xdgConfig = filepath.Join(home, ".config")
+	}
+	confPath := filepath.Join(xdgConfig, "melody", "melody-musiclist.toml")
+	_ = os.MkdirAll(filepath.Dir(confPath), 0o755)
+
+	if _, err := os.Stat(confPath); os.IsNotExist(err) {
+		_ = os.WriteFile(confPath, []byte(defaultConfig()), 0o644)
+	}
+
+	var cfg config
+	if _, err := toml.DecodeFile(confPath, &cfg); err != nil {
 		return config{}, err
 	}
-	if _, err := os.Stat(confPath); os.IsNotExist(err) {
-		if err := os.WriteFile(confPath, []byte(defaultConfigText()), 0o644); err != nil {
-			return config{}, err
+	if h := os.Getenv("MPD_HOST"); h != "" {
+		if host, port, ok := strings.Cut(h, ":"); ok {
+			cfg.MPD.Host = host
+			fmt.Sscanf(port, "%d", &cfg.MPD.Port)
+		} else {
+			cfg.MPD.Host = h
 		}
 	}
-
-	var raw map[string]any
-	if _, err := toml.DecodeFile(confPath, &raw); err != nil {
-		return config{}, err
+	if p := os.Getenv("MPD_PORT"); p != "" {
+		fmt.Sscanf(p, "%d", &cfg.MPD.Port)
 	}
-	var cfg config
-	api, _ := raw["api"].(map[string]any)
-	upload, _ := raw["upload"].(map[string]any)
-	output, _ := raw["output"].(map[string]any)
-	cfg.API.Address = stringify(api["address"])
-	cfg.Upload.Host = stringify(upload["host"])
-	cfg.Upload.Path = stringify(upload["path"])
-	cfg.Output.TempFile = stringify(output["temp_file"])
-	applyDefaults(&cfg)
-	return cfg, nil
-}
-
-func defaultConfigText() string {
-	return `[api]
-address = "local"
-
-[upload]
-host = "proteus"
-path = "/srv/http/list"
-
-[output]
-temp_file = "/tmp/musiclist_albums_only.html"
-`
-}
-
-func applyDefaults(cfg *config) {
-	if cfg.API.Address == "" {
-		cfg.API.Address = shared.LocalAPIConfigValue
+	if cfg.MPD.Host == "" {
+		cfg.MPD.Host = "localhost"
+	}
+	if cfg.MPD.Port == 0 {
+		cfg.MPD.Port = 6600
 	}
 	if cfg.Upload.Host == "" {
 		cfg.Upload.Host = "proteus"
@@ -156,63 +240,28 @@ func applyDefaults(cfg *config) {
 		cfg.Upload.Path = "/srv/http/list"
 	}
 	if cfg.Output.TempFile == "" {
-		cfg.Output.TempFile = "/tmp/musiclist_albums_only.html"
+		cfg.Output.TempFile = "/tmp/musiclist.html"
 	}
+	return cfg, nil
 }
 
-func fetchAlbums(address, secret string) ([]map[string]any, error) {
-	baseURL, useLocalSocket, socketPath, err := shared.APIBaseURLFromAddress(address)
-	if err != nil {
-		return nil, err
-	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	if useLocalSocket {
-		client = shared.NewLocalHTTPClient(30*time.Second, socketPath)
-	}
+func defaultConfig() string {
+	return `[mpd]
+host = "localhost"
+port = 6600
 
-	req, err := http.NewRequest("GET", baseURL+"/albums", nil)
-	if err != nil {
-		return nil, err
-	}
-	if secret != "" {
-		req.Header.Set("Authorization", "Bearer "+secret)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+[upload]
+host = "proteus"
+path = "/srv/http/list"
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("http %d from %s/albums: %s", resp.StatusCode, baseURL, strings.TrimSpace(string(body)))
-	}
-
-	var albums []apiAlbum
-	if err := json.NewDecoder(resp.Body).Decode(&albums); err != nil {
-		return nil, err
-	}
-
-	out := make([]map[string]any, 0, len(albums))
-	for _, album := range albums {
-		out = append(out, map[string]any{
-			"id":          album.ID,
-			"albumartist": album.AlbumArtist,
-			"album":       album.Album,
-			"date":        album.Date,
-			"rating":      album.Rating,
-		})
-	}
-	return out, nil
+[output]
+temp_file = "/tmp/musiclist.html"
+`
 }
 
-func ratingInt(value any) int {
-	rating, _ := strconv.Atoi(strings.TrimSpace(stringify(value)))
-	if rating < 0 || rating > 10 {
-		return 0
-	}
-	return rating
-}
+// ---------------------------------------------------------------------------
+// HTML
+// ---------------------------------------------------------------------------
 
 func renderHTML(jsonData string) string {
 	return fmt.Sprintf(`<!DOCTYPE html>
@@ -234,10 +283,10 @@ func renderHTML(jsonData string) string {
     th .sort-icon { display: inline-block; margin-left: 5px; opacity: 0.4; width: 1em; vertical-align: middle; }
     th.sorted-asc .sort-icon::after { content: ' ▲'; opacity: 1; }
     th.sorted-desc .sort-icon::after { content: ' ▼'; opacity: 1; }
-    .progress-bar-text { font-size: 0.75rem; line-height: 1rem; font-weight: 600; color: #ffffff; padding: 0 0.25rem; text-shadow: 0px 0px 2px rgba(0, 0, 0, 0.7); }
-    #darkModeToggle .sun-icon, #darkModeToggle .moon-icon { display: none; }
-    html:not(.dark) #darkModeToggle .sun-icon { display: inline-block; }
-    html.dark #darkModeToggle .moon-icon { display: inline-block; }
+    .star { color: #d1d5db; }
+    .star.filled { color: #eab308; }
+    html.dark .star { color: #4b5563; }
+    html.dark .star.filled { color: #eab308; }
     .alpha-button.active { background-color: #4f46e5; color: white; }
     html.dark .alpha-button.active { background-color: #6366f1; }
   </style>
@@ -320,11 +369,12 @@ func renderHTML(jsonData string) string {
     if (!str) return '';
     return str.normalize("NFD").replace(/\p{Diacritic}/gu, "").toUpperCase();
   }
-  function getRatingColor(rating) {
-    if (rating === 0) return 'bg-gray-400 dark:bg-gray-600';
-    if (rating < 4) return 'bg-red-500 dark:bg-red-600';
-    if (rating < 7) return 'bg-yellow-500 dark:bg-yellow-600';
-    return 'bg-green-500 dark:bg-green-600';
+  function renderStars(rating) {
+    let html = '';
+    for (let i = 1; i <= 5; i++) {
+      html += '<span class="star' + (i <= rating ? ' filled' : '') + '">★</span>';
+    }
+    return html;
   }
   function generateAlphabetButtons() {
     const availableLetters = new Set();
@@ -363,7 +413,7 @@ func renderHTML(jsonData string) string {
     rawTerms.forEach(term => {
       if (term.startsWith('r=')) {
         const n = parseInt(term.slice(2), 10);
-        if (!isNaN(n) && n >= 0 && n <= 10) ratingFilterValue = n; else textTerms.push(term);
+        if (!isNaN(n) && n >= 0 && n <= 5) ratingFilterValue = n; else textTerms.push(term);
       } else textTerms.push(term);
     });
     let albums = [...allAlbums];
@@ -381,13 +431,9 @@ func renderHTML(jsonData string) string {
     });
     albums.sort((a, b) => {
       let av, bv;
-      if (currentSortColumn === 'year' || currentSortColumn === 'rating') {
-        av = a[currentSortColumn === 'year' ? 'year_int' : 'rating'];
-        bv = b[currentSortColumn === 'year' ? 'year_int' : 'rating'];
-      } else {
-        av = normalizeForSearch(a[currentSortColumn]);
-        bv = normalizeForSearch(b[currentSortColumn]);
-      }
+      if (currentSortColumn === 'year') { av = a.year_int; bv = b.year_int; }
+      else if (currentSortColumn === 'rating') { av = a.rating || a.computed || 0; bv = b.rating || b.computed || 0; }
+      else { av = normalizeForSearch(a[currentSortColumn]); bv = normalizeForSearch(b[currentSortColumn]); }
       let cmp = av > bv ? 1 : av < bv ? -1 : 0;
       return currentSortDirection === 'desc' ? -cmp : cmp;
     });
@@ -407,17 +453,16 @@ func renderHTML(jsonData string) string {
     filteredAndSortedAlbums.slice(start, end).forEach(album => {
       const row = document.createElement('tr');
       row.className = 'hover:bg-gray-50 dark:hover:bg-gray-700';
-      const label = album.rating > 0 ? '<span class="absolute inset-0 flex items-center justify-center progress-bar-text">' + album.rating + '/10</span>' : '';
+      const displayRating = album.rating > 0 ? album.rating : (album.computed > 0 ? Math.round(album.computed) : 0);
+      const isComputed = album.rating === 0 && album.computed > 0;
+      const starsHtml = displayRating > 0
+        ? '<span' + (isComputed ? ' title="Avg of track ratings: ' + album.computed.toFixed(1) + '" style="opacity:0.6"' : '') + '>' + renderStars(displayRating) + '</span>'
+        : '<span class="text-gray-400 dark:text-gray-600 text-xs">—</span>';
       row.innerHTML =
         '<td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">' + album.artist + '</td>' +
         '<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600 dark:text-gray-300">' + album.album + '</td>' +
         '<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600 dark:text-gray-300">' + album.year + '</td>' +
-        '<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600 dark:text-gray-300">' +
-          '<div class="w-full bg-gray-200 dark:bg-gray-600 rounded-full h-4 overflow-hidden relative align-middle">' +
-            '<div class="' + getRatingColor(album.rating) + ' h-4 rounded-full" style="width: ' + (album.rating * 10) + '%%"></div>' +
-            label +
-          '</div>' +
-        '</td>';
+        '<td class="px-6 py-4 whitespace-nowrap text-sm">' + starsHtml + '</td>';
       tableBody.appendChild(row);
     });
   }
@@ -451,21 +496,20 @@ func renderHTML(jsonData string) string {
 </html>`, time.Now().Format("2006-01-02 15:04:05"), jsonData)
 }
 
-func stringify(value any) string {
-	return shared.Stringify(value)
-}
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 func fallback(value, alt string) string {
-	return shared.Fallback(value, alt)
-}
-
-func getenv(key, fallback string) string {
-	return shared.Getenv(key, fallback)
+	if strings.TrimSpace(value) == "" {
+		return alt
+	}
+	return value
 }
 
 func logf(start time.Time, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
-	fmt.Printf("[%s | Total: %7.3fs] %s\n", time.Now().Format("15:04:05.000"), time.Since(start).Seconds(), msg)
+	fmt.Printf("[%s | %.3fs] %s\n", time.Now().Format("15:04:05.000"), time.Since(start).Seconds(), msg)
 }
 
 func fatal(start time.Time, err error) {

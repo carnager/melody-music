@@ -21,6 +21,14 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701) {
     @Volatile var connected = false
         private set
     private var reconnectJob: Job? = null
+    private var partialLine = StringBuilder()
+
+    // Idle connection for instant notifications
+    private var idleWs: WebSocket? = null
+    private var idleLines = Channel<String>(Channel.UNLIMITED)
+    private var idlePartialLine = StringBuilder()
+    private var idleJob: Job? = null
+    var onIdleNotification: ((Set<String>) -> Unit)? = null
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
@@ -36,15 +44,16 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701) {
     // ---- Connection ----
 
     fun connect() {
-        doConnect()
+        scope.launch { doConnect() }
         startReconnectLoop()
     }
 
-    private fun doConnect() {
+    private suspend fun doConnect() = mutex.withLock {
         ws?.close(1000, "reconnecting")
         ws = null
         connected = false
         lines = Channel(Channel.UNLIMITED)
+        partialLine.clear()
 
         val wsUrl = "ws://$serverHost:$serverPort/mpd"
         val request = Request.Builder().url(wsUrl).build()
@@ -54,8 +63,20 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701) {
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                text.lines().filter { it.isNotEmpty() }.forEach { line ->
-                    lines.trySend(line)
+                // Buffer partial lines across WebSocket messages.
+                // The server uses bufio.Writer which may split a line
+                // across multiple WebSocket frames.
+                val data = partialLine.toString() + text
+                partialLine.clear()
+                val parts = data.split('\n')
+                // Last element is either empty (text ended with \n) or a partial line
+                for (i in 0 until parts.size - 1) {
+                    val line = parts[i]
+                    if (line.isNotEmpty()) lines.trySend(line)
+                }
+                val last = parts.last()
+                if (last.isNotEmpty()) {
+                    partialLine.append(last)
                 }
             }
 
@@ -63,31 +84,27 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701) {
                 android.util.Log.e("MpdClient", "WebSocket error: ${t.message}")
                 connected = false
                 ws = null
-                lines.close()
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 android.util.Log.d("MpdClient", "WebSocket closed: $reason")
                 connected = false
                 ws = null
-                lines.close()
             }
         })
 
-        // Read MPD greeting synchronously in scope
-        scope.launch {
-            try {
-                val greeting = withTimeout(5000) { lines.receive() }
-                if (greeting.startsWith("OK MPD")) {
-                    connected = true
-                    android.util.Log.d("MpdClient", "MPD greeting: $greeting")
-                }
-            } catch (e: Exception) {
-                android.util.Log.e("MpdClient", "Failed to read greeting: ${e.message}")
-                connected = false
-                ws?.close(1000, "greeting failed")
-                ws = null
+        // Consume the MPD greeting before releasing the mutex
+        try {
+            val greeting = withTimeout(5000) { lines.receive() }
+            if (greeting.startsWith("OK MPD")) {
+                connected = true
+                android.util.Log.d("MpdClient", "MPD greeting: $greeting")
             }
+        } catch (e: Exception) {
+            android.util.Log.e("MpdClient", "Failed to read greeting: ${e.message}")
+            connected = false
+            ws?.close(1000, "greeting failed")
+            ws = null
         }
     }
 
@@ -107,9 +124,100 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701) {
     fun disconnect() {
         reconnectJob?.cancel()
         reconnectJob = null
+        idleJob?.cancel()
+        idleJob = null
+        idleWs?.close(1000, "bye")
+        idleWs = null
         ws?.close(1000, "bye")
         ws = null
         connected = false
+    }
+
+    // ---- Idle connection for instant notifications ----
+
+    fun startIdle() {
+        idleJob?.cancel()
+        idleJob = scope.launch {
+            while (true) {
+                try {
+                    if (!connected) {
+                        delay(2000)
+                        continue
+                    }
+                    connectIdle()
+                    listenForIdle()
+                } catch (_: Exception) {}
+                idleWs?.close(1000, "reconnecting idle")
+                idleWs = null
+                delay(2000)
+            }
+        }
+    }
+
+    private suspend fun connectIdle() {
+        idleWs?.close(1000, "reconnecting idle")
+        idleLines = Channel(Channel.UNLIMITED)
+        idlePartialLine.clear()
+
+        val wsUrl = "ws://$serverHost:$serverPort/mpd"
+        val request = Request.Builder().url(wsUrl).build()
+        val latch = CompletableDeferred<Boolean>()
+
+        idleWs = httpClient.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {}
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                val data = idlePartialLine.toString() + text
+                idlePartialLine.clear()
+                val parts = data.split('\n')
+                for (i in 0 until parts.size - 1) {
+                    val line = parts[i]
+                    if (line.isNotEmpty()) idleLines.trySend(line)
+                }
+                val last = parts.last()
+                if (last.isNotEmpty()) idlePartialLine.append(last)
+            }
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                latch.complete(false)
+                idleWs = null
+            }
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                latch.complete(false)
+                idleWs = null
+            }
+        })
+
+        // Consume greeting
+        try {
+            val greeting = withTimeout(5000) { idleLines.receive() }
+            if (greeting.startsWith("OK MPD")) {
+                latch.complete(true)
+            } else {
+                throw Exception("bad greeting")
+            }
+        } catch (e: Exception) {
+            idleWs?.close(1000, "greeting failed")
+            idleWs = null
+            throw e
+        }
+    }
+
+    private suspend fun listenForIdle() {
+        while (true) {
+            val w = idleWs ?: return
+            w.send("idle player playlist mixer options database stored_playlist\n")
+
+            val changed = mutableSetOf<String>()
+            while (true) {
+                val line = withTimeout(300_000) { idleLines.receive() }
+                if (line == "OK") break
+                if (line.startsWith("changed: ")) {
+                    changed.add(line.removePrefix("changed: "))
+                }
+            }
+            if (changed.isNotEmpty()) {
+                onIdleNotification?.invoke(changed)
+            }
+        }
     }
 
     // ---- Low-level command interface ----
@@ -121,20 +229,26 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701) {
     }
 
     suspend fun cmd(command: String): List<String> = mutex.withLock {
-        val w = ensureConnected()
-        w.send("$command\n")
-        withTimeout(5000) { readUntilOK() }
+        // NonCancellable wraps the entire send+read to prevent cancellation
+        // from leaving stale response data in the channel
+        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+            val w = ensureConnected()
+            w.send("$command\n")
+            withTimeout(10000) { readUntilOK() }
+        }
     }
 
     suspend fun cmdBatch(commands: List<String>): List<List<String>> = mutex.withLock {
-        val w = ensureConnected()
-        val batch = buildString {
-            appendLine("command_list_ok_begin")
-            commands.forEach { appendLine(it) }
-            appendLine("command_list_end")
+        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+            val w = ensureConnected()
+            val batch = buildString {
+                appendLine("command_list_ok_begin")
+                commands.forEach { appendLine(it) }
+                appendLine("command_list_end")
+            }
+            w.send(batch)
+            withTimeout(10000) { readBatchResponse() }
         }
-        w.send(batch)
-        withTimeout(5000) { readBatchResponse() }
     }
 
     private suspend fun readUntilOK(): List<String> {
@@ -274,9 +388,56 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701) {
 
     // ---- Search ----
 
+    private fun parseRatingFilter(w: String): Triple<String, String, String>? {
+        val wl = w.lowercase()
+        for (prefix in listOf("albumrating", "rating")) {
+            if (!wl.startsWith(prefix)) continue
+            val rest = w.substring(prefix.length)
+            for (op in listOf(">=", "<=", ">", "<", "=")) {
+                if (rest.startsWith(op)) {
+                    val value = rest.substring(op.length)
+                    if (value.isNotEmpty()) {
+                        val mpdOp = if (op == "=") "==" else op
+                        return Triple(prefix, mpdOp, value)
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    private fun searchTextTerms(query: String): List<String> {
+        return query.trim().split("\\s+".toRegex()).filter { parseRatingFilter(it) == null }.map { it.lowercase() }
+    }
+
+    private fun buildSearchCmd(query: String): String {
+        val words = query.trim().split("\\s+".toRegex())
+        val textParts = mutableListOf<String>()
+        val filters = mutableListOf<String>()
+        for (w in words) {
+            val rf = parseRatingFilter(w)
+            if (rf != null) {
+                filters.add("(${rf.first} ${rf.second} '${rf.third}')")
+            } else {
+                textParts.add(w)
+            }
+        }
+        if (filters.isEmpty()) {
+            return "search any ${mpdEscape(textParts.joinToString(" "))}"
+        }
+        val parts = mutableListOf<String>()
+        if (textParts.isNotEmpty()) {
+            val escaped = textParts.joinToString(" ").replace("\\", "\\\\").replace("'", "\\'")
+            parts.add("\"(any contains '$escaped')\"")
+        }
+        for (f in filters) parts.add("\"$f\"")
+        return "search ${parts.joinToString(" ")}"
+    }
+
     suspend fun search(query: String): SearchResult {
-        val lines = cmd("search any ${mpdEscape(query)}")
+        val lines = cmd(buildSearchCmd(query))
         val groups = parseGroups(lines, "file")
+        val terms = searchTextTerms(query)
         val tracks = mutableListOf<Track>()
         val albumSet = mutableSetOf<String>()
         val albums = mutableListOf<Album>()
@@ -298,13 +459,17 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701) {
             val alb = g["Album"] ?: ""
             val key = "$aa\u0000$alb"
             if (alb.isNotBlank() && key !in albumSet) {
-                albumSet.add(key)
-                albums.add(Album(
-                    id = g["X-AlbumId"] ?: "",
-                    albumArtist = aa,
-                    album = alb,
-                    date = g["Date"] ?: ""
-                ))
+                // Only show album if artist or album name matches the text query
+                val albumText = "$aa $alb".lowercase()
+                if (terms.isEmpty() || terms.all { albumText.contains(it) }) {
+                    albumSet.add(key)
+                    albums.add(Album(
+                        id = g["X-AlbumId"] ?: "",
+                        albumArtist = aa,
+                        album = alb,
+                        date = g["Date"] ?: ""
+                    ))
+                }
             }
         }
         return SearchResult(albums, tracks)
@@ -341,7 +506,8 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701) {
                 duration = duration,
                 rating = songMap["X-Rating"]?.toIntOrNull() ?: 0,
                 songId = songMap["X-SongId"] ?: "",
-                currentSongPos = statusMap["song"]?.toIntOrNull() ?: -1
+                currentSongPos = statusMap["song"]?.toIntOrNull() ?: -1,
+                playlistVersion = statusMap["playlist"]?.toIntOrNull() ?: 0
             )
         } catch (e: Exception) { null }
     }

@@ -71,6 +71,8 @@ type mpvClient struct {
 	mu         sync.Mutex
 	process    *exec.Cmd
 	reqID      int
+	conn       net.Conn
+	scanner    *bufio.Scanner
 }
 
 type mpvRequest struct {
@@ -90,12 +92,14 @@ type mpvResponse struct {
 
 type playbackTarget interface {
 	loadFile(url, mode string, meta map[string]any) error
+	loadFileBatch(urls []string, mode string) error
 	playlistClear() error
 	playlistRemove(index int) error
 	playlistMove(from, to int) error
 	getProperty(name string) (any, error)
 	setProperty(name string, value any) error
 	command(args ...any) (*mpvResponse, error)
+	commandBatch(cmds [][]any) ([]*mpvResponse, error)
 	isRunning() bool
 }
 
@@ -158,6 +162,9 @@ func main() {
 	if err != nil {
 		logger.Fatalf("open database: %v", err)
 	}
+	if err := db.rebuildFTS(); err != nil {
+		logger.Printf("warning: FTS rebuild failed: %v", err)
+	}
 
 	a := &app{
 		cfg:    cfg,
@@ -186,6 +193,9 @@ func main() {
 	}
 
 	a.scanner.onScanComplete = func() {
+		if err := db.rebuildFTS(); err != nil {
+			logger.Printf("warning: FTS rebuild after scan failed: %v", err)
+		}
 		a.mpdHub.notify(SubDatabase)
 	}
 
@@ -593,11 +603,18 @@ func (a *app) ensureMPV() {
 }
 
 func (m *mpvClient) isRunning() bool {
-	conn, err := net.DialTimeout("unix", m.socketPath, 1*time.Second)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.conn != nil {
+		// Try a lightweight property get to confirm mpv is alive
+		return true
+	}
+	conn, err := net.DialTimeout("unix", m.socketPath, 500*time.Millisecond)
 	if err != nil {
 		return false
 	}
-	conn.Close()
+	m.conn = conn
+	m.scanner = bufio.NewScanner(conn)
 	return true
 }
 
@@ -633,43 +650,132 @@ func (m *mpvClient) start() error {
 	return fmt.Errorf("mpv socket did not appear at %s", m.socketPath)
 }
 
-func (m *mpvClient) command(args ...any) (*mpvResponse, error) {
-	m.mu.Lock()
-	m.reqID++
-	reqID := m.reqID
-	m.mu.Unlock()
-
+func (m *mpvClient) connect() error {
+	if m.conn != nil {
+		m.conn.Close()
+		m.conn = nil
+		m.scanner = nil
+	}
 	conn, err := net.DialTimeout("unix", m.socketPath, 2*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("mpv connect: %w", err)
+		return fmt.Errorf("mpv connect: %w", err)
 	}
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	m.conn = conn
+	m.scanner = bufio.NewScanner(conn)
+	return nil
+}
 
-	req := mpvRequest{Command: args, RequestID: reqID}
-	data, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
-	data = append(data, '\n')
-	if _, err := conn.Write(data); err != nil {
-		return nil, fmt.Errorf("mpv write: %w", err)
-	}
+func (m *mpvClient) command(args ...any) (*mpvResponse, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	scanner := bufio.NewScanner(conn)
-	for scanner.Scan() {
-		var resp mpvResponse
-		if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
+	m.reqID++
+	reqID := m.reqID
+
+	// Try on existing connection, reconnect once on failure
+	for attempt := 0; attempt < 2; attempt++ {
+		if m.conn == nil {
+			if err := m.connect(); err != nil {
+				return nil, err
+			}
+		}
+
+		m.conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+		req := mpvRequest{Command: args, RequestID: reqID}
+		data, err := json.Marshal(req)
+		if err != nil {
+			return nil, err
+		}
+		data = append(data, '\n')
+		if _, err := m.conn.Write(data); err != nil {
+			// Connection broken, reconnect
+			m.conn.Close()
+			m.conn = nil
+			m.scanner = nil
 			continue
 		}
-		if resp.RequestID == reqID {
-			if resp.Error != "" && resp.Error != "success" {
-				return nil, fmt.Errorf("mpv: %s", resp.Error)
+
+		for m.scanner.Scan() {
+			var resp mpvResponse
+			if err := json.Unmarshal(m.scanner.Bytes(), &resp); err != nil {
+				continue
 			}
-			return &resp, nil
+			if resp.RequestID == reqID {
+				if resp.Error != "" && resp.Error != "success" {
+					return nil, fmt.Errorf("mpv: %s", resp.Error)
+				}
+				return &resp, nil
+			}
 		}
+		// Scanner exhausted — connection broken
+		m.conn.Close()
+		m.conn = nil
+		m.scanner = nil
 	}
 	return nil, fmt.Errorf("mpv: no response")
+}
+
+// commandBatch sends multiple commands in a single write and reads all responses.
+// Much faster than sequential command() calls due to reduced IPC round-trips.
+func (m *mpvClient) commandBatch(cmds [][]any) ([]*mpvResponse, error) {
+	if len(cmds) == 0 {
+		return nil, nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	startID := m.reqID + 1
+	var allData []byte
+	for _, args := range cmds {
+		m.reqID++
+		req := mpvRequest{Command: args, RequestID: m.reqID}
+		data, err := json.Marshal(req)
+		if err != nil {
+			return nil, err
+		}
+		allData = append(allData, data...)
+		allData = append(allData, '\n')
+	}
+	endID := m.reqID
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if m.conn == nil {
+			if err := m.connect(); err != nil {
+				return nil, err
+			}
+		}
+
+		m.conn.SetDeadline(time.Now().Add(30 * time.Second))
+		if _, err := m.conn.Write(allData); err != nil {
+			m.conn.Close()
+			m.conn = nil
+			m.scanner = nil
+			continue
+		}
+
+		responses := make([]*mpvResponse, len(cmds))
+		got := 0
+		for m.scanner.Scan() && got < len(cmds) {
+			var resp mpvResponse
+			if err := json.Unmarshal(m.scanner.Bytes(), &resp); err != nil {
+				continue
+			}
+			if resp.RequestID >= startID && resp.RequestID <= endID {
+				idx := resp.RequestID - startID
+				responses[idx] = &resp
+				got++
+			}
+		}
+		if got == len(cmds) {
+			return responses, nil
+		}
+		m.conn.Close()
+		m.conn = nil
+		m.scanner = nil
+	}
+	return nil, fmt.Errorf("mpv: batch failed")
 }
 
 func (m *mpvClient) getProperty(name string) (any, error) {
@@ -687,6 +793,22 @@ func (m *mpvClient) setProperty(name string, value any) error {
 
 func (m *mpvClient) loadFile(url string, mode string, meta map[string]any) error {
 	_, err := m.command("loadfile", url, mode)
+	return err
+}
+
+func (m *mpvClient) loadFileBatch(urls []string, mode string) error {
+	if len(urls) == 0 {
+		return nil
+	}
+	cmds := make([][]any, len(urls))
+	for i, url := range urls {
+		m := mode
+		if i > 0 && mode == "replace" {
+			m = "append"
+		}
+		cmds[i] = []any{"loadfile", url, m}
+	}
+	_, err := m.commandBatch(cmds)
 	return err
 }
 
@@ -793,15 +915,15 @@ func (a *app) addSongsToPlaylist(songIDs []string, mode string) error {
 		}
 		a.playQueue = nil
 		a.queueIDs = nil
+		urls := make([]string, len(songIDs))
 		for i, id := range songIDs {
-			loadMode := "append"
-			if i == 0 {
-				loadMode = "replace"
-			}
-			if err := t.loadFile(a.streamURLForActiveDevice(id), loadMode, a.replayGainMeta(id)); err != nil {
-				return err
-			}
-			a.playQueue = append(a.playQueue, id)
+			urls[i] = a.streamURLForActiveDevice(id)
+		}
+		if err := t.loadFileBatch(urls, "replace"); err != nil {
+			return err
+		}
+		a.playQueue = append(a.playQueue, songIDs...)
+		for range songIDs {
 			a.queueIDCounter++
 			a.queueIDs = append(a.queueIDs, a.queueIDCounter)
 		}
@@ -815,17 +937,27 @@ func (a *app) addSongsToPlaylist(songIDs []string, mode string) error {
 		if f, ok := posRaw.(float64); ok && f >= 0 {
 			pos = int(f) + 1
 		}
-		var newIDs []int
+		urls := make([]string, len(songIDs))
 		for i, id := range songIDs {
-			if err := t.loadFile(a.streamURLForActiveDevice(id), "append", a.replayGainMeta(id)); err != nil {
-				return err
-			}
-			// Move from end to insert position
+			urls[i] = a.streamURLForActiveDevice(id)
+		}
+		if err := t.loadFileBatch(urls, "append"); err != nil {
+			return err
+		}
+		// Move from end to insert positions
+		var moveCmds [][]any
+		for i := range songIDs {
 			endIdx := len(a.playQueue) + i
 			targetIdx := pos + i
 			if endIdx > targetIdx {
-				t.playlistMove(endIdx, targetIdx)
+				moveCmds = append(moveCmds, []any{"playlist-move", endIdx, targetIdx})
 			}
+		}
+		if len(moveCmds) > 0 {
+			t.commandBatch(moveCmds)
+		}
+		var newIDs []int
+		for range songIDs {
 			a.queueIDCounter++
 			newIDs = append(newIDs, a.queueIDCounter)
 		}
@@ -850,11 +982,15 @@ func (a *app) addSongsToPlaylist(songIDs []string, mode string) error {
 		return t.setProperty("pause", false)
 
 	default: // "add"
-		for _, id := range songIDs {
-			if err := t.loadFile(a.streamURLForActiveDevice(id), "append", a.replayGainMeta(id)); err != nil {
-				return err
-			}
-			a.playQueue = append(a.playQueue, id)
+		urls := make([]string, len(songIDs))
+		for i, id := range songIDs {
+			urls[i] = a.streamURLForActiveDevice(id)
+		}
+		if err := t.loadFileBatch(urls, "append"); err != nil {
+			return err
+		}
+		a.playQueue = append(a.playQueue, songIDs...)
+		for range songIDs {
 			a.queueIDCounter++
 			a.queueIDs = append(a.queueIDs, a.queueIDCounter)
 		}

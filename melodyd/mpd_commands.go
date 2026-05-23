@@ -881,12 +881,68 @@ func cmdSearchOrFindInner(c *mpdConn, args []string, cmdName string, caseInsensi
 		}
 		query += args[i]
 	}
-	return cmdTextSearch(c, query, cmdName, addToQueue)
+	return cmdTextSearch(c, query, nil, nil, cmdName, addToQueue)
+}
+
+type ratingCond struct {
+	op    string // "==", ">", ">=", "<", "<="
+	value int
+}
+
+func (rc *ratingCond) matches(r int) bool {
+	switch rc.op {
+	case "==":
+		return r == rc.value
+	case ">":
+		return r > rc.value
+	case ">=":
+		return r >= rc.value
+	case "<":
+		return r < rc.value
+	case "<=":
+		return r <= rc.value
+	}
+	return false
+}
+
+// sqlOp returns the SQL comparison operator and value for use in WHERE clauses.
+func (rc *ratingCond) sqlOp() (string, int) {
+	op := rc.op
+	if op == "==" {
+		op = "="
+	}
+	return op, rc.value
 }
 
 // cmdFindByConditions resolves a set of filter conditions against the database.
 func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName string, caseInsensitive, addToQueue bool) *mpdError {
 	a := c.app
+
+	// Extract rating filters before building tag map
+	var ratingFilter *ratingCond
+	var albumRatingFilter *ratingCond
+	var filteredConditions []filterCondition
+	for _, cond := range conditions {
+		switch cond.tag {
+		case "rating", "x-rating":
+			v, _ := strconv.Atoi(cond.value)
+			op := cond.op
+			if op == "" {
+				op = "=="
+			}
+			ratingFilter = &ratingCond{op: op, value: v}
+		case "albumrating":
+			v, _ := strconv.Atoi(cond.value)
+			op := cond.op
+			if op == "" {
+				op = "=="
+			}
+			albumRatingFilter = &ratingCond{op: op, value: v}
+		default:
+			filteredConditions = append(filteredConditions, cond)
+		}
+	}
+	conditions = filteredConditions
 
 	// Build a map of tag → value for quick lookup
 	tags := map[string]string{}
@@ -898,6 +954,31 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 		}
 	}
 
+	// Rating/albumrating-only query
+	if (ratingFilter != nil || albumRatingFilter != nil) && len(conditions) == 0 {
+		if albumRatingFilter != nil {
+			albumIDs, err := a.db.albumIDsByRatingOp(albumRatingFilter.op, albumRatingFilter.value)
+			if err != nil {
+				return mpdErr(errSystem, cmdName, err.Error())
+			}
+			var allTracks []map[string]any
+			for _, id := range albumIDs {
+				tracks, err := a.db.tracksByAlbum(id)
+				if err != nil {
+					continue
+				}
+				allTracks = append(allTracks, tracks...)
+			}
+			return writeOrAddFilteredTracks(c, a, allTracks, ratingFilter, nil, cmdName, addToQueue)
+		}
+		// Track rating only — use indexed join instead of scanning all tracks
+		tracks, err := a.db.tracksByRatingOp(ratingFilter.op, ratingFilter.value)
+		if err != nil {
+			return mpdErr(errSystem, cmdName, err.Error())
+		}
+		return writeOrAddFilteredTracks(c, a, tracks, nil, nil, cmdName, addToQueue)
+	}
+
 	// If we have "any contains X" → do text search
 	if _, ok := tags["any"]; ok || hasContains {
 		query := ""
@@ -907,7 +988,7 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 			}
 			query += cond.value
 		}
-		return cmdTextSearch(c, query, cmdName, addToQueue)
+		return cmdTextSearch(c, query, ratingFilter, albumRatingFilter, cmdName, addToQueue)
 	}
 
 	// Try to resolve via structured DB queries
@@ -924,6 +1005,16 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 		if err != nil {
 			return mpdErr(errSystem, cmdName, err.Error())
 		}
+		// Batch-fetch album ratings if needed
+		var albumRatings map[string]int
+		if albumRatingFilter != nil {
+			hashes := make([]string, len(albums))
+			for i, al := range albums {
+				hashes[i] = albumRatingHash(stringify(al["albumartist"]), stringify(al["album"]), stringify(al["date"]))
+			}
+			albumRatings, _ = a.db.getRatingsBatch(hashes)
+		}
+		var allTracks []map[string]any
 		for _, album := range albums {
 			albumTitle := stringify(album["album"])
 			albumDate := stringify(album["date"])
@@ -940,30 +1031,21 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 			if !match {
 				continue
 			}
-
-			albumID, _ := strconv.ParseInt(stringify(album["id"]), 10, 64)
-			if addToQueue {
-				songIDs, err := a.db.trackSongIDsByAlbum(albumID)
-				if err != nil {
-					return mpdErr(errSystem, cmdName, err.Error())
-				}
-				if err := a.addSongsToPlaylist(songIDs, "add"); err != nil {
-					return mpdErr(errSystem, cmdName, err.Error())
-				}
-			} else {
-				tracks, err := a.db.tracksByAlbum(albumID)
-				if err != nil {
-					return mpdErr(errSystem, cmdName, err.Error())
-				}
-				for _, track := range tracks {
-					c.writeTrack(track, -1, 0)
+			if albumRatingFilter != nil {
+				h := albumRatingHash(stringify(album["albumartist"]), albumTitle, albumDate)
+				if !albumRatingFilter.matches(albumRatings[h]) {
+					continue
 				}
 			}
+
+			albumID, _ := strconv.ParseInt(stringify(album["id"]), 10, 64)
+			tracks, err := a.db.tracksByAlbum(albumID)
+			if err != nil {
+				return mpdErr(errSystem, cmdName, err.Error())
+			}
+			allTracks = append(allTracks, tracks...)
 		}
-		if addToQueue {
-			a.mpdHub.notify(SubPlaylist)
-		}
-		return nil
+		return writeOrAddFilteredTracks(c, a, allTracks, ratingFilter, nil, cmdName, addToQueue)
 	}
 
 	// If we have just artist, return all tracks by that artist
@@ -972,32 +1054,31 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 		if err != nil {
 			return mpdErr(errSystem, cmdName, err.Error())
 		}
-		var allSongIDs []string
+		// Batch-fetch album ratings if needed
+		var albumRatings map[string]int
+		if albumRatingFilter != nil {
+			hashes := make([]string, len(albums))
+			for i, al := range albums {
+				hashes[i] = albumRatingHash(stringify(al["albumartist"]), stringify(al["album"]), stringify(al["date"]))
+			}
+			albumRatings, _ = a.db.getRatingsBatch(hashes)
+		}
+		var allTracks []map[string]any
 		for _, album := range albums {
+			if albumRatingFilter != nil {
+				h := albumRatingHash(stringify(album["albumartist"]), stringify(album["album"]), stringify(album["date"]))
+				if !albumRatingFilter.matches(albumRatings[h]) {
+					continue
+				}
+			}
 			albumID, _ := strconv.ParseInt(stringify(album["id"]), 10, 64)
-			if addToQueue {
-				songIDs, err := a.db.trackSongIDsByAlbum(albumID)
-				if err != nil {
-					continue
-				}
-				allSongIDs = append(allSongIDs, songIDs...)
-			} else {
-				tracks, err := a.db.tracksByAlbum(albumID)
-				if err != nil {
-					continue
-				}
-				for _, track := range tracks {
-					c.writeTrack(track, -1, 0)
-				}
+			tracks, err := a.db.tracksByAlbum(albumID)
+			if err != nil {
+				continue
 			}
+			allTracks = append(allTracks, tracks...)
 		}
-		if addToQueue && len(allSongIDs) > 0 {
-			if err := a.addSongsToPlaylist(allSongIDs, "add"); err != nil {
-				return mpdErr(errSystem, cmdName, err.Error())
-			}
-			a.mpdHub.notify(SubPlaylist)
-		}
-		return nil
+		return writeOrAddFilteredTracks(c, a, allTracks, ratingFilter, nil, cmdName, addToQueue)
 	}
 
 	// Fallback to text search with all filter values combined
@@ -1008,45 +1089,37 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 		}
 		query += cond.value
 	}
-	return cmdTextSearch(c, query, cmdName, addToQueue)
+	return cmdTextSearch(c, query, ratingFilter, albumRatingFilter, cmdName, addToQueue)
 }
 
 // cmdTextSearch does a text-based search and returns or enqueues the results.
-func cmdTextSearch(c *mpdConn, query, cmdName string, addToQueue bool) *mpdError {
-	if query == "" {
-		return nil
+// writeOrAddFilteredTracks writes or enqueues tracks, optionally filtering by rating.
+func writeOrAddFilteredTracks(c *mpdConn, a *app, tracks []map[string]any, ratingFilter, albumRatingFilter *ratingCond, cmdName string, addToQueue bool) *mpdError {
+	// If album rating filter is active, batch-fetch album ratings and filter
+	var albumRatings map[string]int
+	if albumRatingFilter != nil {
+		hashes := make([]string, len(tracks))
+		for i, t := range tracks {
+			hashes[i] = albumRatingHash(stringify(t["albumartist"]), stringify(t["album"]), stringify(t["date"]))
+		}
+		albumRatings, _ = a.db.getRatingsBatch(hashes)
 	}
-	a := c.app
-
-	albums, tracks, err := a.db.search(query, 200)
-	if err != nil {
-		return mpdErr(errSystem, cmdName, err.Error())
-	}
-
 	var allSongIDs []string
 	for _, track := range tracks {
+		r := intFromAny(track["rating"], 0)
+		if ratingFilter != nil && !ratingFilter.matches(r) {
+			continue
+		}
+		if albumRatingFilter != nil {
+			h := albumRatingHash(stringify(track["albumartist"]), stringify(track["album"]), stringify(track["date"]))
+			if !albumRatingFilter.matches(albumRatings[h]) {
+				continue
+			}
+		}
 		if addToQueue {
 			allSongIDs = append(allSongIDs, stringify(track["song_id"]))
 		} else {
 			c.writeTrack(track, -1, 0)
-		}
-	}
-	for _, album := range albums {
-		albumID, _ := strconv.ParseInt(stringify(album["id"]), 10, 64)
-		if addToQueue {
-			songIDs, err := a.db.trackSongIDsByAlbum(albumID)
-			if err != nil {
-				continue
-			}
-			allSongIDs = append(allSongIDs, songIDs...)
-		} else {
-			albumTracks, err := a.db.tracksByAlbum(albumID)
-			if err != nil {
-				continue
-			}
-			for _, track := range albumTracks {
-				c.writeTrack(track, -1, 0)
-			}
 		}
 	}
 	if addToQueue && len(allSongIDs) > 0 {
@@ -1056,6 +1129,30 @@ func cmdTextSearch(c *mpdConn, query, cmdName string, addToQueue bool) *mpdError
 		a.mpdHub.notify(SubPlaylist)
 	}
 	return nil
+}
+
+func cmdTextSearch(c *mpdConn, query string, ratingFilter, albumRatingFilter *ratingCond, cmdName string, addToQueue bool) *mpdError {
+	if query == "" && ratingFilter == nil && albumRatingFilter == nil {
+		return nil
+	}
+	a := c.app
+
+	var tracks []map[string]any
+	if query != "" {
+		_, tracks2, err := a.db.search(query, 1000)
+		if err != nil {
+			return mpdErr(errSystem, cmdName, err.Error())
+		}
+		tracks = tracks2
+	} else {
+		var err error
+		tracks, err = a.db.allTracks()
+		if err != nil {
+			return mpdErr(errSystem, cmdName, err.Error())
+		}
+	}
+
+	return writeOrAddFilteredTracks(c, a, tracks, ratingFilter, albumRatingFilter, cmdName, addToQueue)
 }
 
 // oldStyleToConditions converts old-style "tag value tag value" args to conditions.
@@ -1623,7 +1720,7 @@ func splitFilterAND(s string) []string {
 // parseOneCondition parses "Tag == \"value\"" or "Tag contains \"value\"".
 func parseOneCondition(s string) filterCondition {
 	s = strings.TrimSpace(s)
-	for _, op := range []string{" == ", " contains "} {
+	for _, op := range []string{" >= ", " <= ", " == ", " > ", " < ", " contains "} {
 		idx := strings.Index(s, op)
 		if idx < 0 {
 			continue
@@ -1656,7 +1753,7 @@ func stripQuotes(s string) string {
 // Rating commands (custom extension)
 // ---------------------------------------------------------------------------
 
-// cmdRate handles "rate <songid> <rating>" — rate a track (0-5, 0=unrate).
+// cmdRate handles "rate <songid> <rating>" — rate a track (0-10, 0=unrate).
 func cmdRate(c *mpdConn, args []string) *mpdError {
 	if len(args) < 2 {
 		return mpdErr(errArg, "rate", "need songid and rating")
@@ -1666,8 +1763,8 @@ func cmdRate(c *mpdConn, args []string) *mpdError {
 		return mpdErr(errNoExist, "rate", "unknown song id")
 	}
 	rating, err := strconv.Atoi(args[1])
-	if err != nil || rating < 0 || rating > 5 {
-		return mpdErr(errArg, "rate", "rating must be 0-5")
+	if err != nil || rating < 0 || rating > 10 {
+		return mpdErr(errArg, "rate", "rating must be 0-10")
 	}
 	hash := stringify(track["rating_hash"])
 	if hash == "" {
@@ -1686,8 +1783,8 @@ func cmdAlbumRate(c *mpdConn, args []string) *mpdError {
 		return mpdErr(errArg, "albumrate", "need albumartist, album, date, rating")
 	}
 	rating, err := strconv.Atoi(args[3])
-	if err != nil || rating < 0 || rating > 5 {
-		return mpdErr(errArg, "albumrate", "rating must be 0-5")
+	if err != nil || rating < 0 || rating > 10 {
+		return mpdErr(errArg, "albumrate", "rating must be 0-10")
 	}
 	hash := albumRatingHash(args[0], args[1], args[2])
 	if err := c.app.db.setRating(hash, "album", rating); err != nil {

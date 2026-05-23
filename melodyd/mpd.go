@@ -578,6 +578,31 @@ func (at *agentTarget) command(args ...any) (*mpvResponse, error) {
 	}
 }
 
+func (at *agentTarget) loadFileBatch(urls []string, mode string) error {
+	for i, url := range urls {
+		m := mode
+		if i > 0 && mode == "replace" {
+			m = "append"
+		}
+		if err := at.loadFile(url, m, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (at *agentTarget) commandBatch(cmds [][]any) ([]*mpvResponse, error) {
+	var results []*mpvResponse
+	for _, cmd := range cmds {
+		resp, err := at.command(cmd...)
+		if err != nil {
+			return results, err
+		}
+		results = append(results, resp)
+	}
+	return results, nil
+}
+
 func (at *agentTarget) handoff(playlistPos int, timePos float64, paused bool) error {
 	_, err := at.sendCommand(fmt.Sprintf("handoff %d %f %t", playlistPos, timePos, paused))
 	return err

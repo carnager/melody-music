@@ -1,16 +1,16 @@
 # Maintainer: Rasmus Steinke <rasi at xssn dot at>
-pkgname=('melodyd' 'melody-agent' 'melody-tui' 'melody-rofi' 'melody-musiclist')
+pkgname=('melodyd' 'melody-agent' 'melody-tui' 'melody-cli' 'melody-rofi' 'melody-musiclist')
 pkgver=0.5.0
 pkgrel=1
 arch=('x86_64')
-url="https://github.com/carnager/melody"
+url="https://github.com/carnager/melody-music"
 license=('MIT')
 makedepends=('go')
-source=("git+https://github.com/carnager/melody.git#tag=${pkgver}")
+source=("git+https://github.com/carnager/melody-music.git#tag=${pkgver}")
 sha256sums=('SKIP')
 
 build() {
-  cd "$srcdir/melody"
+  cd "$srcdir/melody-music"
   export GOMODCACHE="$srcdir/gomodcache"
   export GOCACHE="$srcdir/gobuild"
   export GOSUMDB=off
@@ -19,39 +19,46 @@ build() {
 }
 
 package_melodyd() {
-  pkgdesc="Melody daemon for Navidrome/mpv"
+  pkgdesc="Melody music server daemon"
   depends=('mpv')
-  install -Dm755 "$srcdir/melody/bin/melodyd" \
+  install -Dm755 "$srcdir/melody-music/bin/melodyd" \
                   "$pkgdir/usr/bin/melodyd"
-  install -Dm644 "$srcdir/melody/melodyd/melodyd.service" \
+  install -Dm644 "$srcdir/melody-music/melodyd/melodyd.service" \
                   "$pkgdir/usr/lib/systemd/user/melodyd.service"
 }
 
 package_melody-agent() {
   pkgdesc="Remote playback agent for Melody"
   depends=('mpv')
-  install -Dm755 "$srcdir/melody/bin/melody-agent" \
+  install -Dm755 "$srcdir/melody-music/bin/melody-agent" \
                   "$pkgdir/usr/bin/melody-agent"
 }
 
 package_melody-tui() {
   pkgdesc="Terminal UI for Melody"
   depends=('melodyd')
-  install -Dm755 "$srcdir/melody/bin/melody-tui" \
+  install -Dm755 "$srcdir/melody-music/bin/melody-tui" \
                   "$pkgdir/usr/bin/melody-tui"
+}
+
+package_melody-cli() {
+  pkgdesc="Command-line client for Melody"
+  optdepends=('melodyd: local daemon')
+  install -Dm755 "$srcdir/melody-music/bin/melody-cli" \
+                  "$pkgdir/usr/bin/melody-cli"
 }
 
 package_melody-rofi() {
   pkgdesc="Rofi client for Melody"
   depends=('rofi')
   optdepends=('melodyd: local daemon')
-  install -Dm755 "$srcdir/melody/bin/melody-rofi" \
+  install -Dm755 "$srcdir/melody-music/bin/melody-rofi" \
                   "$pkgdir/usr/bin/melody-rofi"
 }
 
 package_melody-musiclist() {
   pkgdesc="Static music list exporter for Melody"
   optdepends=('melodyd: local daemon')
-  install -Dm755 "$srcdir/melody/bin/melody-musiclist" \
+  install -Dm755 "$srcdir/melody-music/bin/melody-musiclist" \
                   "$pkgdir/usr/bin/melody-musiclist"
 }

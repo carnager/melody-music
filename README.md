@@ -10,13 +10,15 @@ Pick a song on your phone, switch playback to your desktop speakers without miss
 
 ## How it works
 
-**melodyd** is the server. Point it at your music folder and it takes care of the rest — scanning, indexing, and playing through mpv. It speaks the MPD protocol, so standard MPD tools (like scrobblers) work out of the box.
+**melodyd** is the server. Point it at your music folder and it takes care of the rest — scanning, indexing with FTS5 full-text search, and playing through mpv. It speaks the MPD protocol, so standard MPD tools (like scrobblers) work out of the box. Supports track and album ratings, replay gain, and instant UI updates via MPD idle.
 
 **melody-agent** turns any machine into a playback target. Install it on your living room PC, your laptop, wherever — each one shows up as an output device you can switch to.
 
-**melody-tui** is a terminal interface for browsing your library, managing the queue, rating tracks, and controlling playback.
+**melody-tui** is a terminal interface for browsing your library, managing the queue, rating tracks and albums, and controlling playback.
 
-**The Android app** does everything the TUI does, plus streaming playback directly on your phone with offline download support.
+**melody-cli** is a command-line client for scripting — search, queue, rate, and control playback from shell scripts or the command line.
+
+**The Android app** does everything the TUI does, plus streaming playback directly on your phone. Features multi-select search results with batch queue operations and structured rating filters.
 
 **melody-rofi** gives you quick album and track selection from a rofi/dmenu launcher.
 

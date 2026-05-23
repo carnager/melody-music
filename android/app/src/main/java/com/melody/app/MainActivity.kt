@@ -55,6 +55,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.StarHalf
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
@@ -66,6 +67,7 @@ import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Download
@@ -88,6 +90,9 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarOutline
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
@@ -130,6 +135,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.compose.AsyncImage
@@ -1076,22 +1082,34 @@ fun TrackList(vm: MainViewModel) {
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                         )
                         val displayRating = if (vm.albumRating > 0) vm.albumRating
-                            else vm.albumComputedRating.let { if (it > 0.0) kotlin.math.round(it).toInt().coerceIn(1, 5) else 0 }
+                            else vm.albumComputedRating.let { if (it > 0.0) kotlin.math.round(it).toInt().coerceIn(1, 10) else 0 }
                         val isComputed = vm.albumRating == 0 && displayRating > 0
                         Spacer(Modifier.height(6.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            for (i in 1..5) {
-                                Icon(
-                                    if (i <= displayRating) Icons.Default.Star else Icons.Default.StarOutline,
-                                    contentDescription = "$i stars",
-                                    tint = if (i <= displayRating) {
-                                        if (isComputed) Color(0xFFE6B422).copy(alpha = 0.5f)
-                                        else Color(0xFFE6B422)
-                                    } else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                                    modifier = Modifier
-                                        .size(22.dp)
-                                        .clickable { vm.rateAlbum(if (vm.albumRating == i) 0 else i) }
-                                )
+                            for (starPos in 1..5) {
+                                val fullValue = starPos * 2
+                                val halfValue = starPos * 2 - 1
+                                val icon = when {
+                                    displayRating >= fullValue -> Icons.Default.Star
+                                    displayRating >= halfValue -> Icons.AutoMirrored.Filled.StarHalf
+                                    else -> Icons.Default.StarOutline
+                                }
+                                val filled = displayRating >= halfValue
+                                val tint = if (filled) {
+                                    if (isComputed) Color(0xFFE6B422).copy(alpha = 0.5f)
+                                    else Color(0xFFE6B422)
+                                } else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                                Box(modifier = Modifier.size(22.dp)) {
+                                    Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.fillMaxSize())
+                                    Row(Modifier.matchParentSize()) {
+                                        Box(Modifier.weight(1f).fillMaxHeight().clickable {
+                                            vm.rateAlbum(if (vm.albumRating == halfValue) 0 else halfValue)
+                                        })
+                                        Box(Modifier.weight(1f).fillMaxHeight().clickable {
+                                            vm.rateAlbum(if (vm.albumRating == fullValue) 0 else fullValue)
+                                        })
+                                    }
+                                }
                             }
                         }
                     }
@@ -1125,118 +1143,290 @@ fun TrackList(vm: MainViewModel) {
 // ==================== Search ====================
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 fun SearchScreen(vm: MainViewModel) {
-    Column(Modifier.fillMaxSize()) {
-        OutlinedTextField(
-            value = vm.searchQuery,
-            onValueChange = { vm.updateSearch(it) },
-            placeholder = { Text("Search albums and tracks\u2026") },
-            singleLine = true,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            shape = RoundedCornerShape(16.dp),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions(onSearch = {}),
-            leadingIcon = { Icon(Icons.Default.Search, "Search") },
-            trailingIcon = {
-                if (vm.searchQuery.isNotBlank()) {
-                    IconButton(onClick = { vm.updateSearch("") }) {
-                        Icon(Icons.Default.Clear, "Clear")
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize()) {
+            OutlinedTextField(
+                value = vm.searchQuery,
+                onValueChange = { vm.updateSearch(it) },
+                placeholder = { Text("Search albums and tracks\u2026") },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                shape = RoundedCornerShape(16.dp),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = {}),
+                leadingIcon = { Icon(Icons.Default.Search, "Search") },
+                trailingIcon = {
+                    if (vm.searchQuery.isNotBlank()) {
+                        IconButton(onClick = { vm.updateSearch("") }) {
+                            Icon(Icons.Default.Clear, "Clear")
+                        }
                     }
                 }
-            }
-        )
+            )
 
-        val res = vm.searchResult
-        LazyColumn(Modifier.fillMaxSize()) {
-            if (res.albums.isNotEmpty()) {
-                item {
-                    Text(
-                        "Albums",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
-                    )
-                }
-                itemsIndexed(res.albums) { _, album ->
-                    ListItem(
-                        leadingContent = {
-                            val searchAlbumCoverUrl = MelodyApp.instance.mpd.coverUrl(album.id, 150)
-                            Box(
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(MaterialTheme.colorScheme.surfaceVariant),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                if (searchAlbumCoverUrl != null) {
-                                    AsyncImage(
-                                        model = ImageRequest.Builder(MelodyApp.instance)
-                                            .data(searchAlbumCoverUrl)
-                                            .crossfade(true)
-                                            .build(),
-                                        contentDescription = "Album art",
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentScale = androidx.compose.ui.layout.ContentScale.Crop
-                                    )
-                                } else {
-                                    Icon(Icons.Default.MusicNote, null, modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            // Rating filter row
+            RatingFilterRow(vm)
+
+            val res = vm.searchResult
+            val selMode = vm.searchSelectionMode
+            val bottomPad = if (selMode && vm.searchSelectionCount > 0) 64.dp else 0.dp
+            LazyColumn(Modifier.fillMaxSize().padding(bottom = bottomPad)) {
+                if (res.albums.isNotEmpty()) {
+                    item {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Albums", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+                            if (selMode) {
+                                val allSelected = vm.selectedSearchAlbums.size == res.albums.size && res.albums.isNotEmpty()
+                                TextButton(onClick = { if (allSelected) vm.deselectAllSearchAlbums() else vm.selectAllSearchAlbums() }) {
+                                    Text(if (allSelected) "Deselect all" else "Select all", style = MaterialTheme.typography.labelSmall)
                                 }
                             }
-                        },
-                        headlineContent = {
-                            Text(album.album, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        },
-                        supportingContent = {
-                            val parts = mutableListOf(album.albumArtist)
-                            if (album.date.isNotBlank()) parts.add(album.date)
-                            Text(parts.joinToString(" \u2022 "), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        },
-                        modifier = Modifier.clickable { vm.showAction(MainViewModel.ActionTarget.SearchAlbumTarget(album)) }
-                    )
-                }
-            }
-            if (res.tracks.isNotEmpty()) {
-                item {
-                    Text(
-                        "Tracks",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
-                    )
-                }
-                itemsIndexed(res.tracks) { _, track ->
-                    ListItem(
-                        headlineContent = {
-                            Text(track.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        },
-                        supportingContent = {
-                            Text(
-                                "${track.artist} \u2014 ${track.album}",
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                        }
+                    }
+                    itemsIndexed(res.albums) { _, album ->
+                        val selected = album in vm.selectedSearchAlbums
+                        ListItem(
+                            colors = ListItemDefaults.colors(
+                                containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer
+                                    else MaterialTheme.colorScheme.surface
+                            ),
+                            leadingContent = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (selMode) {
+                                        Checkbox(checked = selected, onCheckedChange = { vm.toggleSearchAlbum(album) })
+                                    }
+                                    val searchAlbumCoverUrl = MelodyApp.instance.mpd.coverUrl(album.id, 150)
+                                    Box(
+                                        modifier = Modifier
+                                            .size(48.dp)
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (searchAlbumCoverUrl != null) {
+                                            AsyncImage(
+                                                model = ImageRequest.Builder(MelodyApp.instance)
+                                                    .data(searchAlbumCoverUrl)
+                                                    .crossfade(true)
+                                                    .build(),
+                                                contentDescription = "Album art",
+                                                modifier = Modifier.fillMaxSize(),
+                                                contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                                            )
+                                        } else {
+                                            Icon(Icons.Default.MusicNote, null, modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                    }
+                                }
+                            },
+                            headlineContent = {
+                                Text(album.album, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            },
+                            supportingContent = {
+                                val parts = mutableListOf(album.albumArtist)
+                                if (album.date.isNotBlank()) parts.add(album.date)
+                                Text(parts.joinToString(" \u2022 "), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            },
+                            modifier = Modifier.combinedClickable(
+                                onClick = {
+                                    if (selMode) vm.toggleSearchAlbum(album)
+                                    else vm.showAction(MainViewModel.ActionTarget.SearchAlbumTarget(album))
+                                },
+                                onLongClick = {
+                                    if (!selMode) vm.enterSearchSelectionMode(album = album)
+                                    else vm.toggleSearchAlbum(album)
+                                }
                             )
-                        },
-                        modifier = Modifier.clickable { vm.showAction(MainViewModel.ActionTarget.SearchTrackTarget(track)) }
-                    )
-                }
-            }
-            if (vm.searchQuery.isNotBlank() && res.albums.isEmpty() && res.tracks.isEmpty()) {
-                item {
-                    Box(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(48.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            "No results found",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
+                if (res.tracks.isNotEmpty()) {
+                    item {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Tracks", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+                            if (selMode) {
+                                val allSelected = vm.selectedSearchTracks.size == res.tracks.size && res.tracks.isNotEmpty()
+                                TextButton(onClick = { if (allSelected) vm.deselectAllSearchTracks() else vm.selectAllSearchTracks() }) {
+                                    Text(if (allSelected) "Deselect all" else "Select all", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
+                    }
+                    itemsIndexed(res.tracks) { _, track ->
+                        val selected = track.uri in vm.selectedSearchTracks
+                        ListItem(
+                            colors = ListItemDefaults.colors(
+                                containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer
+                                    else MaterialTheme.colorScheme.surface
+                            ),
+                            leadingContent = if (selMode) {{
+                                Checkbox(checked = selected, onCheckedChange = { vm.toggleSearchTrack(track.uri) })
+                            }} else null,
+                            headlineContent = {
+                                Text(track.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            },
+                            supportingContent = {
+                                Text(
+                                    "${track.artist} \u2014 ${track.album}",
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            },
+                            modifier = Modifier.combinedClickable(
+                                onClick = {
+                                    if (selMode) vm.toggleSearchTrack(track.uri)
+                                    else vm.showAction(MainViewModel.ActionTarget.SearchTrackTarget(track))
+                                },
+                                onLongClick = {
+                                    if (!selMode) vm.enterSearchSelectionMode(trackUri = track.uri)
+                                    else vm.toggleSearchTrack(track.uri)
+                                }
+                            )
+                        )
+                    }
+                }
+                if (vm.searchQuery.isNotBlank() && res.albums.isEmpty() && res.tracks.isEmpty()) {
+                    item {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(48.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                "No results found",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Batch action bar
+        if (vm.searchSelectionMode && vm.searchSelectionCount > 0) {
+            Surface(
+                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                tonalElevation = 4.dp
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = { vm.exitSearchSelectionMode() }) {
+                        Icon(Icons.Default.Close, "Cancel")
+                    }
+                    Text(
+                        "${vm.searchSelectionCount} selected",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f).padding(start = 4.dp)
+                    )
+                    TextButton(onClick = { vm.executeBatchAction("add") }) { Text("Add") }
+                    TextButton(onClick = { vm.executeBatchAction("insert") }) { Text("Insert") }
+                    TextButton(onClick = { vm.executeBatchAction("replace") }) { Text("Replace") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun RatingFilterRow(vm: MainViewModel) {
+    var expanded by remember { mutableStateOf(false) }
+    val hasFilter = vm.searchRatingValue != null
+
+    Column(Modifier.padding(horizontal = 16.dp)) {
+        FilterChip(
+            selected = hasFilter,
+            onClick = {
+                if (hasFilter && !expanded) {
+                    vm.clearRatingFilter()
+                } else {
+                    expanded = !expanded
+                }
+            },
+            label = {
+                if (hasFilter) {
+                    val typeLabel = if (vm.searchRatingType == "albumrating") "Album" else "Track"
+                    Text("$typeLabel ${vm.searchRatingOp} ${vm.searchRatingValue}")
+                } else {
+                    Text("Rating filter")
+                }
+            },
+            trailingIcon = if (hasFilter) {{
+                Icon(Icons.Default.Close, "Clear filter",
+                    modifier = Modifier.size(16.dp).clickable { vm.clearRatingFilter(); expanded = false })
+            }} else null
+        )
+
+        if (expanded) {
+            Row(
+                Modifier.fillMaxWidth().padding(top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Type dropdown
+                var typeMenuOpen by remember { mutableStateOf(false) }
+                Box {
+                    TextButton(onClick = { typeMenuOpen = true }) {
+                        Text(if (vm.searchRatingType == "albumrating") "Album" else "Track")
+                        Icon(Icons.Default.ArrowDropDown, null, modifier = Modifier.size(18.dp))
+                    }
+                    DropdownMenu(expanded = typeMenuOpen, onDismissRequest = { typeMenuOpen = false }) {
+                        DropdownMenuItem(text = { Text("Track") }, onClick = {
+                            vm.setRatingFilter("rating", vm.searchRatingOp, vm.searchRatingValue ?: 5)
+                            typeMenuOpen = false
+                        })
+                        DropdownMenuItem(text = { Text("Album") }, onClick = {
+                            vm.setRatingFilter("albumrating", vm.searchRatingOp, vm.searchRatingValue ?: 5)
+                            typeMenuOpen = false
+                        })
+                    }
+                }
+
+                // Operator dropdown
+                var opMenuOpen by remember { mutableStateOf(false) }
+                Box {
+                    TextButton(onClick = { opMenuOpen = true }) {
+                        Text(vm.searchRatingOp)
+                        Icon(Icons.Default.ArrowDropDown, null, modifier = Modifier.size(18.dp))
+                    }
+                    DropdownMenu(expanded = opMenuOpen, onDismissRequest = { opMenuOpen = false }) {
+                        for (op in listOf(">=", "<=", ">", "<", "=")) {
+                            DropdownMenuItem(text = { Text(op) }, onClick = {
+                                vm.setRatingFilter(vm.searchRatingType, op, vm.searchRatingValue ?: 5)
+                                opMenuOpen = false
+                            })
+                        }
+                    }
+                }
+
+                // Value slider
+                val sliderValue = (vm.searchRatingValue ?: 5).toFloat()
+                Text("${sliderValue.toInt()}", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(24.dp))
+                Slider(
+                    value = sliderValue,
+                    onValueChange = {
+                        vm.setRatingFilter(vm.searchRatingType, vm.searchRatingOp, it.toInt())
+                    },
+                    valueRange = 1f..10f,
+                    steps = 8,
+                    modifier = Modifier.weight(1f)
+                )
             }
         }
     }
@@ -1395,14 +1585,7 @@ fun QueueScreen(vm: MainViewModel, onSwitchToLibrary: () -> Unit = {}) {
 
                         if (item.rating > 0) {
                             Row(modifier = Modifier.padding(end = 4.dp)) {
-                                for (i in 1..item.rating) {
-                                    Icon(
-                                        Icons.Default.Star,
-                                        contentDescription = null,
-                                        tint = Color(0xFFE6B422),
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
+                                MiniStars(item.rating, 16.dp)
                             }
                         }
 
@@ -1489,19 +1672,33 @@ fun QueueScreen(vm: MainViewModel, onSwitchToLibrary: () -> Unit = {}) {
                         leadingContent = { Icon(Icons.Default.Star, null) },
                         supportingContent = {
                             Row {
-                                for (i in 1..5) {
-                                    IconButton(onClick = {
-                                        val newRating = if (trackRating == i) 0 else i
-                                        trackRating = newRating
-                                        vm.rateQueueTrack(item.songId, newRating)
-                                    }, modifier = Modifier.size(36.dp)) {
+                                for (starPos in 1..5) {
+                                    val halfValue = starPos * 2 - 1
+                                    val fullValue = starPos * 2
+                                    val icon = when {
+                                        trackRating >= fullValue -> Icons.Default.Star
+                                        trackRating >= halfValue -> Icons.AutoMirrored.Filled.StarHalf
+                                        else -> Icons.Default.StarOutline
+                                    }
+                                    val filled = trackRating >= halfValue
+                                    Box(modifier = Modifier.size(36.dp)) {
                                         Icon(
-                                            if (i <= trackRating) Icons.Default.Star else Icons.Default.StarOutline,
-                                            contentDescription = "$i stars",
-                                            tint = if (i <= trackRating) Color(0xFFE6B422)
+                                            icon,
+                                            contentDescription = null,
+                                            tint = if (filled) Color(0xFFE6B422)
                                                    else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                                            modifier = Modifier.size(24.dp)
+                                            modifier = Modifier.size(24.dp).align(Alignment.Center)
                                         )
+                                        Row(Modifier.matchParentSize()) {
+                                            Box(Modifier.weight(1f).fillMaxHeight().clickable {
+                                                val v = halfValue; trackRating = if (trackRating == v) 0 else v
+                                                vm.rateQueueTrack(item.songId, trackRating)
+                                            })
+                                            Box(Modifier.weight(1f).fillMaxHeight().clickable {
+                                                val v = fullValue; trackRating = if (trackRating == v) 0 else v
+                                                vm.rateQueueTrack(item.songId, trackRating)
+                                            })
+                                        }
                                     }
                                 }
                             }
@@ -2175,26 +2372,53 @@ fun <T> SettingsChipRow(
     }
 }
 
+@Composable
+fun MiniStars(rating: Int, starSize: Dp) {
+    val full = rating / 2
+    val half = rating % 2
+    for (i in 1..full) {
+        Icon(Icons.Default.Star, contentDescription = null, tint = Color(0xFFE6B422), modifier = Modifier.size(starSize))
+    }
+    if (half > 0) {
+        Icon(Icons.AutoMirrored.Filled.StarHalf, contentDescription = null, tint = Color(0xFFE6B422), modifier = Modifier.size(starSize))
+    }
+}
+
 // ==================== Action Sheet ====================
 
 @Composable
 fun RatingBar(rating: Int, onRate: (Int) -> Unit) {
+    // rating is 0-10: each star position covers 2 values (half star = odd, full = even)
     Row(
         horizontalArrangement = Arrangement.Center,
         modifier = Modifier.fillMaxWidth()
     ) {
-        for (i in 1..5) {
-            IconButton(
-                onClick = { onRate(if (rating == i) 0 else i) },
-                modifier = Modifier.size(44.dp)
-            ) {
+        for (starPos in 1..5) {
+            val halfValue = starPos * 2 - 1  // 1,3,5,7,9
+            val fullValue = starPos * 2      // 2,4,6,8,10
+            val icon = when {
+                rating >= fullValue -> Icons.Default.Star
+                rating >= halfValue -> Icons.AutoMirrored.Filled.StarHalf
+                else -> Icons.Default.StarOutline
+            }
+            val tint = if (rating >= halfValue) Color(0xFFE6B422)
+                       else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+            Box(modifier = Modifier.size(44.dp)) {
                 Icon(
-                    if (i <= rating) Icons.Default.Star else Icons.Default.StarOutline,
-                    contentDescription = "$i stars",
-                    tint = if (i <= rating) Color(0xFFE6B422)
-                           else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                    modifier = Modifier.size(28.dp)
+                    icon,
+                    contentDescription = "${starPos} stars",
+                    tint = tint,
+                    modifier = Modifier.size(28.dp).align(Alignment.Center)
                 )
+                // Left half tap = half star (odd), right half tap = full star (even)
+                Row(Modifier.matchParentSize()) {
+                    Box(Modifier.weight(1f).fillMaxHeight().clickable {
+                        onRate(if (rating == halfValue) 0 else halfValue)
+                    })
+                    Box(Modifier.weight(1f).fillMaxHeight().clickable {
+                        onRate(if (rating == fullValue) 0 else fullValue)
+                    })
+                }
             }
         }
     }
@@ -2305,19 +2529,33 @@ fun ActionSheet(vm: MainViewModel) {
                     leadingContent = { Icon(Icons.Default.Star, null) },
                     supportingContent = {
                         Row {
-                            for (i in 1..5) {
-                                IconButton(onClick = {
-                                    val newRating = if (albumRating == i) 0 else i
-                                    albumRating = newRating
-                                    vm.rateAlbumDirect(albumForRating, newRating)
-                                }, modifier = Modifier.size(36.dp)) {
+                            for (starPos in 1..5) {
+                                val halfValue = starPos * 2 - 1
+                                val fullValue = starPos * 2
+                                val icon = when {
+                                    albumRating >= fullValue -> Icons.Default.Star
+                                    albumRating >= halfValue -> Icons.AutoMirrored.Filled.StarHalf
+                                    else -> Icons.Default.StarOutline
+                                }
+                                val filled = albumRating >= halfValue
+                                Box(modifier = Modifier.size(36.dp)) {
                                     Icon(
-                                        if (i <= albumRating) Icons.Default.Star else Icons.Default.StarOutline,
-                                        contentDescription = "$i stars",
-                                        tint = if (i <= albumRating) Color(0xFFE6B422)
+                                        icon,
+                                        contentDescription = null,
+                                        tint = if (filled) Color(0xFFE6B422)
                                                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                                        modifier = Modifier.size(24.dp)
+                                        modifier = Modifier.size(24.dp).align(Alignment.Center)
                                     )
+                                    Row(Modifier.matchParentSize()) {
+                                        Box(Modifier.weight(1f).fillMaxHeight().clickable {
+                                            val v = halfValue; albumRating = if (albumRating == v) 0 else v
+                                            vm.rateAlbumDirect(albumForRating, albumRating)
+                                        })
+                                        Box(Modifier.weight(1f).fillMaxHeight().clickable {
+                                            val v = fullValue; albumRating = if (albumRating == v) 0 else v
+                                            vm.rateAlbumDirect(albumForRating, albumRating)
+                                        })
+                                    }
                                 }
                             }
                         }
