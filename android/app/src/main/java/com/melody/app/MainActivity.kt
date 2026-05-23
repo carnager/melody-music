@@ -835,7 +835,8 @@ fun LibraryScreen(vm: MainViewModel) {
 @Composable
 fun Scrollbar(
     listState: androidx.compose.foundation.lazy.LazyListState,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onDragging: ((Boolean) -> Unit)? = null
 ) {
     val info = listState.layoutInfo
     val totalItems = info.totalItemsCount
@@ -864,6 +865,7 @@ fun Scrollbar(
                     while (true) {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         dragging = true
+                        onDragging?.invoke(true)
                         fun scrollTo(y: Float) {
                             val fraction = (y / size.height).coerceIn(0f, 1f)
                             val targetItem = (fraction * (totalItems - 1)).toInt()
@@ -876,6 +878,7 @@ fun Scrollbar(
                             val change = event.changes.firstOrNull() ?: break
                             if (change.changedToUpIgnoreConsumed()) {
                                 dragging = false
+                                onDragging?.invoke(false)
                                 change.consume()
                                 break
                             }
@@ -949,7 +952,25 @@ fun ArtistList(vm: MainViewModel) {
             }
         }
 
-        Scrollbar(listState, Modifier.align(Alignment.CenterEnd))
+        // Scroll letter indicator
+        var scrollbarDragging by remember { mutableStateOf(false) }
+        val isScrolling = listState.isScrollInProgress || scrollbarDragging
+        val firstIdx = listState.firstVisibleItemIndex
+        val currentLetter = if (firstIdx > 0 && firstIdx <= vm.artists.size) {
+            vm.artists[firstIdx - 1].firstOrNull()?.uppercase() ?: ""
+        } else ""
+        AnimatedVisibility(
+            visible = isScrolling && currentLetter.isNotEmpty(),
+            enter = fadeIn(), exit = fadeOut(),
+            modifier = Modifier.align(Alignment.CenterEnd).padding(end = 48.dp).zIndex(10f)
+        ) {
+            Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.primaryContainer, tonalElevation = 8.dp) {
+                Text(currentLetter, modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+            }
+        }
+
+        Scrollbar(listState, Modifier.align(Alignment.CenterEnd), onDragging = { scrollbarDragging = it })
     }
 }
 
@@ -960,72 +981,94 @@ fun AlbumList(vm: MainViewModel) {
         initialFirstVisibleItemScrollOffset = vm.savedAlbumScrollOffset
     )
 
-    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-        item {
-            Text(
-                "${vm.albums.size} albums",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-            )
-        }
-        items(vm.albums, key = { it.id.ifBlank { "${it.albumArtist}\u0000${it.album}" } }) { album ->
-            val isOffline = vm.downloadedAlbums.contains(album.id)
-            ListItem(
-                leadingContent = {
-                    val albumCoverUrl = MelodyApp.instance.mpd.coverUrl(album.id, 150)
-                    Box(
-                        modifier = Modifier
-                            .size(48.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(MaterialTheme.colorScheme.surfaceVariant),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (albumCoverUrl != null) {
-                            AsyncImage(
-                                model = ImageRequest.Builder(MelodyApp.instance)
-                                    .data(albumCoverUrl)
-                                    .crossfade(true)
-                                    .build(),
-                                contentDescription = "Album art",
-                                modifier = Modifier.fillMaxSize(),
-                                contentScale = androidx.compose.ui.layout.ContentScale.Crop
-                            )
-                        } else {
-                            Icon(Icons.Default.MusicNote, null, modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    Box(Modifier.fillMaxSize()) {
+        LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+            item {
+                Text(
+                    "${vm.albums.size} albums",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+            items(vm.albums, key = { it.id.ifBlank { "${it.albumArtist}\u0000${it.album}" } }) { album ->
+                val isOffline = vm.downloadedAlbums.contains(album.id)
+                ListItem(
+                    leadingContent = {
+                        val albumCoverUrl = MelodyApp.instance.mpd.coverUrl(album.id, 150)
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (albumCoverUrl != null) {
+                                AsyncImage(
+                                    model = ImageRequest.Builder(MelodyApp.instance)
+                                        .data(albumCoverUrl)
+                                        .crossfade(true)
+                                        .build(),
+                                    contentDescription = "Album art",
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                                )
+                            } else {
+                                Icon(Icons.Default.MusicNote, null, modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    },
+                    headlineContent = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(album.album, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                            if (isOffline) {
+                                Spacer(Modifier.width(6.dp))
+                                Icon(
+                                    Icons.Default.DownloadDone,
+                                    "Downloaded",
+                                    modifier = Modifier.size(16.dp),
+                                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+                                )
+                            }
+                        }
+                    },
+                    supportingContent = {
+                        if (album.date.isNotBlank() && album.date != "0000") {
+                            Text(album.date)
+                        }
+                    },
+                    modifier = Modifier.clickable {
+                        vm.saveAlbumScroll(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
+                        vm.loadTracks(album)
+                    },
+                    trailingContent = {
+                        IconButton(onClick = { vm.showAction(MainViewModel.ActionTarget.AlbumTarget(album)) }) {
+                            Icon(Icons.Default.MoreVert, "Actions")
                         }
                     }
-                },
-                headlineContent = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(album.album, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-                        if (isOffline) {
-                            Spacer(Modifier.width(6.dp))
-                            Icon(
-                                Icons.Default.DownloadDone,
-                                "Downloaded",
-                                modifier = Modifier.size(16.dp),
-                                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
-                            )
-                        }
-                    }
-                },
-                supportingContent = {
-                    if (album.date.isNotBlank() && album.date != "0000") {
-                        Text(album.date)
-                    }
-                },
-                modifier = Modifier.clickable {
-                    vm.saveAlbumScroll(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
-                    vm.loadTracks(album)
-                },
-                trailingContent = {
-                    IconButton(onClick = { vm.showAction(MainViewModel.ActionTarget.AlbumTarget(album)) }) {
-                        Icon(Icons.Default.MoreVert, "Actions")
-                    }
-                }
-            )
+                )
+            }
         }
+
+        // Scroll letter indicator
+        var scrollbarDragging by remember { mutableStateOf(false) }
+        val isScrolling = listState.isScrollInProgress || scrollbarDragging
+        val firstIdx = listState.firstVisibleItemIndex
+        val currentLetter = if (firstIdx > 0 && firstIdx <= vm.albums.size) {
+            vm.albums[firstIdx - 1].album.firstOrNull()?.uppercase() ?: ""
+        } else ""
+        AnimatedVisibility(
+            visible = isScrolling && currentLetter.isNotEmpty(),
+            enter = fadeIn(), exit = fadeOut(),
+            modifier = Modifier.align(Alignment.CenterEnd).padding(end = 48.dp).zIndex(10f)
+        ) {
+            Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.primaryContainer, tonalElevation = 8.dp) {
+                Text(currentLetter, modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+            }
+        }
+
+        Scrollbar(listState, Modifier.align(Alignment.CenterEnd), onDragging = { scrollbarDragging = it })
     }
 }
 
@@ -1174,7 +1217,51 @@ fun SearchScreen(vm: MainViewModel) {
             val res = vm.searchResult
             val selMode = vm.searchSelectionMode
             val bottomPad = if (selMode && vm.searchSelectionCount > 0) 64.dp else 0.dp
-            LazyColumn(Modifier.fillMaxSize().padding(bottom = bottomPad)) {
+            val searchListState = rememberLazyListState()
+
+            // Build flat list of labels for scroll indicator
+            val scrollLabels = remember(res) {
+                val labels = mutableListOf<String>()
+                if (res.albums.isNotEmpty()) {
+                    labels.add("") // "Albums" header
+                    for (a in res.albums) labels.add(a.albumArtist.firstOrNull()?.uppercase() ?: "")
+                }
+                if (res.tracks.isNotEmpty()) {
+                    labels.add("") // "Tracks" header
+                    for (t in res.tracks) labels.add(t.artist.firstOrNull()?.uppercase() ?: "")
+                }
+                if (res.albums.isEmpty() && res.tracks.isEmpty() && vm.searchQuery.isNotBlank()) {
+                    labels.add("")
+                }
+                labels
+            }
+
+            Box(Modifier.fillMaxSize()) {
+                // Scroll letter indicator
+                val isScrolling = searchListState.isScrollInProgress
+                val firstIdx = searchListState.firstVisibleItemIndex
+                val currentLetter = scrollLabels.getOrElse(firstIdx) { "" }
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = isScrolling && currentLetter.isNotEmpty(),
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier.align(Alignment.CenterEnd).padding(end = 16.dp).zIndex(10f)
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        tonalElevation = 8.dp
+                    ) {
+                        Text(
+                            currentLetter,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                            style = MaterialTheme.typography.headlineMedium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                }
+
+            LazyColumn(state = searchListState, modifier = Modifier.fillMaxSize().padding(bottom = bottomPad)) {
                 if (res.albums.isNotEmpty()) {
                     item {
                         Row(
@@ -1314,6 +1401,7 @@ fun SearchScreen(vm: MainViewModel) {
                     }
                 }
             }
+            } // end scroll indicator Box
         }
 
         // Batch action bar
