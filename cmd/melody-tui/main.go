@@ -1275,7 +1275,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		// Tick is only for elapsed time interpolation redraws — no status fetch
-		if m.status.State == "playing" {
+		if m.status.State == "play" {
 			m.status.TimePos += time.Since(statusFetchTime).Seconds()
 			statusFetchTime = time.Now()
 			if m.status.TimePos > m.status.Dur && m.status.Dur > 0 {
