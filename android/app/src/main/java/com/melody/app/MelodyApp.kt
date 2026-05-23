@@ -76,10 +76,10 @@ class MelodyApp : Application() {
     }
 
     fun isOnHomeWifi(): Boolean {
+        val currentSSID = getCurrentSSID() ?: return false // no WiFi = not home
         val prefs = getSharedPreferences("melody", Context.MODE_PRIVATE)
         val homeSSID = prefs.getString("home_wifi_ssid", "") ?: ""
-        if (homeSSID.isBlank()) return true
-        val currentSSID = getCurrentSSID() ?: return false // no WiFi = not home
+        if (homeSSID.isBlank()) return true // no home SSID configured, assume any WiFi is home
         return currentSSID == homeSSID
     }
 

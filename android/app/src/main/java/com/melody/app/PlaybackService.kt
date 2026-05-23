@@ -119,13 +119,15 @@ class PlaybackService : Service() {
             } catch (e: Exception) {
                 android.util.Log.e("PlaybackService", "Agent connection error: ${e.message}")
             } finally {
-                // Server disconnected — stop playback immediately.
-                // The agent must not play anything without a live server connection.
+                // Server disconnected — stop streamed playback but keep offline tracks.
                 withContext(Dispatchers.Main) {
-                    player?.stop()
-                    player?.clearMediaItems()
-                    streamStartOffset = 0.0
-                    offlineIndexes.clear()
+                    val p = player
+                    if (p != null && !isCurrentTrackOffline) {
+                        p.stop()
+                        p.clearMediaItems()
+                        streamStartOffset = 0.0
+                        offlineIndexes.clear()
+                    }
                 }
             }
             delay(5000)
@@ -144,6 +146,7 @@ class PlaybackService : Service() {
 
         val client = OkHttpClient.Builder()
             .readTimeout(0, java.util.concurrent.TimeUnit.SECONDS)
+            .pingInterval(3, java.util.concurrent.TimeUnit.SECONDS)
             .build()
         val request = Request.Builder().url(wsUrl).build()
 
@@ -192,6 +195,16 @@ class PlaybackService : Service() {
             return
         }
         android.util.Log.d("PlaybackService", "Agent registered as $name")
+
+        // If resume-on-connect is enabled, tell server to unpause via the MpdClient
+        val prefs = getSharedPreferences("melody", MODE_PRIVATE)
+        if (prefs.getBoolean("resume_on_connect", false)) {
+            try {
+                MelodyApp.instance.mpd.resume()
+            } catch (e: Exception) {
+                android.util.Log.e("PlaybackService", "Resume-on-connect failed: ${e.message}")
+            }
+        }
 
         for (line in lineChannel) {
             if (line.isBlank()) continue
@@ -273,7 +286,8 @@ class PlaybackService : Service() {
                     when (mode) {
                         "replace" -> {
                             offlineIndexes.clear()
-                            streamStartOffset = startOffset
+                            // Offline files: ExoPlayer can seek natively, no offset hack needed
+                            streamStartOffset = if (isOffline) 0.0 else startOffset
                             if (isOffline) offlineIndexes.add(0)
                             p.pause()
                             p.clearMediaItems()

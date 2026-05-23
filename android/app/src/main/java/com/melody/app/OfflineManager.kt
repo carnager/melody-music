@@ -39,6 +39,29 @@ class OfflineManager(private val context: Context) {
         return prefs.getStringSet("downloaded_albums", emptySet()) ?: emptySet()
     }
 
+    /** Returns all downloaded albums with metadata (artist, album name, etc). */
+    fun getDownloadedAlbums(): List<DownloadedAlbumInfo> {
+        val albumIds = getDownloadedAlbumIds()
+        return albumIds.mapNotNull { albumId ->
+            val tracks = loadAlbumMeta(albumId)
+            if (tracks.isEmpty()) return@mapNotNull null
+            val first = tracks.first()
+            DownloadedAlbumInfo(
+                albumId = albumId,
+                albumArtist = first.artist,
+                album = first.album,
+                tracks = tracks
+            )
+        }
+    }
+
+    data class DownloadedAlbumInfo(
+        val albumId: String,
+        val albumArtist: String,
+        val album: String,
+        val tracks: List<Track>
+    )
+
     // --- Download ---
 
     data class DownloadProgress(val albumId: String, val current: Int, val total: Int, val trackTitle: String)

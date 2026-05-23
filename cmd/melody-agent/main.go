@@ -24,10 +24,11 @@ import (
 
 type agentConfig struct {
 	Agent struct {
-		Name       string `toml:"name"`
-		Master     string `toml:"master"` // host:port of master's MPD server
-		Format     string `toml:"format"`
-		MaxBitRate int    `toml:"max_bitrate"`
+		Name             string `toml:"name"`
+		Master           string `toml:"master"` // host:port of master's MPD server
+		Format           string `toml:"format"`
+		MaxBitRate       int    `toml:"max_bitrate"`
+		ResumeOnConnect  bool   `toml:"resume_on_connect"`
 	} `toml:"agent"`
 	MPV struct {
 		Socket     string `toml:"socket"`
@@ -243,6 +244,7 @@ name = "` + hostname + `"
 master = "localhost:6600"
 format = ""
 max_bitrate = 0
+resume_on_connect = false
 
 [mpv]
 socket = ""
@@ -276,6 +278,10 @@ func (a *agent) connectLoop() {
 		if err := a.runSession(); err != nil {
 			a.logger.Printf("session error: %v, reconnecting in 5s", err)
 		}
+		// Server disconnected — stop mpv playback immediately.
+		// The agent must not play anything without a live server connection.
+		_ = a.mpv.playlistClear()
+		_ = a.mpv.setProperty("pause", true)
 		time.Sleep(5 * time.Second)
 	}
 }
@@ -324,6 +330,11 @@ func (a *agent) runSession() error {
 	}
 	a.logger.Printf("registered as %q", a.cfg.Agent.Name)
 
+	// Resume playback if configured
+	if a.cfg.Agent.ResumeOnConnect {
+		go a.sendResume()
+	}
+
 	// Command loop — master sends commands, we execute and respond
 	for {
 		line, err := reader.ReadString('\n')
@@ -340,6 +351,27 @@ func (a *agent) runSession() error {
 			return fmt.Errorf("write response: %w", err)
 		}
 	}
+}
+
+func (a *agent) sendResume() {
+	conn, err := net.DialTimeout("tcp", a.cfg.Agent.Master, 5*time.Second)
+	if err != nil {
+		a.logger.Printf("resume-on-connect: dial failed: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	r := bufio.NewReader(conn)
+	// Read greeting
+	if _, err := r.ReadString('\n'); err != nil {
+		return
+	}
+	fmt.Fprintf(conn, "pause 0\n")
+	if _, err := r.ReadString('\n'); err != nil {
+		return
+	}
+	fmt.Fprintf(conn, "close\n")
+	a.logger.Printf("resume-on-connect: sent unpause")
 }
 
 func (a *agent) handleCommand(w *bufio.Writer, line string) {

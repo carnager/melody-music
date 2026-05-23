@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.8.0 (2026-05-23)
+
+### Features
+
+- Save and restore playback state across server restarts (queue position, time, play/pause)
+- Per-client resume-on-connect setting (Android app settings toggle, agent config option)
+- Offline library filter in Android app (FilterList icon on artist list)
+- Graceful server shutdown with signal handling (saves state, closes agent connections)
+- TUI redraws library browser on server reconnect
+- Network-aware server selection: use external address when not on WiFi
+
+### Bug Fixes
+
+- Fix offline files starting from 00:00 on device handoff (always pass real timePos)
+- Fix offline filter showing all artists (polling was overwriting filtered list)
+- Fix offline filter hiding toggle button when no albums downloaded
+- Fix Android using local server address when not on any WiFi
+- Desktop agent stops playback immediately when server disconnects
+
 ## 0.7.0 (2026-05-23)
 
 ### Features

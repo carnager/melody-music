@@ -68,6 +68,7 @@ class MainViewModel : ViewModel() {
     // Offline downloads
     var downloadProgress by mutableStateOf<OfflineManager.DownloadProgress?>(null); private set
     var downloadedAlbums by mutableStateOf<Set<String>>(emptySet()); private set
+    var showCachedOnly by mutableStateOf(false); private set
 
     private var pollJob: Job? = null
     private var playbackPollJob: Job? = null
@@ -122,8 +123,8 @@ class MainViewModel : ViewModel() {
         currentTrackOffline = PlaybackService.instance?.isCurrentTrackOffline ?: false
         codecInfo = PlaybackService.instance?.codecInfo ?: ""
         updatePlaybackPolling()
-        // Retry loading artists if connection recovered
-        if (artists.isEmpty() && mpd.connected) {
+        // Retry loading artists if connection recovered (but not when filtering to cached-only)
+        if (artists.isEmpty() && mpd.connected && !showCachedOnly) {
             try { artists = mpd.getArtists() } catch (_: Exception) {}
         }
     }
@@ -171,6 +172,7 @@ class MainViewModel : ViewModel() {
     }
 
     fun loadAlbums(artist: String) {
+        if (showCachedOnly) { loadCachedAlbums(artist); return }
         viewModelScope.launch {
             curArtist = artist
             try { albums = mpd.getAlbums(artist) } catch (_: Exception) {}
@@ -179,6 +181,7 @@ class MainViewModel : ViewModel() {
     }
 
     fun loadTracks(album: Album) {
+        if (showCachedOnly) { loadCachedTracks(album); return }
         viewModelScope.launch {
             curAlbum = album
             try { tracks = mpd.getTracks(album.albumArtist, album.album) } catch (_: Exception) {}
@@ -478,6 +481,41 @@ class MainViewModel : ViewModel() {
     }
 
     fun isAlbumDownloaded(albumId: String): Boolean = offline.isAlbumDownloaded(albumId)
+
+    fun toggleCachedOnly() {
+        showCachedOnly = !showCachedOnly
+        if (showCachedOnly) {
+            loadCachedLibrary()
+        } else {
+            loadArtists()
+        }
+    }
+
+    private fun cachedAlbumsWithFiles(): List<OfflineManager.DownloadedAlbumInfo> {
+        return offline.getDownloadedAlbums()
+            .filter { it.albumArtist.isNotBlank() && it.album.isNotBlank() }
+            .filter { info -> info.tracks.any { offline.isSongDownloaded(it.songId) } }
+    }
+
+    private fun loadCachedLibrary() {
+        val cached = cachedAlbumsWithFiles()
+        artists = cached.map { it.albumArtist }.distinct().sorted()
+        libView = LibView.Artists
+    }
+
+    fun loadCachedAlbums(artist: String) {
+        curArtist = artist
+        val cached = cachedAlbumsWithFiles().filter { it.albumArtist == artist }
+        albums = cached.map { Album(it.albumId, it.albumArtist, it.album, "") }
+        libView = LibView.Albums
+    }
+
+    fun loadCachedTracks(album: Album) {
+        curAlbum = album
+        val cached = cachedAlbumsWithFiles().find { it.albumId == album.id }
+        tracks = cached?.tracks?.filter { offline.isSongDownloaded(it.songId) } ?: emptyList()
+        libView = LibView.Tracks
+    }
 
     // --- Add to playlist ---
 

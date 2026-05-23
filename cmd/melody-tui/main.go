@@ -438,6 +438,7 @@ type statusMsg struct {
 	queue        []queueItem
 	queueVersion int
 	queueChanged bool
+	reconnected  bool
 }
 
 type artistsMsg []string
@@ -687,18 +688,20 @@ func listenIdle() tea.Msg {
 }
 
 func fetchStatus() tea.Msg {
+	reconnected := false
 	if mpd == nil {
 		reconnectMPD()
 		if mpd == nil {
 			return statusMsg{}
 		}
+		reconnected = true
 	}
 
 	// First fetch status + currentsong
 	results, err := mpd.cmdBatch([]string{"status", "currentsong"})
 	if err != nil || len(results) < 2 {
 		reconnectMPD()
-		return statusMsg{}
+		return statusMsg{reconnected: mpd != nil}
 	}
 
 	st := parseKV(results[0])
@@ -734,13 +737,13 @@ func fetchStatus() tea.Msg {
 	qVersion, _ := strconv.Atoi(st["playlist"])
 	if qVersion == lastQueueVersion && lastQueueVersion > 0 {
 		// Queue unchanged — return status only, update current position
-		return statusMsg{status: ps, queueVersion: qVersion, queueChanged: false}
+		return statusMsg{status: ps, queueVersion: qVersion, queueChanged: false, reconnected: reconnected}
 	}
 
 	// Queue changed — fetch it
 	qResults, err := mpd.cmdBatch([]string{"playlistinfo"})
 	if err != nil || len(qResults) < 1 {
-		return statusMsg{status: ps, queueVersion: qVersion, queueChanged: false}
+		return statusMsg{status: ps, queueVersion: qVersion, queueChanged: false, reconnected: reconnected}
 	}
 
 	groups := parseGroups(qResults[0], "file")
@@ -767,7 +770,7 @@ func fetchStatus() tea.Msg {
 	}
 
 	lastQueueVersion = qVersion
-	return statusMsg{status: ps, queue: queue, queueVersion: qVersion, queueChanged: true}
+	return statusMsg{status: ps, queue: queue, queueVersion: qVersion, queueChanged: true, reconnected: reconnected}
 }
 
 func fetchAlbumArt(file string) tea.Cmd {
@@ -1438,6 +1441,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			for i := range m.queue {
 				m.queue[i].Current = m.queue[i].Position == m.status.SongPos
 			}
+		}
+		// On reconnect, refetch library data
+		if msg.reconnected {
+			return m, tea.Cmd(fetchArtists)
 		}
 		// Fetch album art if track changed
 		curFile := ""

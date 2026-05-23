@@ -12,7 +12,9 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"sort"
 	"strconv"
 	"strings"
@@ -57,6 +59,7 @@ type paths struct {
 	DBFile            string
 	ActiveDeviceFile  string
 	PlayQueueFile     string
+	PlayStateFile     string
 	TranscodeCacheDir string
 }
 
@@ -220,6 +223,7 @@ func main() {
 
 	go a.ensureMPV()
 	go a.watchMPVTrackChanges()
+	go a.watchPlayState()
 	go a.deviceCleanup()
 	if a.cfg.MPD.Port > 0 {
 		go func() {
@@ -228,6 +232,21 @@ func main() {
 			}
 		}()
 	}
+	// Graceful shutdown on SIGINT/SIGTERM: save state, close agents, exit.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		logger.Println("shutting down...")
+		a.savePlayState()
+		a.devicesMu.Lock()
+		for _, at := range a.agentTargets {
+			at.close()
+		}
+		a.devicesMu.Unlock()
+		os.Exit(0)
+	}()
+
 	if err := a.serve(); err != nil {
 		logger.Fatalf("listen and serve: %v", err)
 	}
@@ -251,6 +270,7 @@ func loadConfig() (config, paths, error) {
 		DBFile:            filepath.Join(xdgData, "melody", "melody.db"),
 		ActiveDeviceFile:  filepath.Join(xdgData, "melody", "active_device"),
 		PlayQueueFile:     filepath.Join(xdgData, "melody", "playqueue.json"),
+		PlayStateFile:     filepath.Join(xdgData, "melody", "playstate.json"),
 		TranscodeCacheDir: filepath.Join(xdgData, "melody", "transcode_cache"),
 	}
 
@@ -1097,9 +1117,85 @@ func (a *app) reloadQueueIntoTarget() {
 			return
 		}
 	}
-	// Pause immediately — we're just restoring state, not starting playback
+	// Pause initially; restorePlayState will seek and optionally resume
 	_ = t.setProperty("pause", true)
 	a.logger.Printf("restored %d tracks into mpv (paused)", len(queue))
+
+	a.restorePlayState()
+}
+
+// playState represents saved playback position for resume across restarts.
+type playState struct {
+	SongPos int     `json:"song_pos"`
+	TimePos float64 `json:"time_pos"`
+	Playing bool    `json:"playing"`
+}
+
+func (a *app) savePlayState() {
+	t := a.target()
+	if t == nil || !t.isRunning() {
+		return
+	}
+	var ps playState
+	if posRaw, err := t.getProperty("playlist-pos"); err == nil {
+		if f, ok := posRaw.(float64); ok {
+			ps.SongPos = int(f)
+		}
+	}
+	if tpRaw, err := t.getProperty("time-pos"); err == nil {
+		if f, ok := tpRaw.(float64); ok {
+			ps.TimePos = f
+		}
+	}
+	if pauseRaw, err := t.getProperty("pause"); err == nil {
+		if p, ok := pauseRaw.(bool); ok {
+			ps.Playing = !p
+		}
+	}
+	data, _ := json.Marshal(ps)
+	_ = os.WriteFile(a.paths.PlayStateFile, data, 0o644)
+}
+
+func (a *app) restorePlayState() {
+	data, err := os.ReadFile(a.paths.PlayStateFile)
+	if err != nil {
+		return
+	}
+	var ps playState
+	if json.Unmarshal(data, &ps) != nil {
+		return
+	}
+
+	t := a.target()
+
+	if ps.SongPos > 0 {
+		_ = t.setProperty("playlist-pos", ps.SongPos)
+	}
+
+	// Wait for track to load
+	for i := 0; i < 40; i++ {
+		if v, err := t.getProperty("duration"); err == nil {
+			if d, ok := v.(float64); ok && d > 0 {
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if ps.TimePos > 0 {
+		_ = t.setProperty("time-pos", ps.TimePos)
+	}
+
+	// Always restore paused — clients decide whether to resume.
+	a.logger.Printf("restored position: track %d, %.1fs (paused)", ps.SongPos, ps.TimePos)
+}
+
+// watchPlayState periodically saves playback position to disk.
+func (a *app) watchPlayState() {
+	for {
+		time.Sleep(5 * time.Second)
+		a.savePlayState()
+	}
 }
 
 func (a *app) currentPlayingSongID() string {
@@ -1417,12 +1513,10 @@ func (a *app) switchDevice(newID string) error {
 		switch {
 		case newDev.Type == "agent":
 			at := newTarget.(*agentTarget)
-			if isTranscoding {
-				// Seek baked into URL via ffmpeg -ss; tell agent to just set position
-				if err := at.handoff(playlistPos, 0, wasPaused); err != nil {
-					a.logger.Printf("device handoff: agent handoff failed: %v", err)
-				}
-			} else if err := at.handoff(playlistPos, timePos, wasPaused); err != nil {
+			// Always pass real timePos — the agent handles both cases:
+			// - transcoded stream: start= in URL handles seek, agent skips redundant seek
+			// - offline file: agent seeks directly with ExoPlayer
+			if err := at.handoff(playlistPos, timePos, wasPaused); err != nil {
 				a.logger.Printf("device handoff: agent handoff failed: %v", err)
 			}
 		default: // local mpv

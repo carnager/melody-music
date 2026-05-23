@@ -72,6 +72,7 @@ import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
+import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.LibraryMusic
@@ -112,6 +113,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -923,7 +925,7 @@ fun Scrollbar(
 
 @Composable
 fun ArtistList(vm: MainViewModel) {
-    if (vm.artists.isEmpty()) {
+    if (vm.artists.isEmpty() && !vm.showCachedOnly) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("Loading...", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -938,12 +940,26 @@ fun ArtistList(vm: MainViewModel) {
     Box(Modifier.fillMaxSize()) {
         LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
             item {
-                Text(
-                    "${vm.artists.size} artists",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        if (vm.showCachedOnly && vm.artists.isEmpty()) "No offline albums"
+                        else "${vm.artists.size} artists",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    IconButton(onClick = { vm.toggleCachedOnly() }) {
+                        Icon(
+                            Icons.Default.FilterList,
+                            contentDescription = if (vm.showCachedOnly) "Show all" else "Show offline only",
+                            tint = if (vm.showCachedOnly) MaterialTheme.colorScheme.primary
+                                   else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
             itemsIndexed(vm.artists) { _, artist ->
                 ListItem(
@@ -2388,6 +2404,29 @@ fun SettingsScreen(onDismiss: () -> Unit) {
                         options = listOf("off" to "Off", "track" to "Track", "album" to "Album"),
                         selected = replaygain,
                         onSelect = { replaygain = it; saveAll() }
+                    )
+                }
+
+                // --- Playback section ---
+                item {
+                    SettingsSectionHeader("Playback")
+                }
+                item {
+                    var resumeOnConnect by remember {
+                        mutableStateOf(prefs.getBoolean("resume_on_connect", false))
+                    }
+                    ListItem(
+                        headlineContent = { Text("Resume on connect") },
+                        supportingContent = { Text("Auto-resume playback when connecting to server") },
+                        trailingContent = {
+                            Switch(
+                                checked = resumeOnConnect,
+                                onCheckedChange = {
+                                    resumeOnConnect = it
+                                    prefs.edit().putBoolean("resume_on_connect", it).apply()
+                                }
+                            )
+                        }
                     )
                 }
 
