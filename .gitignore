@@ -6,6 +6,7 @@ melodyd/bin/
 cmd/*/melody*
 !cmd/*/main.go
 *.png
+!Screenshots/*.png
 
 # Android
 android/local.properties
