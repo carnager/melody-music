@@ -1589,8 +1589,9 @@ func cmdWebRegister(c *mpdConn, args []string) *mpdError {
 		}
 		// Preserve paused=false so status reports "play" state
 		_ = wt.setProperty("pause", false)
-	} else {
-		// First registration: switch to this web device (loads queue via switchDevice)
+	} else if a.activeDevice == "" || a.activeDevice == "local" {
+		// Only auto-switch to web if no other device is active.
+		// Don't steal playback from a running agent.
 		if err := a.switchDevice(devID); err != nil {
 			a.logger.Printf("web client auto-switch failed: %v", err)
 		}
@@ -1677,7 +1678,11 @@ func cmdReplayGainMode(c *mpdConn, args []string) *mpdError {
 	if len(args) < 1 {
 		return mpdErr(errArg, "replay_gain_mode", "need mode argument")
 	}
-	c.app.cfg.MPV.ReplayGain = args[0]
+	mode := args[0]
+	c.app.cfg.MPV.ReplayGain = mode
+	// Push to the currently active target
+	t := c.app.target()
+	_ = t.setProperty("replaygain", mode)
 	c.app.mpdHub.notify(SubOptions)
 	return nil
 }
@@ -1794,6 +1799,14 @@ func (c *mpdConn) writeTrack(track map[string]any, pos int, mpdID int) {
 	}
 	if v := intFromAny(track["rating"], 0); v > 0 {
 		c.writeKV("X-Rating", v)
+	}
+	if rg, ok := track["replay_gain"].(map[string]any); ok {
+		if v, _ := rg["track_gain"].(float64); v != 0 {
+			c.writef("X-ReplayGainTrack: %.2f\n", v)
+		}
+		if v, _ := rg["album_gain"].(float64); v != 0 {
+			c.writef("X-ReplayGainAlbum: %.2f\n", v)
+		}
 	}
 }
 

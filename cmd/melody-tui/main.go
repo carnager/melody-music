@@ -366,18 +366,19 @@ func reconnectMPD() {
 // ---------------------------------------------------------------------------
 
 type playbackStatus struct {
-	State       string
-	Title       string
-	Artist      string
-	AlbumArtist string
-	Album       string
-	Date        string
-	TimePos     float64
-	Dur         float64
-	Volume      int
-	Rating      int
-	SongID      string // X-SongId for rating commands
-	SongPos     int    // current song position in queue
+	State          string
+	Title          string
+	Artist         string
+	AlbumArtist    string
+	Album          string
+	Date           string
+	TimePos        float64
+	Dur            float64
+	Volume         int
+	Rating         int
+	SongID         string // X-SongId for rating commands
+	SongPos        int    // current song position in queue
+	ReplayGainMode string // "off", "track", "album"
 }
 
 type queueItem struct {
@@ -700,8 +701,8 @@ func fetchStatus() tea.Msg {
 		reconnected = true
 	}
 
-	// First fetch status + currentsong
-	results, err := mpd.cmdBatch([]string{"status", "currentsong"})
+	// First fetch status + currentsong + replay_gain_status
+	results, err := mpd.cmdBatch([]string{"status", "currentsong", "replay_gain_status"})
 	if err != nil || len(results) < 2 {
 		reconnectMPD()
 		return statusMsg{reconnected: mpd != nil}
@@ -709,6 +710,10 @@ func fetchStatus() tea.Msg {
 
 	st := parseKV(results[0])
 	cs := parseKV(results[1])
+	var rgs map[string]string
+	if len(results) >= 3 {
+		rgs = parseKV(results[2])
+	}
 
 	var ps playbackStatus
 	ps.State = st["state"]
@@ -731,6 +736,12 @@ func fetchStatus() tea.Msg {
 	ps.SongPos = -1
 	if v, ok := st["song"]; ok {
 		ps.SongPos, _ = strconv.Atoi(v)
+	}
+	if rgs != nil {
+		ps.ReplayGainMode = rgs["replay_gain_mode"]
+	}
+	if ps.ReplayGainMode == "" {
+		ps.ReplayGainMode = "off"
 	}
 	statusFetchTime = time.Now()
 
@@ -1773,6 +1784,18 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "u":
 		return m, mpdCommand("update")
+	case "ctrl+g":
+		// Cycle ReplayGain mode: off → track → album → off
+		var nextMode string
+		switch m.status.ReplayGainMode {
+		case "track":
+			nextMode = "album"
+		case "album":
+			nextMode = "off"
+		default:
+			nextMode = "track"
+		}
+		return m, mpdCommand("replay_gain_mode " + nextMode)
 	case "?":
 		m.showHelp = true
 		return m, nil
@@ -3237,7 +3260,11 @@ func (m model) playerView() string {
 	if m.status.Rating > 0 {
 		ratingStr = " " + lipgloss.NewStyle().Foreground(lipgloss.Color("#e6b422")).Render(renderRating(m.status.Rating))
 	}
-	line1 := titleStyle.Render(stateIcon) + " " + truncate(np, infoW-4-12) + ratingStr
+	rgStr := ""
+	if m.status.ReplayGainMode != "" && m.status.ReplayGainMode != "off" {
+		rgStr = " " + dimStyle.Render("[RG:" + m.status.ReplayGainMode + "]")
+	}
+	line1 := titleStyle.Render(stateIcon) + " " + truncate(np, infoW-4-12) + ratingStr + rgStr
 	line2 := timeL + " " + bar + " " + timeR
 	hints := dimStyle.Render("[/]search [?]help [space]play [<>]prev/next [s]stop [r]album [R]tracks [P]playlists [D]devices [*]rate [q]quit")
 	line3 := truncate(hints, infoW)
@@ -3273,6 +3300,7 @@ func (m model) helpView() string {
 			"  P          Playlists",
 			"  D          Device picker",
 			"  *          Rate track/album",
+			"  Ctrl+G     Cycle ReplayGain (off/track/album)",
 			"  Tab        Switch panel focus",
 			"  q          Quit",
 		}, "\n")},

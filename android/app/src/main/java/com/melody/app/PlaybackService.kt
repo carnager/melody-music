@@ -30,6 +30,10 @@ class PlaybackService : Service() {
 
     @Volatile var codecInfo: String = ""
         private set
+    @Volatile private var replaygainMode: String = "off"
+    @Volatile private var rgTrackGain: Double = 0.0
+    @Volatile private var rgAlbumGain: Double = 0.0
+    @Volatile private var userVolume: Float = 1.0f  // volume set by server (0..1)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -70,6 +74,7 @@ class PlaybackService : Service() {
                         streamStartOffset = 0.0
                     }
                     updateCodecInfo()
+                    fetchAndApplyReplayGain()
                 }
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                     android.util.Log.e("PlaybackService", "ExoPlayer error: ${error.errorCodeName} — ${error.message}")
@@ -77,6 +82,8 @@ class PlaybackService : Service() {
             })
         }
         android.util.Log.d("PlaybackService", "ExoPlayer initialized")
+        val prefs = getSharedPreferences("melody", MODE_PRIVATE)
+        replaygainMode = prefs.getString("replaygain", "off") ?: "off"
         registerAgent()
     }
 
@@ -343,7 +350,7 @@ class PlaybackService : Service() {
                         }
                         "playlist-pos" -> p.currentMediaItemIndex.toString()
                         "playlist-count" -> p.mediaItemCount.toString()
-                        "volume" -> (p.volume * 100).toInt().toString()
+                        "volume" -> (userVolume * 100).toInt().toString()
                         else -> ""
                     }
                     "value: $value\nOK"
@@ -379,7 +386,13 @@ class PlaybackService : Service() {
                         }
                         "volume" -> {
                             val vol = value.toDoubleOrNull() ?: 100.0
-                            p.volume = (vol / 100.0).toFloat().coerceIn(0f, 1f)
+                            userVolume = (vol / 100.0).toFloat().coerceIn(0f, 1f)
+                            applyReplayGain(p)
+                        }
+                        "replaygain" -> {
+                            replaygainMode = value
+                            applyReplayGain(p)
+                            fetchAndApplyReplayGain()
                         }
                     }
                     "OK"
@@ -387,13 +400,29 @@ class PlaybackService : Service() {
 
                 "mpv_command" -> {
                     if (args.isEmpty()) return@withContext "ACK [2@0] {mpv_command} missing command"
-                    if (args[0] == "seek" && args.size >= 2) {
-                        val seekSecs = args[1].toDoubleOrNull() ?: 0.0
-                        val currentUri = p.currentMediaItem?.localConfiguration?.uri?.toString() ?: ""
-                        if (isTranscodedUrl(currentUri)) {
-                            reloadWithOffset(p, currentUri, seekSecs)
-                        } else {
-                            p.seekTo((seekSecs * 1000).toLong())
+                    when (args[0]) {
+                        "playlist-next" -> {
+                            if (p.currentMediaItemIndex + 1 < p.mediaItemCount) {
+                                streamStartOffset = 0.0
+                                p.seekToDefaultPosition(p.currentMediaItemIndex + 1)
+                            }
+                        }
+                        "playlist-prev" -> {
+                            if (p.currentMediaItemIndex > 0) {
+                                streamStartOffset = 0.0
+                                p.seekToDefaultPosition(p.currentMediaItemIndex - 1)
+                            }
+                        }
+                        "seek" -> {
+                            if (args.size >= 2) {
+                                val seekSecs = args[1].toDoubleOrNull() ?: 0.0
+                                val currentUri = p.currentMediaItem?.localConfiguration?.uri?.toString() ?: ""
+                                if (isTranscodedUrl(currentUri)) {
+                                    reloadWithOffset(p, currentUri, seekSecs)
+                                } else {
+                                    p.seekTo((seekSecs * 1000).toLong())
+                                }
+                            }
                         }
                     }
                     "OK"
@@ -482,6 +511,41 @@ class PlaybackService : Service() {
             val p = player ?: return false
             return offlineIndexes.contains(p.currentMediaItemIndex)
         }
+
+    private fun applyReplayGain(p: ExoPlayer) {
+        val gainDb = when (replaygainMode) {
+            "track" -> rgTrackGain
+            "album" -> rgAlbumGain
+            else -> 0.0
+        }
+        val rgFactor = if (gainDb != 0.0) Math.pow(10.0, gainDb / 20.0).toFloat().coerceIn(0f, 1f) else 1.0f
+        p.volume = (userVolume * rgFactor).coerceIn(0f, 1f)
+    }
+
+    private fun fetchAndApplyReplayGain() {
+        scope.launch {
+            try {
+                val lines = MelodyApp.instance.mpd.cmd("currentsong")
+                var trackGain = 0.0
+                var albumGain = 0.0
+                for (line in lines) {
+                    when {
+                        line.startsWith("X-ReplayGainTrack: ") ->
+                            trackGain = line.substringAfter(": ").toDoubleOrNull() ?: 0.0
+                        line.startsWith("X-ReplayGainAlbum: ") ->
+                            albumGain = line.substringAfter(": ").toDoubleOrNull() ?: 0.0
+                    }
+                }
+                rgTrackGain = trackGain
+                rgAlbumGain = albumGain
+                withContext(Dispatchers.Main) {
+                    player?.let { applyReplayGain(it) }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("PlaybackService", "Failed to fetch RG data: ${e.message}")
+            }
+        }
+    }
 
     companion object {
         var instance: PlaybackService? = null

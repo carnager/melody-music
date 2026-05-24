@@ -61,11 +61,23 @@
         processBuffer();
       };
 
+      function findLineStart(str, token) {
+        // Find `token` only at the start of a line (pos 0 or preceded by \n)
+        var pos = 0;
+        while (pos < str.length) {
+          var idx = str.indexOf(token, pos);
+          if (idx === -1) return -1;
+          if (idx === 0 || str[idx - 1] === "\n") return idx;
+          pos = idx + 1;
+        }
+        return -1;
+      }
+
       function processBuffer() {
-        // Look for OK or ACK to resolve pending command
+        // Look for OK or ACK at start of line to resolve pending command
         while (cmdQueue.length > 0) {
-          const okIdx = buf.indexOf("OK\n");
-          const ackIdx = buf.indexOf("ACK ");
+          var okIdx = findLineStart(buf, "OK\n");
+          var ackIdx = findLineStart(buf, "ACK ");
 
           if (okIdx === -1 && ackIdx === -1) break;
 
@@ -94,6 +106,12 @@
 
       cmdWs.onclose = function () {
         connected = false;
+        // Reject all pending commands so callers don't hang
+        while (cmdQueue.length > 0) {
+          var entry = cmdQueue.shift();
+          entry.reject(new Error("disconnected"));
+        }
+        buf = "";
         if (onDisconnect) onDisconnect();
         scheduleReconnect();
       };
@@ -282,8 +300,9 @@
       } else if (k === "X-AlbumId") {
         if (cur) cur["X-AlbumId"] = v;
       }
+      if (items.length >= 50) break;
     }
-    if (cur && cur.Album) items.push(cur);
+    if (cur && cur.Album && items.length < 50) items.push(cur);
     return items;
   }
 
@@ -429,16 +448,20 @@
   // Browsers block audio.play() unless it originates from a user gesture.
   // We create a silent AudioContext on the first click to permanently unlock audio.
   let audioCtx = null;
+  let gainNode = null;
+  var rgMode = "off";
+  var rgTrackGain = 0;
+  var rgAlbumGain = 0;
   document.addEventListener("click", function () {
     if (audioUnlocked) return;
     try {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      // Connect audio element to the context so it's considered "user-activated"
-      const source = audioCtx.createMediaElementSource(audio);
-      source.connect(audioCtx.destination);
+      gainNode = audioCtx.createGain();
+      var source = audioCtx.createMediaElementSource(audio);
+      source.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
       audioUnlocked = true;
     } catch (e) {
-      // Fallback: just mark as unlocked and hope for the best
       audioUnlocked = true;
     }
   }, { once: true });
@@ -507,6 +530,14 @@
     if (tot) tot.textContent = formatTime(audio.duration);
   });
 
+  function applyReplayGain() {
+    if (!gainNode) return;
+    var db = 0;
+    if (rgMode === "track") db = rgTrackGain;
+    else if (rgMode === "album") db = rgAlbumGain;
+    gainNode.gain.value = db !== 0 ? Math.pow(10, db / 20) : 1.0;
+  }
+
   // -------------------------------------------------------------------------
   // Auth
   // -------------------------------------------------------------------------
@@ -571,6 +602,7 @@
     navArtist = null;
     navAlbum = null;
     navAlbumDate = null;
+    libSortLatest = false;
     if (opts) {
       navArtist = opts.artist || null;
       navAlbum = opts.album || null;
@@ -638,7 +670,9 @@
       for (const al of albums) {
         const artist = al.AlbumArtist || "";
         html += '<div class="album-card" data-artist="' + escAttr(artist) + '" data-album="' + escAttr(al.Album) + '" data-date="' + escAttr(al.Date || "") + '">';
-        html += '<div class="album-art-wrap"><img class="album-art" data-artist="' + escAttr(artist) + '" data-album="' + escAttr(al.Album) + '" src="" alt="" loading="lazy"></div>';
+        const albumId = al["X-AlbumId"] || "";
+        const coverSrc = albumId ? "/api/v1/cover/" + albumId : "";
+        html += '<div class="album-art-wrap"><img class="album-art" src="' + escAttr(coverSrc) + '" alt="" loading="lazy" onerror="this.style.display=\'none\'"></div>';
         html += '<div class="album-name">' + esc(al.Album) + "</div>";
         html += '<div class="album-date">' + esc(artist);
         if (al.Date) html += ' \u00B7 ' + esc(al.Date);
@@ -647,21 +681,6 @@
       }
       html += "</div>";
       $content.innerHTML = html;
-
-      // Load covers
-      for (const al of albums) {
-        const artist = al.AlbumArtist || "";
-        try {
-          const tracks = await getTracks(artist, al.Album);
-          if (tracks.length > 0 && tracks[0]["X-AlbumId"]) {
-            const imgs = $content.querySelectorAll('img[data-album="' + CSS.escape(al.Album) + '"][data-artist="' + CSS.escape(artist) + '"]');
-            imgs.forEach(function (img) {
-              img.src = "/api/v1/cover/" + tracks[0]["X-AlbumId"];
-              img.onerror = function () { img.style.display = "none"; };
-            });
-          }
-        } catch (e) { /* ignore */ }
-      }
 
       document.getElementById("latest-sort-toggle").addEventListener("click", function () {
         libSortLatest = false;
@@ -814,7 +833,12 @@
 
       document.getElementById("tracks-back").addEventListener("click", function () {
         navAlbum = null;
-        renderAlbums(navArtist);
+        if (libSortLatest) {
+          navArtist = null;
+          renderAllAlbumsLatest();
+        } else {
+          renderAlbums(navArtist);
+        }
       });
       document.getElementById("album-play").addEventListener("click", function () { replaceQueueAlbum(artist, album); });
       document.getElementById("album-add").addEventListener("click", function () { addAlbumToQueue(artist, album); });
@@ -1090,12 +1114,17 @@
 
   // --- Queue Panel (sidebar) ---
 
+  var queuePanelGen = 0;
+
   async function refreshQueuePanel() {
     const panel = document.getElementById("queue-list");
     if (!panel) return;
+    var gen = ++queuePanelGen;
     try {
       const queue = await getQueue();
+      if (gen !== queuePanelGen) return; // stale
       const status = await getStatus();
+      if (gen !== queuePanelGen) return; // stale
       const currentPos = parseInt(status.song || "-1", 10);
 
       if (queue.length === 0) {
@@ -1207,12 +1236,24 @@
 
   // --- Now Playing Bar ---
 
+  var nowPlayingGen = 0;
+
   async function refreshNowPlaying() {
+    var gen = ++nowPlayingGen;
     try {
       const status = await getStatus();
+      if (gen !== nowPlayingGen) return;
       const song = await getCurrentSong();
+      if (gen !== nowPlayingGen) return;
       set("status", status);
       set("currentSong", song);
+
+      // Update ReplayGain values from current song
+      if (song) {
+        rgTrackGain = parseFloat(song["X-ReplayGainTrack"] || "0");
+        rgAlbumGain = parseFloat(song["X-ReplayGainAlbum"] || "0");
+        applyReplayGain();
+      }
 
       const title = document.getElementById("np-title");
       const artist = document.getElementById("np-artist");
@@ -1252,14 +1293,15 @@
         timeTotal.textContent = formatTime(dur);
       }
 
-      // Always sync browser audio with server state
-      if (song && song["X-SongId"]) {
+      // Sync browser audio with server state (only when web is active device)
+      if (!webIsActive) {
+        if (!audio.paused) stopAudio();
+      } else if (song && song["X-SongId"]) {
         var songChanged = currentStreamId !== song["X-SongId"];
         if (songChanged) {
           if (isPlaying) {
             loadTrack(song["X-SongId"]);
           } else {
-            // Preload but don't play
             advancing = false;
             currentStreamId = song["X-SongId"];
             audio.src = "/api/v1/stream/" + song["X-SongId"];
@@ -1333,31 +1375,38 @@
   // Queue operations
   // -------------------------------------------------------------------------
 
-  async function playTrack(uri, allTracks, fromIdx) {
-    await clearQueue();
-    for (const t of allTracks) {
-      await addToQueue(t.file);
+  function enableWebCmd() {
+    if (webDeviceId) {
+      webIsActive = true;
+      return "enableoutput " + webDeviceId + "\n";
     }
-    currentStreamId = null; // force reload on next status refresh
-    await play(fromIdx);
+    return "";
+  }
+
+  async function playTrack(uri, allTracks, fromIdx) {
+    var cmds = "command_list_begin\n" + enableWebCmd() + "clear\n";
+    for (const t of allTracks) {
+      var eu = t.file.replace(/"/g, '\\"');
+      cmds += 'add "' + eu + '"\n';
+    }
+    cmds += "play " + fromIdx + "\ncommand_list_end";
+    currentStreamId = null;
+    await mpd.cmd(cmds);
     refreshAll();
   }
 
   async function playTrackByURI(uri) {
-    await clearQueue();
-    await addToQueue(uri);
+    const eu = uri.replace(/"/g, '\\"');
     currentStreamId = null;
-    await play(0);
+    await mpd.cmd("command_list_begin\n" + enableWebCmd() + "clear\nadd \"" + eu + "\"\nplay 0\ncommand_list_end");
     refreshAll();
   }
 
   async function replaceQueueAlbum(artist, album) {
     const ea = artist.replace(/"/g, '\\"');
     const eb = album.replace(/"/g, '\\"');
-    await clearQueue();
-    await mpd.cmd('findadd AlbumArtist "' + ea + '" Album "' + eb + '"');
     currentStreamId = null;
-    await play(0);
+    await mpd.cmd("command_list_begin\n" + enableWebCmd() + "clear\nfindadd AlbumArtist \"" + ea + "\" Album \"" + eb + "\"\nplay 0\ncommand_list_end");
     refreshAll();
   }
 
@@ -1557,7 +1606,7 @@
           refreshNowPlaying();
           break;
         case "database":
-          if (currentView === "library") renderLibrary();
+          if (currentView === "library" && !libSortLatest) renderLibrary();
           break;
         case "stored_playlist":
           if (currentView === "playlists") renderPlaylists();
@@ -1566,11 +1615,41 @@
           refreshNowPlaying();
           if (currentView === "library" && navAlbum) renderTracks(navArtist, navAlbum, navAlbumDate);
           break;
+        case "output":
+          checkWebActive().then(function () {
+            if (!webIsActive && !audio.paused) stopAudio();
+          });
+          break;
+        case "options":
+          mpd.cmd("replay_gain_status").then(function (raw) {
+            var kv = mpd.parseKV(raw);
+            if (kv.replay_gain_mode) {
+              rgMode = kv.replay_gain_mode;
+              applyReplayGain();
+            }
+          }).catch(function () {});
+          break;
       }
     }
   };
 
   let webDeviceId = null;
+  var webIsActive = false;
+
+  async function checkWebActive() {
+    if (!webDeviceId) { webIsActive = false; return; }
+    try {
+      var raw = await mpd.cmd("outputs");
+      var devs = mpd.parseList(raw, "outputid");
+      for (var i = 0; i < devs.length; i++) {
+        if (devs[i].plugin === "web" && devs[i].outputenabled === "1") {
+          webIsActive = true;
+          return;
+        }
+      }
+      webIsActive = false;
+    } catch (e) { webIsActive = false; }
+  }
 
   mpd.onConnect = async function () {
     // Register as a web playback device
@@ -1581,6 +1660,13 @@
     } catch (e) {
       console.error("web_register failed:", e);
     }
+    await checkWebActive();
+    // Fetch initial ReplayGain mode
+    try {
+      var rgRaw = await mpd.cmd("replay_gain_status");
+      var rgKV = mpd.parseKV(rgRaw);
+      if (rgKV.replay_gain_mode) rgMode = rgKV.replay_gain_mode;
+    } catch (e) {}
     refreshAll();
     if (currentView === "library") renderLibrary();
   };

@@ -2424,11 +2424,18 @@ fun SettingsScreen(onDismiss: () -> Unit) {
                     )
                 }
                 item {
+                    val rgScope = rememberCoroutineScope()
                     SettingsChipRow(
                         title = "ReplayGain",
                         options = listOf("off" to "Off", "track" to "Track", "album" to "Album"),
                         selected = replaygain,
-                        onSelect = { replaygain = it; saveAll() }
+                        onSelect = {
+                            replaygain = it; saveAll()
+                            rgScope.launch {
+                                try { MelodyApp.instance.mpd.cmd("replay_gain_mode $it") }
+                                catch (_: Exception) {}
+                            }
+                        }
                     )
                 }
 

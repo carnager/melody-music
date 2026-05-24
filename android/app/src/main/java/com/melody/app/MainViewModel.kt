@@ -462,8 +462,8 @@ class MainViewModel : ViewModel() {
         }
     }
 
-    fun playNext() { viewModelScope.launch { try { mpd.next() } catch (_: Exception) {} } }
-    fun playPrev() { viewModelScope.launch { try { mpd.prev() } catch (_: Exception) {} } }
+    fun playNext() { viewModelScope.launch { try { mpd.next() } catch (e: Exception) { android.util.Log.e("VM", "next: ${e.message}") } } }
+    fun playPrev() { viewModelScope.launch { try { mpd.prev() } catch (e: Exception) { android.util.Log.e("VM", "prev: ${e.message}") } } }
     fun stopPlayback() { viewModelScope.launch { try { mpd.stop() } catch (_: Exception) {} } }
     fun seek(pos: Double) { viewModelScope.launch { try { mpd.seek(pos) } catch (_: Exception) {} } }
 

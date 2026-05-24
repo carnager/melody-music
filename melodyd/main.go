@@ -868,6 +868,12 @@ func (m *mpvClient) getProperty(name string) (any, error) {
 }
 
 func (m *mpvClient) setProperty(name string, value any) error {
+	// mpv uses "no" instead of "off" for its replaygain property
+	if name == "replaygain" {
+		if s, ok := value.(string); ok && s == "off" {
+			value = "no"
+		}
+	}
 	_, err := m.command("set_property", name, value)
 	return err
 }

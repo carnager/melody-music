@@ -33,6 +33,7 @@ type agentConfig struct {
 	MPV struct {
 		Socket     string `toml:"socket"`
 		Executable string `toml:"executable"`
+		ReplayGain string `toml:"replaygain"`
 	} `toml:"mpv"`
 }
 
@@ -54,6 +55,7 @@ type mpvResponse struct {
 type mpvClient struct {
 	socketPath string
 	executable string
+	replaygain string
 	mu         sync.Mutex
 	process    *exec.Cmd
 	reqID      int
@@ -77,8 +79,11 @@ func (m *mpvClient) start() error {
 	}
 	_ = os.Remove(m.socketPath)
 
-	cmd := exec.Command(m.executable, "--idle", "--no-video", "--no-terminal",
-		"--input-ipc-server="+m.socketPath)
+	args := []string{"--idle", "--no-video", "--no-terminal", "--input-ipc-server=" + m.socketPath}
+	if m.replaygain != "" && m.replaygain != "off" {
+		args = append(args, "--replaygain="+m.replaygain)
+	}
+	cmd := exec.Command(m.executable, args...)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	if err := cmd.Start(); err != nil {
@@ -144,6 +149,12 @@ func (m *mpvClient) getProperty(name string) (any, error) {
 }
 
 func (m *mpvClient) setProperty(name string, value any) error {
+	// mpv uses "no" instead of "off" for its replaygain property
+	if name == "replaygain" {
+		if s, ok := value.(string); ok && s == "off" {
+			value = "no"
+		}
+	}
 	_, err := m.command("set_property", name, value)
 	return err
 }
@@ -187,6 +198,7 @@ func main() {
 		mpv: &mpvClient{
 			socketPath: cfg.MPV.Socket,
 			executable: cfg.MPV.Executable,
+			replaygain: cfg.MPV.ReplayGain,
 		},
 	}
 
@@ -249,6 +261,7 @@ resume_on_connect = false
 [mpv]
 socket = ""
 executable = "mpv"
+replaygain = ""
 `
 }
 
