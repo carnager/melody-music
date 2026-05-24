@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.11.0 (2026-05-24)
+
+### Features
+
+- 2-track target window: server loads only current + preloaded next track into targets for gapless playback without race conditions
+- Event-driven track advancement via mpv end-file events (replaces polling-based detection)
+- Desktop agent sends trackended to server via mpv end-file event detection
+- Persist playback modes (repeat, random, single, consume) across server restarts
+- Album rating stars burned into cover art image in TUI mini player
+- Redesigned TUI mini player: 4-line layout with separate track/album lines, RG and mode flags, larger cover art
+- Library panel hotkey hints removed for cleaner look
+
+### Bug Fixes
+
+- Fix random mode not working after server restart (modes not persisted)
+- Fix songs skipping too early on natural track end (syncTarget was restarting the already-playing track)
+- Fix external mpc next having no effect in random mode
+
 ## 0.9.0 (2026-05-24)
 
 ### Features

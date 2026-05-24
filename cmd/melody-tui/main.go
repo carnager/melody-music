@@ -372,6 +372,9 @@ type playbackStatus struct {
 	AlbumArtist    string
 	Album          string
 	Date           string
+	Track          int
+	Disc           int
+	File           string
 	TimePos        float64
 	Dur            float64
 	Volume         int
@@ -379,6 +382,12 @@ type playbackStatus struct {
 	SongID         string // X-SongId for rating commands
 	SongPos        int    // current song position in queue
 	ReplayGainMode string // "off", "track", "album"
+	RGTrack        float64
+	RGAlbum        float64
+	Repeat         bool
+	Random         bool
+	Single         bool
+	Consume        bool
 }
 
 type queueItem struct {
@@ -457,6 +466,7 @@ type albumRatingMsg struct {
 }
 
 type ratingPopupMsg struct{ rating int }
+type npAlbumRatingMsg struct{ rating int }
 
 type searchMsg searchResult
 type searchDebounceMsg struct{ gen int }
@@ -479,6 +489,16 @@ type albumArtMsg struct {
 }
 
 type artTransmittedMsg struct{}
+
+type trackInfoLine struct {
+	label, value string
+}
+
+type trackInfoMsg []trackInfoLine
+
+type gotoMetaMsg struct {
+	artist, albumArtist, album, date string
+}
 
 type errMsg string
 
@@ -525,6 +545,7 @@ type model struct {
 	curArtist          string
 	curAlbum           *albumEntry
 	albumRating        int
+	npAlbumRating      int // album rating for currently playing track
 	albumComputedRating float64
 	libCursor    int
 	libOffset    int
@@ -577,6 +598,18 @@ type model struct {
 
 	// help
 	showHelp bool
+
+	// track info
+	showTrackInfo bool
+	trackInfo     []trackInfoLine // key-value pairs for display
+
+	// go-to menu
+	showGoto      bool
+	gotoCursor    int
+	gotoArtist    string
+	gotoAlbumArtist string
+	gotoAlbum     string
+	gotoDate      string
 
 	// rating popup
 	showRating    bool
@@ -731,12 +764,21 @@ func fetchStatus() tea.Msg {
 	ps.AlbumArtist = cs["AlbumArtist"]
 	ps.Album = cs["Album"]
 	ps.Date = cs["Date"]
+	ps.Track, _ = strconv.Atoi(cs["Track"])
+	ps.Disc, _ = strconv.Atoi(cs["Disc"])
+	ps.File = cs["file"]
 	ps.Rating, _ = strconv.Atoi(cs["X-Rating"])
 	ps.SongID = cs["X-SongId"]
+	ps.RGTrack, _ = strconv.ParseFloat(cs["X-ReplayGainTrack"], 64)
+	ps.RGAlbum, _ = strconv.ParseFloat(cs["X-ReplayGainAlbum"], 64)
 	ps.SongPos = -1
 	if v, ok := st["song"]; ok {
 		ps.SongPos, _ = strconv.Atoi(v)
 	}
+	ps.Repeat = st["repeat"] == "1"
+	ps.Random = st["random"] == "1"
+	ps.Single = st["single"] == "1"
+	ps.Consume = st["consume"] == "1"
 	if rgs != nil {
 		ps.ReplayGainMode = rgs["replay_gain_mode"]
 	}
@@ -786,6 +828,65 @@ func fetchStatus() tea.Msg {
 
 	lastQueueVersion = qVersion
 	return statusMsg{status: ps, queue: queue, queueVersion: qVersion, queueChanged: true, reconnected: reconnected}
+}
+
+func fetchTrackInfo(file string) tea.Cmd {
+	return func() tea.Msg {
+		if mpd == nil || file == "" {
+			return trackInfoMsg(nil)
+		}
+		lines, err := mpd.cmd(fmt.Sprintf("find file %s", mpdEscape(file)))
+		if err != nil || len(lines) == 0 {
+			return trackInfoMsg(nil)
+		}
+		kv := parseKV(lines)
+
+		var info []trackInfoLine
+		add := func(label, value string) {
+			if value != "" && value != "0" {
+				info = append(info, trackInfoLine{label, value})
+			}
+		}
+		add("Title", kv["Title"])
+		add("Artist", kv["Artist"])
+		add("Album Artist", kv["AlbumArtist"])
+		add("Album", kv["Album"])
+		add("Date", kv["Date"])
+		add("Track", kv["Track"])
+		add("Disc", kv["Disc"])
+		if dur, err := strconv.ParseFloat(kv["duration"], 64); err == nil && dur > 0 {
+			add("Duration", fmtTime(dur))
+		}
+		add("Rating", kv["X-Rating"])
+		if v := kv["X-ReplayGainTrack"]; v != "" && v != "0.00" {
+			add("RG Track", v+" dB")
+		}
+		if v := kv["X-ReplayGainAlbum"]; v != "" && v != "0.00" {
+			add("RG Album", v+" dB")
+		}
+		add("File", kv["file"])
+
+		return trackInfoMsg(info)
+	}
+}
+
+func fetchGotoMeta(file string) tea.Cmd {
+	return func() tea.Msg {
+		if mpd == nil || file == "" {
+			return gotoMetaMsg{}
+		}
+		lines, err := mpd.cmd(fmt.Sprintf("find file %s", mpdEscape(file)))
+		if err != nil || len(lines) == 0 {
+			return gotoMetaMsg{}
+		}
+		kv := parseKV(lines)
+		return gotoMetaMsg{
+			artist:      kv["Artist"],
+			albumArtist: kv["AlbumArtist"],
+			album:       kv["Album"],
+			date:        kv["Date"],
+		}
+	}
 }
 
 func fetchAlbumArt(file string) tea.Cmd {
@@ -950,6 +1051,21 @@ func fetchAlbumRating(albumArtist, album, date string) tea.Cmd {
 			}
 		}
 		return albumRatingMsg{rating: rating, computed: computed}
+	}
+}
+
+func fetchNPAlbumRating(albumArtist, album, date string) tea.Cmd {
+	return func() tea.Msg {
+		if mpd == nil || albumArtist == "" || album == "" {
+			return npAlbumRatingMsg{}
+		}
+		lines, err := mpd.cmd("getalbumrating " + mpdEscape(albumArtist) + " " + mpdEscape(album) + " " + mpdEscape(date))
+		if err != nil {
+			return npAlbumRatingMsg{}
+		}
+		kv := parseKV(lines)
+		r, _ := strconv.Atoi(kv["rating"])
+		return npAlbumRatingMsg{rating: r}
 	}
 }
 
@@ -1516,7 +1632,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// On reconnect, refetch library data
 		if msg.reconnected {
-			return m, tea.Cmd(fetchArtists)
+			return m, tea.Batch(
+				tea.Cmd(fetchArtists),
+				fetchNPAlbumRating(m.status.AlbumArtist, m.status.Album, m.status.Date),
+			)
 		}
 		// Fetch album art if track changed
 		curFile := ""
@@ -1527,7 +1646,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if curFile != "" && curFile != m.artFile {
-			return m, fetchAlbumArt(curFile)
+			return m, tea.Batch(
+				fetchAlbumArt(curFile),
+				fetchNPAlbumRating(m.status.AlbumArtist, m.status.Album, m.status.Date),
+			)
 		}
 		return m, nil
 
@@ -1540,7 +1662,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		artTxRows = 0
 		if len(msg.data) > 0 {
 			m.artData = msg.data
-			m.artRGBA, m.artW, m.artH = prepareArtRGBA(msg.data)
+			m.artRGBA, m.artW, m.artH = prepareArtRGBA(msg.data, m.npAlbumRating)
 		} else {
 			m.artData = nil
 			m.artRGBA = nil
@@ -1576,9 +1698,51 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.libFiltered = nil
 		return m, tea.ClearScreen
 
+	case trackInfoMsg:
+		m.trackInfo = msg
+		return m, nil
+
+	case gotoMetaMsg:
+		if msg.albumArtist == "" && msg.artist == "" {
+			m.showGoto = false
+			return m, nil
+		}
+		m.gotoArtist = msg.artist
+		m.gotoAlbumArtist = msg.albumArtist
+		m.gotoAlbum = msg.album
+		m.gotoDate = msg.date
+		return m, nil
+
+	case npAlbumRatingMsg:
+		m.npAlbumRating = msg.rating
+		// Re-prepare art with updated rating burned in
+		if m.artData != nil {
+			artTxFile = ""
+			artTxCols = 0
+			artTxRows = 0
+			m.artRGBA, m.artW, m.artH = prepareArtRGBA(m.artData, m.npAlbumRating)
+		}
+		return m, nil
+
 	case albumRatingMsg:
 		m.albumRating = msg.rating
 		m.albumComputedRating = msg.computed
+		// If this is the now-playing album, update art with new rating
+		isNP := false
+		if m.ratingAlbum != nil {
+			isNP = m.ratingAlbum.AlbumArtist == m.status.AlbumArtist && m.ratingAlbum.Album == m.status.Album && m.ratingAlbum.Date == m.status.Date
+		} else if m.curAlbum != nil {
+			isNP = m.curAlbum.AlbumArtist == m.status.AlbumArtist && m.curAlbum.Album == m.status.Album && m.curAlbum.Date == m.status.Date
+		}
+		if isNP {
+			m.npAlbumRating = msg.rating
+			if m.artData != nil {
+				artTxFile = ""
+				artTxCols = 0
+				artTxRows = 0
+				m.artRGBA, m.artW, m.artH = prepareArtRGBA(m.artData, m.npAlbumRating)
+			}
+		}
 		// Update the album entry in the albums list so the view refreshes
 		if m.ratingAlbum != nil {
 			for i := range m.albums {
@@ -1660,12 +1824,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseMsg:
 		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
-			seekY := m.height - 3
+			seekY := m.height - 1
 			if msg.Y == seekY && m.status.Dur > 0 {
 				// Offset for album art on the left
 				artOffset := 0
 				if len(m.artRGBA) > 0 {
-					artOffset = 3*2 + 1 // artCols (rows*2) + gap
+					artOffset = 4*2 + 1 // artCols (rows*2) + gap
 				}
 				posStr := fmtTime(m.status.TimePos)
 				durStr := fmtTime(m.status.Dur)
@@ -1701,13 +1865,22 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+c" {
 		return m, tea.Quit
 	}
-	if key == "q" && !m.searching && !m.showMenu && !m.showHelp && !m.showRating && !m.libFiltering {
+	if key == "q" && !m.searching && !m.showMenu && !m.showHelp && !m.showRating && !m.showTrackInfo && !m.libFiltering {
 		return m, tea.Quit
 	}
 
 	if m.showHelp {
 		m.showHelp = false
 		return m, nil
+	}
+
+	if m.showTrackInfo {
+		m.showTrackInfo = false
+		return m, nil
+	}
+
+	if m.showGoto {
+		return m.handleGotoKey(key)
 	}
 
 	if m.showRating {
@@ -1796,6 +1969,35 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			nextMode = "track"
 		}
 		return m, mpdCommand("replay_gain_mode " + nextMode)
+	case "i":
+		file := m.focusedTrackFile()
+		if file != "" {
+			m.showTrackInfo = true
+			m.trackInfo = nil
+			return m, fetchTrackInfo(file)
+		}
+		return m, nil
+	case "o":
+		file := m.focusedTrackFile()
+		if file == "" {
+			return m, nil
+		}
+		m.showGoto = true
+		m.gotoCursor = 0
+		// If we're in library tracks view, we already have the metadata
+		if m.focus == panelLibrary && m.libMode == libTracks && m.curAlbum != nil {
+			m.gotoArtist = m.curAlbum.AlbumArtist
+			m.gotoAlbumArtist = m.curAlbum.AlbumArtist
+			m.gotoAlbum = m.curAlbum.Album
+			m.gotoDate = m.curAlbum.Date
+			return m, nil
+		}
+		// Otherwise fetch metadata from server
+		m.gotoArtist = ""
+		m.gotoAlbumArtist = ""
+		m.gotoAlbum = ""
+		m.gotoDate = ""
+		return m, fetchGotoMeta(file)
 	case "?":
 		m.showHelp = true
 		return m, nil
@@ -2135,6 +2337,27 @@ func (m model) libListLen() int {
 		return len(m.playlistTracks)
 	}
 	return 0
+}
+
+func (m model) focusedTrackFile() string {
+	if m.focus == panelQueue && m.qCursor < len(m.queue) {
+		return m.queue[m.qCursor].File
+	}
+	if m.focus == panelLibrary {
+		switch m.libMode {
+		case libTracks:
+			di := m.dataIndex()
+			if di >= 0 && di < len(m.tracks) {
+				return m.tracks[di].ID
+			}
+		case libPlaylistTracks:
+			di := m.dataIndex()
+			if di >= 0 && di < len(m.playlistTracks) {
+				return m.playlistTracks[di].ID
+			}
+		}
+	}
+	return ""
 }
 
 func (m model) dataIndex() int {
@@ -2568,6 +2791,62 @@ func (m model) handleDeviceKey(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) handleGotoKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc", "q", "o":
+		m.showGoto = false
+		return m, nil
+	case "j", "down":
+		if m.gotoCursor < 2 {
+			m.gotoCursor++
+		}
+		return m, nil
+	case "k", "up":
+		if m.gotoCursor > 0 {
+			m.gotoCursor--
+		}
+		return m, nil
+	case "enter":
+		if m.gotoAlbumArtist == "" {
+			return m, nil
+		}
+		m.showGoto = false
+		m.libFilter = ""
+		m.libFiltered = nil
+		m.libFiltering = false
+		m.focus = panelLibrary
+		switch m.gotoCursor {
+		case 0: // Go to Artist
+			m.curArtist = m.gotoAlbumArtist
+			m.libCursor = 0
+			m.libOffset = 0
+			return m, fetchAlbums(m.gotoAlbumArtist)
+		case 1: // Go to Album
+			m.curArtist = m.gotoAlbumArtist
+			albumID := m.gotoAlbumArtist + "\x00" + m.gotoAlbum + "\x00" + m.gotoDate
+			a := albumEntry{
+				AlbumArtist: m.gotoAlbumArtist,
+				Album:       m.gotoAlbum,
+				Date:        m.gotoDate,
+				ID:          albumID,
+			}
+			m.curAlbum = &a
+			m.albumRating = 0
+			m.albumComputedRating = 0
+			m.libCursor = 0
+			m.libOffset = 0
+			return m, tea.Batch(fetchTracks(albumID), fetchAlbumRating(m.gotoAlbumArtist, m.gotoAlbum, m.gotoDate))
+		case 2: // Search Artist
+			m.searching = true
+			m.searchInput.SetValue(m.gotoAlbumArtist)
+			m.searchInput.Focus()
+			m.srCursor = 0
+			return m, tea.Batch(textinput.Blink, doSearch(m.gotoAlbumArtist))
+		}
+	}
+	return m, nil
+}
+
 func (m model) handleRatingKey(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "esc", "q", "*":
@@ -2717,6 +2996,12 @@ func (m model) View() string {
 	if m.showHelp {
 		return m.helpView()
 	}
+	if m.showTrackInfo {
+		return m.trackInfoView()
+	}
+	if m.showGoto {
+		return m.gotoView()
+	}
 	if m.showRating {
 		return m.ratingView()
 	}
@@ -2733,7 +3018,7 @@ func (m model) View() string {
 		return m.searchView()
 	}
 
-	playerH := 4
+	playerH := 5
 	mainH := m.height - playerH
 	if mainH < 3 {
 		mainH = 3
@@ -2890,31 +3175,17 @@ func (m model) libraryView(w, h int) string {
 		visH = 1
 	}
 
-	// Context hint or filter bar
-	var hintLine string
+	// Filter bar (only shown when actively filtering)
+	hintLine := ""
 	if m.libFiltering {
 		filterText := fmt.Sprintf("> %s_ %d/%d", m.libFilter, len(items), len(allItems))
 		hintLine = lipgloss.NewStyle().Foreground(accentColor).Width(w).Render(truncate(filterText, w))
-	} else {
-		var hint string
-		switch m.libMode {
-		case libArtists:
-			hint = "[enter]browse  [f]filter  [S]latest  [?]help"
-		case libAlbums:
-			if m.libSortLatest {
-				hint = "[enter]browse  [f]filter  [S]latest off  [bksp]back"
-			} else {
-				hint = "[enter]browse  [f]filter  [bksp]back"
-			}
-		case libTracks, libPlaylistTracks:
-			hint = "[enter]add  [f]filter  [bksp]back"
-		case libPlaylists:
-			hint = "[enter]browse  [f]filter  [bksp]back"
-		}
-		hintLine = dimStyle.Width(w).Render(hint)
 	}
 
-	bodyH := visH - 1
+	bodyH := visH
+	if m.libFiltering {
+		bodyH-- // reserve a line for the filter bar
+	}
 	if bodyH < 1 {
 		bodyH = 1
 	}
@@ -2940,7 +3211,10 @@ func (m model) libraryView(w, h int) string {
 		visible = append(visible, "")
 	}
 
-	return hdr + "\n" + body + "\n" + hintLine
+	if hintLine != "" {
+		return hdr + "\n" + body + "\n" + hintLine
+	}
+	return hdr + "\n" + body
 }
 
 func (m model) libRow(idx int, text, prefix string, rating int, w int) string {
@@ -3076,7 +3350,7 @@ func (m model) queueView(w, h int) string {
 
 // prepareArtRGBA decodes image data to RGBA and zlib-compresses it.
 // Returns the compressed bytes and pixel dimensions.
-func prepareArtRGBA(data []byte) ([]byte, int, int) {
+func prepareArtRGBA(data []byte, albumRating int) ([]byte, int, int) {
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		return nil, 0, 0
@@ -3085,12 +3359,112 @@ func prepareArtRGBA(data []byte) ([]byte, int, int) {
 	rgba := image.NewRGBA(bounds)
 	draw.Draw(rgba, rgba.Bounds(), img, bounds.Min, draw.Src)
 
+	drawStarsOnImage(rgba, albumRating)
+
 	var compressed bytes.Buffer
 	zw, _ := zlib.NewWriterLevel(&compressed, 6)
 	zw.Write(rgba.Pix)
 	zw.Close()
 
 	return compressed.Bytes(), bounds.Dx(), bounds.Dy()
+}
+
+// drawStarsOnImage renders filled/empty star shapes at the bottom of the image.
+func drawStarsOnImage(rgba *image.RGBA, rating int) {
+	w := rgba.Bounds().Dx()
+	h := rgba.Bounds().Dy()
+
+	// Star size scales with image width
+	starSize := w / 10
+	if starSize < 8 {
+		starSize = 8
+	}
+	gap := starSize / 3
+	totalW := 5*starSize + 4*gap
+	startX := (w - totalW) / 2
+	startY := h - starSize - starSize/2 // some padding from bottom
+
+	// Semi-transparent dark background strip
+	for py := startY - starSize/3; py < h; py++ {
+		for px := 0; px < w; px++ {
+			idx := (py*w + px) * 4
+			if idx < 0 || idx+3 >= len(rgba.Pix) {
+				continue
+			}
+			// Darken: blend with 60% black
+			rgba.Pix[idx+0] = uint8(float64(rgba.Pix[idx+0]) * 0.4)
+			rgba.Pix[idx+1] = uint8(float64(rgba.Pix[idx+1]) * 0.4)
+			rgba.Pix[idx+2] = uint8(float64(rgba.Pix[idx+2]) * 0.4)
+		}
+	}
+
+	// Draw 5 stars (rating is 0-10, so divide by 2 for full stars)
+	fullStars := rating / 2
+	for i := 0; i < 5; i++ {
+		cx := startX + i*(starSize+gap) + starSize/2
+		cy := startY + starSize/2
+		filled := i < fullStars
+		drawStar(rgba, cx, cy, starSize/2, filled)
+	}
+}
+
+// drawStar renders a 5-pointed star centered at (cx, cy) with given radius.
+func drawStar(rgba *image.RGBA, cx, cy, radius int, filled bool) {
+	w := rgba.Bounds().Dx()
+	// Gold color for filled, dim gray for empty
+	var r, g, b uint8
+	if filled {
+		r, g, b = 230, 180, 34 // gold
+	} else {
+		r, g, b = 80, 80, 80 // dim gray
+	}
+
+	// Generate star polygon points (5 outer, 5 inner)
+	innerR := radius * 38 / 100 // inner radius ~38% of outer
+	var points [10][2]float64
+	for i := 0; i < 10; i++ {
+		angle := float64(i)*math.Pi/5 - math.Pi/2
+		rad := float64(radius)
+		if i%2 == 1 {
+			rad = float64(innerR)
+		}
+		points[i] = [2]float64{
+			float64(cx) + rad*math.Cos(angle),
+			float64(cy) + rad*math.Sin(angle),
+		}
+	}
+
+	// Rasterize: for each pixel in bounding box, check if inside polygon
+	for py := cy - radius - 1; py <= cy+radius+1; py++ {
+		for px := cx - radius - 1; px <= cx+radius+1; px++ {
+			if px < 0 || px >= w || py < 0 || py >= rgba.Bounds().Dy() {
+				continue
+			}
+			if pointInPolygon(float64(px)+0.5, float64(py)+0.5, points[:]) {
+				idx := (py*w + px) * 4
+				rgba.Pix[idx+0] = r
+				rgba.Pix[idx+1] = g
+				rgba.Pix[idx+2] = b
+				rgba.Pix[idx+3] = 255
+			}
+		}
+	}
+}
+
+// pointInPolygon uses ray casting to test if point (x,y) is inside polygon.
+func pointInPolygon(x, y float64, poly [][2]float64) bool {
+	n := len(poly)
+	inside := false
+	j := n - 1
+	for i := 0; i < n; i++ {
+		yi, xi := poly[i][1], poly[i][0]
+		yj, xj := poly[j][1], poly[j][0]
+		if ((yi > y) != (yj > y)) && (x < (xj-xi)*(y-yi)/(yj-yi)+xi) {
+			inside = !inside
+		}
+		j = i
+	}
+	return inside
 }
 
 // transmitArtToTerminal writes the Kitty graphics protocol escape sequence
@@ -3194,7 +3568,7 @@ func (m model) playerView() string {
 
 	// Album art: 3 rows tall, cols = rows * 2 (cells are ~2:1)
 	artCols := 0
-	artRows := 3
+	artRows := 4
 	if len(m.artRGBA) > 0 {
 		artCols = artRows * 2
 		if m.artFile != artTxFile || artCols != artTxCols || artRows != artTxRows {
@@ -3214,27 +3588,37 @@ func (m model) playerView() string {
 		infoW = 20
 	}
 
-	np := "\u2014"
+	// Track info
+	trackTitle := "\u2014"
 	if m.status.Title != "" {
-		np = m.status.Title
+		trackTitle = m.status.Title
 		if m.status.Artist != "" {
-			np += " \u2014 " + m.status.Artist
-		}
-		if m.status.Album != "" {
-			np += " \u2014 " + m.status.Album
+			trackTitle += " \u2014 " + m.status.Artist
 		}
 	}
 
-	stateIcon := "\u25b6"
-	if m.status.State == "play" {
-		stateIcon = "\u23f8"
-	} else if m.status.State == "stop" {
-		stateIcon = "\u25a0"
+	// Album info
+	albumInfo := ""
+	if m.status.Album != "" {
+		albumInfo = m.status.Album
+		if m.status.Date != "" {
+			albumInfo += " (" + m.status.Date + ")"
+		}
 	}
 
 	posStr := fmtTime(m.status.TimePos)
 	durStr := fmtTime(m.status.Dur)
-	barW := infoW - len(posStr) - len(durStr) - 6
+
+	// Track rating stars
+	trackRatingRendered := ""
+	trackRatingLen := 0
+	if m.status.Rating > 0 {
+		trackRatingRendered = " " + lipgloss.NewStyle().Foreground(lipgloss.Color("#e6b422")).Render(renderRating(m.status.Rating))
+		trackRatingLen = 1 + lipgloss.Width(renderRating(m.status.Rating))
+	}
+
+	// Seekbar
+	barW := infoW - len(posStr) - len(durStr) - 3
 	if barW < 5 {
 		barW = 5
 	}
@@ -3256,20 +3640,85 @@ func (m model) playerView() string {
 	timeL := dimStyle.Render(posStr)
 	timeR := dimStyle.Render(durStr)
 
-	ratingStr := ""
-	if m.status.Rating > 0 {
-		ratingStr = " " + lipgloss.NewStyle().Foreground(lipgloss.Color("#e6b422")).Render(renderRating(m.status.Rating))
+	// RG label for line 1
+	activeFlag := lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff"))
+	rgLabel := m.status.ReplayGainMode
+	if rgLabel == "" {
+		rgLabel = "off"
 	}
 	rgStr := ""
-	if m.status.ReplayGainMode != "" && m.status.ReplayGainMode != "off" {
-		rgStr = " " + dimStyle.Render("[RG:" + m.status.ReplayGainMode + "]")
+	if rgLabel != "off" {
+		rgStr = activeFlag.Render("[RG:" + rgLabel + "]")
+	} else {
+		rgStr = dimStyle.Render("[RG:off]")
 	}
-	line1 := titleStyle.Render(stateIcon) + " " + truncate(np, infoW-4-12) + ratingStr + rgStr
-	line2 := timeL + " " + bar + " " + timeR
-	hints := dimStyle.Render("[/]search [?]help [space]play [<>]prev/next [s]stop [r]album [R]tracks [P]playlists [D]devices [*]rate [q]quit")
-	line3 := truncate(hints, infoW)
+	rgLen := lipgloss.Width(rgStr)
 
-	playerRight := line1 + "\n" + line2 + "\n" + line3
+	// Mode flags for line 2
+	var flags []string
+	if m.status.Repeat {
+		flags = append(flags, activeFlag.Render("r"))
+	} else {
+		flags = append(flags, dimStyle.Render("r"))
+	}
+	if m.status.Random {
+		flags = append(flags, activeFlag.Render("z"))
+	} else {
+		flags = append(flags, dimStyle.Render("z"))
+	}
+	if m.status.Single {
+		flags = append(flags, activeFlag.Render("s"))
+	} else {
+		flags = append(flags, dimStyle.Render("s"))
+	}
+	if m.status.Consume {
+		flags = append(flags, activeFlag.Render("c"))
+	} else {
+		flags = append(flags, dimStyle.Render("c"))
+	}
+	flagsStr := strings.Join(flags, " ")
+	flagsLen := lipgloss.Width(flagsStr)
+
+	// Line 1: state icon + track + rating, right-aligned RG
+	trackMaxW := infoW - trackRatingLen - rgLen - 2
+	if trackMaxW < 10 {
+		trackMaxW = 10
+	}
+	trackStr := truncate(trackTitle, trackMaxW) + trackRatingRendered
+	trackLen := lipgloss.Width(trackStr)
+	pad := infoW - trackLen - rgLen
+	if pad < 1 {
+		pad = 1
+	}
+	line1 := trackStr + strings.Repeat(" ", pad) + rgStr
+
+	// Line 2: album info, right-aligned mode flags
+	line2 := ""
+	if albumInfo != "" {
+		albumMaxW := infoW - flagsLen - 2
+		if albumMaxW < 10 {
+			albumMaxW = 10
+		}
+		albumStr := dimStyle.Render(truncate(albumInfo, albumMaxW))
+		albumLen := lipgloss.Width(albumStr)
+		pad2 := infoW - albumLen - flagsLen
+		if pad2 < 1 {
+			pad2 = 1
+		}
+		line2 = albumStr + strings.Repeat(" ", pad2) + flagsStr
+	} else {
+		pad2 := infoW - flagsLen
+		if pad2 < 1 {
+			pad2 = 1
+		}
+		line2 = strings.Repeat(" ", pad2) + flagsStr
+	}
+
+	// Line 3: empty
+	// Line 4: seekbar
+	line4 := timeL + " " + bar + " " + timeR
+
+	playerRight := line1 + "\n" + line2 + "\n\n" + line4
 
 	if artCols > 0 {
 		artStr := kittyPlaceholders(artCols, artRows)
@@ -3299,6 +3748,8 @@ func (m model) helpView() string {
 			"  u          Update library",
 			"  P          Playlists",
 			"  D          Device picker",
+			"  i          Track info (library tracks / queue)",
+			"  o          Go to artist/album/search",
 			"  *          Rate track/album",
 			"  Ctrl+G     Cycle ReplayGain (off/track/album)",
 			"  Tab        Switch panel focus",
@@ -3336,6 +3787,72 @@ func (m model) helpView() string {
 		lines = append(lines, s.body, "")
 	}
 	lines = append(lines, dimStyle.Render("Press any key to close"))
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(accentColor).
+		Padding(1, 2).
+		Render(strings.Join(lines, "\n"))
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+func (m model) trackInfoView() string {
+	title := titleStyle.Render("Track Info")
+
+	var lines []string
+	lines = append(lines, title, "")
+
+	if len(m.trackInfo) == 0 {
+		lines = append(lines, dimStyle.Render("Loading..."))
+	} else {
+		maxLabel := 0
+		for _, ti := range m.trackInfo {
+			if len(ti.label) > maxLabel {
+				maxLabel = len(ti.label)
+			}
+		}
+		for _, ti := range m.trackInfo {
+			pad := strings.Repeat(" ", maxLabel-len(ti.label))
+			lines = append(lines, titleStyle.Render(ti.label+pad)+"  "+ti.value)
+		}
+	}
+
+	lines = append(lines, "", dimStyle.Render("Press any key to close"))
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(accentColor).
+		Padding(1, 2).
+		Render(strings.Join(lines, "\n"))
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+func (m model) gotoView() string {
+	title := titleStyle.Render("Go to...")
+
+	var lines []string
+	lines = append(lines, title, "")
+
+	if m.gotoAlbumArtist == "" {
+		lines = append(lines, dimStyle.Render("Loading..."))
+	} else {
+		options := []string{
+			"Go to Artist: " + m.gotoAlbumArtist,
+			"Go to Album: " + m.gotoAlbum,
+			"Search: " + m.gotoAlbumArtist,
+		}
+		for i, opt := range options {
+			if i == m.gotoCursor {
+				lines = append(lines, lipgloss.NewStyle().Foreground(accentColor).Render("> "+opt))
+			} else {
+				lines = append(lines, "  "+opt)
+			}
+		}
+	}
+
+	lines = append(lines, "", dimStyle.Render("Enter to select, Esc to close"))
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

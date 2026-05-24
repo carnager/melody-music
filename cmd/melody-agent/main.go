@@ -179,9 +179,10 @@ func (m *mpvClient) playlistRemove(index int) error {
 // ---------------------------------------------------------------------------
 
 type agent struct {
-	cfg    agentConfig
-	logger *log.Logger
-	mpv    *mpvClient
+	cfg       agentConfig
+	logger    *log.Logger
+	mpv       *mpvClient
+	trackEnd  chan struct{} // signals natural track end (mpv end-file eof)
 }
 
 func main() {
@@ -200,9 +201,11 @@ func main() {
 			executable: cfg.MPV.Executable,
 			replaygain: cfg.MPV.ReplayGain,
 		},
+		trackEnd: make(chan struct{}, 1),
 	}
 
 	go a.ensureMPV()
+	go a.watchMPVEvents()
 
 	logger.Printf("agent %q connecting to master at %s", cfg.Agent.Name, cfg.Agent.Master)
 	a.connectLoop()
@@ -282,6 +285,44 @@ func (a *agent) ensureMPV() {
 	}
 }
 
+// watchMPVEvents listens for mpv end-file events on a dedicated IPC connection.
+// When a track ends naturally (reason=eof), it signals the agent to send
+// trackended to the server.
+func (a *agent) watchMPVEvents() {
+	for {
+		for !a.mpv.isRunning() {
+			time.Sleep(1 * time.Second)
+		}
+
+		conn, err := net.DialTimeout("unix", a.mpv.socketPath, 2*time.Second)
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		a.logger.Printf("mpv events: listening")
+		scanner := bufio.NewScanner(conn)
+		for scanner.Scan() {
+			var evt struct {
+				Event  string `json:"event"`
+				Reason string `json:"reason"`
+			}
+			if err := json.Unmarshal(scanner.Bytes(), &evt); err != nil {
+				continue
+			}
+			if evt.Event == "end-file" && evt.Reason == "eof" {
+				a.logger.Printf("mpv events: track ended naturally")
+				select {
+				case a.trackEnd <- struct{}{}:
+				default:
+				}
+			}
+		}
+		conn.Close()
+		time.Sleep(1 * time.Second)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // MPD protocol connection to master
 // ---------------------------------------------------------------------------
@@ -348,6 +389,20 @@ func (a *agent) runSession() error {
 		go a.sendResume()
 	}
 
+	// Watch for natural track ends and send trackended to server via separate connection
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-a.trackEnd:
+				a.sendTrackEnded()
+			}
+		}
+	}()
+
 	// Command loop — master sends commands, we execute and respond
 	for {
 		line, err := reader.ReadString('\n')
@@ -364,6 +419,27 @@ func (a *agent) runSession() error {
 			return fmt.Errorf("write response: %w", err)
 		}
 	}
+}
+
+func (a *agent) sendTrackEnded() {
+	conn, err := net.DialTimeout("tcp", a.cfg.Agent.Master, 5*time.Second)
+	if err != nil {
+		a.logger.Printf("trackended: dial failed: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	r := bufio.NewReader(conn)
+	// Read greeting
+	if _, err := r.ReadString('\n'); err != nil {
+		return
+	}
+	fmt.Fprintf(conn, "trackended\n")
+	if _, err := r.ReadString('\n'); err != nil {
+		return
+	}
+	fmt.Fprintf(conn, "close\n")
+	a.logger.Printf("trackended: sent to server")
 }
 
 func (a *agent) sendResume() {

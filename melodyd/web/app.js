@@ -489,7 +489,7 @@
     if (advancing) return;
     advancing = true;
     currentStreamId = null;
-    next().then(function () {
+    mpd.cmd("trackended").then(function () {
       refreshNowPlaying();
     });
   }

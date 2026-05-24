@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -143,6 +144,14 @@ type app struct {
 	queueVersion   int   // incremented on every queue change, used by MPD plchanges
 	queueIDs       []int // parallel to playQueue, unique MPD songid per entry
 	queueIDCounter int   // monotonically incrementing counter for MPD songids
+	// playback state
+	curQueuePos    int // authoritative current position in playQueue
+	pendingNextPos int // queue position preloaded at target slot 1 (-1 if none)
+	// playback modes
+	modeRepeat  bool // loop the queue
+	modeRandom  bool // random track order
+	modeSingle  bool // stop after current track (or repeat it if repeat is on)
+	modeConsume bool // remove tracks from queue after playing
 	// MPD notification hub
 	mpdHub *notifyHub
 	// device management
@@ -231,7 +240,7 @@ func main() {
 	go a.scanner.watchForChanges()
 
 	go a.ensureMPV()
-	go a.watchMPVTrackChanges()
+	go a.watchMPVEvents()
 	go a.watchPlayState()
 	go a.deviceCleanup()
 	if a.cfg.MPD.Port > 0 {
@@ -655,31 +664,245 @@ func (a *app) ensureMPV() {
 	}
 }
 
-// watchMPVTrackChanges polls mpv's playlist-pos to detect natural track
-// advances (e.g. when a song ends and mpv moves to the next). When a change
-// is detected, it notifies idle MPD clients so they can refresh.
-func (a *app) watchMPVTrackChanges() {
-	lastPos := -1
+// nextQueuePos returns the queue position that should follow the current one,
+// applying playback modes. Returns -1 if there's no next track.
+func (a *app) nextQueuePos() int {
+	qLen := len(a.playQueue)
+	if qLen == 0 {
+		return -1
+	}
+	if a.modeSingle {
+		if a.modeRepeat {
+			return a.curQueuePos // loop same track
+		}
+		return -1 // no next in single mode
+	}
+	if a.modeRandom && qLen > 1 {
+		next := rand.Intn(qLen)
+		if next == a.curQueuePos {
+			next = (next + 1) % qLen
+		}
+		return next
+	}
+	next := a.curQueuePos + 1
+	if next >= qLen {
+		if a.modeRepeat {
+			return 0
+		}
+		return -1
+	}
+	return next
+}
+
+// syncTarget loads the current track and the preloaded next track into the
+// target. The target always has at most 2 tracks: slot 0 = current, slot 1 = next.
+// Must be called with playQueueMu held.
+func (a *app) syncTarget() {
+	t := a.target()
+	qLen := len(a.playQueue)
+
+	if qLen == 0 || a.curQueuePos < 0 || a.curQueuePos >= qLen {
+		_ = t.playlistClear()
+		a.pendingNextPos = -1
+		return
+	}
+
+	// Load current track
+	_ = t.playlistClear()
+	url := a.streamURLForActiveDevice(a.playQueue[a.curQueuePos])
+	a.logger.Printf("syncTarget: loading pos %d (songID=%s)", a.curQueuePos, a.playQueue[a.curQueuePos])
+	if err := t.loadFile(url, "replace", a.replayGainMeta(a.playQueue[a.curQueuePos])); err != nil {
+		a.logger.Printf("syncTarget: loadFile replace failed: %v", err)
+	}
+
+	// Preload next track for gapless playback
+	a.pendingNextPos = a.nextQueuePos()
+	if a.pendingNextPos >= 0 && a.pendingNextPos < qLen {
+		nextURL := a.streamURLForActiveDevice(a.playQueue[a.pendingNextPos])
+		a.logger.Printf("syncTarget: preloading pos %d (songID=%s)", a.pendingNextPos, a.playQueue[a.pendingNextPos])
+		_ = t.loadFile(nextURL, "append", a.replayGainMeta(a.playQueue[a.pendingNextPos]))
+	}
+
+}
+
+// syncNextTrack updates only the preloaded next track (slot 1) without
+// restarting the current track. Used when playback modes change.
+func (a *app) syncNextTrack() {
+	t := a.target()
+	qLen := len(a.playQueue)
+
+	if qLen == 0 || a.curQueuePos < 0 || a.curQueuePos >= qLen {
+		return
+	}
+
+	// Remove old preloaded track (slot 1) if present
+	if a.pendingNextPos >= 0 {
+		_ = t.playlistRemove(1)
+	}
+
+	// Preload new next track
+	a.pendingNextPos = a.nextQueuePos()
+	if a.pendingNextPos >= 0 && a.pendingNextPos < qLen {
+		nextURL := a.streamURLForActiveDevice(a.playQueue[a.pendingNextPos])
+		_ = t.loadFile(nextURL, "append", a.replayGainMeta(a.playQueue[a.pendingNextPos]))
+	}
+}
+
+// advanceTrack is called when a track naturally ends (target moved from slot 0 to 1,
+// or web/Android sent trackended). It applies playback modes and loads the next pair.
+// IMPORTANT: at this point the preloaded track at slot 1 is already playing in mpv.
+// We must NOT call syncTarget (which would clear+reload and restart the track).
+// Instead: remove finished slot 0, let playing track slide to slot 0, append new slot 1.
+func (a *app) advanceTrack() {
+	t := a.target()
+	a.playQueueMu.Lock()
+	defer a.playQueueMu.Unlock()
+
+	qLen := len(a.playQueue)
+	if qLen == 0 {
+		return
+	}
+
+	// Single mode: stop or repeat the current track
+	if a.modeSingle {
+		if a.modeRepeat {
+			// Loop the same track — reload it at slot 0
+			a.syncTarget()
+		} else {
+			// Pause at end — go back to slot 0 (reload current track, paused)
+			a.syncTarget()
+			_ = t.setProperty("pause", true)
+		}
+		a.mpdHub.notify(SubPlayer)
+		return
+	}
+
+	// Consume mode: remove the track that just finished from the server queue
+	if a.modeConsume && a.curQueuePos >= 0 && a.curQueuePos < qLen {
+		a.playQueue = append(a.playQueue[:a.curQueuePos], a.playQueue[a.curQueuePos+1:]...)
+		a.queueIDs = append(a.queueIDs[:a.curQueuePos], a.queueIDs[a.curQueuePos+1:]...)
+		a.queueVersion++
+		a.savePlayQueue()
+		qLen = len(a.playQueue)
+
+		if qLen == 0 {
+			a.curQueuePos = 0
+			_ = t.playlistClear()
+			a.pendingNextPos = -1
+			a.mpdHub.notify(SubPlaylist, SubPlayer)
+			return
+		}
+
+		// Adjust pendingNextPos for the removal
+		if a.pendingNextPos > a.curQueuePos {
+			a.pendingNextPos--
+		}
+		if a.pendingNextPos >= qLen {
+			if a.modeRepeat {
+				a.pendingNextPos = 0
+			} else {
+				a.pendingNextPos = -1
+			}
+		}
+
+		// The preloaded track is now playing — use pendingNextPos as new curQueuePos
+		if a.pendingNextPos >= 0 && a.pendingNextPos < qLen {
+			a.curQueuePos = a.pendingNextPos
+		} else {
+			a.curQueuePos = 0
+			_ = t.playlistClear()
+			a.pendingNextPos = -1
+			a.mpdHub.notify(SubPlaylist, SubPlayer)
+			return
+		}
+
+		// Remove finished track from mpv (slot 0), playing track slides to slot 0
+		_ = t.playlistRemove(0)
+		// Preload new next track at slot 1
+		a.pendingNextPos = a.nextQueuePos()
+		if a.pendingNextPos >= 0 && a.pendingNextPos < qLen {
+			nextURL := a.streamURLForActiveDevice(a.playQueue[a.pendingNextPos])
+			_ = t.loadFile(nextURL, "append", a.replayGainMeta(a.playQueue[a.pendingNextPos]))
+		}
+		a.mpdHub.notify(SubPlaylist, SubPlayer)
+		return
+	}
+
+	// Normal advance: the preloaded track at slot 1 is already playing
+	if a.pendingNextPos >= 0 && a.pendingNextPos < qLen {
+		a.curQueuePos = a.pendingNextPos
+	} else {
+		// No next track was preloaded — end of queue
+		a.mpdHub.notify(SubPlayer)
+		return
+	}
+
+	// Remove finished track from mpv (slot 0), playing track slides to slot 0
+	_ = t.playlistRemove(0)
+
+	// Preload new next track at slot 1
+	a.pendingNextPos = a.nextQueuePos()
+	if a.pendingNextPos >= 0 && a.pendingNextPos < qLen {
+		nextURL := a.streamURLForActiveDevice(a.playQueue[a.pendingNextPos])
+		_ = t.loadFile(nextURL, "append", a.replayGainMeta(a.playQueue[a.pendingNextPos]))
+	}
+
+	a.mpdHub.notify(SubPlayer)
+}
+
+// removeFromQueue removes a single track at pos from the server's queue.
+// Does NOT touch the target playlist — caller must syncTarget if needed.
+func (a *app) removeFromQueue(pos int) {
+	// Caller must hold playQueueMu
+	if pos < 0 || pos >= len(a.playQueue) {
+		return
+	}
+	a.playQueue = append(a.playQueue[:pos], a.playQueue[pos+1:]...)
+	a.queueIDs = append(a.queueIDs[:pos], a.queueIDs[pos+1:]...)
+	a.queueVersion++
+	a.savePlayQueue()
+}
+
+// watchMPVEvents opens a dedicated connection to mpv's IPC socket and listens
+// for end-file events. When a track ends naturally (reason=eof), it calls
+// advanceTrack. This replaces polling — no races, no skipInProgress flag needed.
+// User-initiated actions (next, play, etc.) cause reason=stop which is ignored.
+func (a *app) watchMPVEvents() {
 	for {
-		time.Sleep(1 * time.Second)
-		t := a.target()
-		if t == nil {
-			lastPos = -1
-			continue
+		// Wait for mpv to be ready
+		for !a.mpv.isRunning() {
+			time.Sleep(1 * time.Second)
 		}
-		posRaw, err := t.getProperty("playlist-pos")
+
+		conn, err := net.DialTimeout("unix", a.mpv.socketPath, 2*time.Second)
 		if err != nil {
-			lastPos = -1
+			a.logger.Printf("mpv events: connect failed: %v", err)
+			time.Sleep(2 * time.Second)
 			continue
 		}
-		pos := -1
-		if f, ok := posRaw.(float64); ok {
-			pos = int(f)
+
+		a.logger.Printf("mpv events: listening for end-file events")
+		scanner := bufio.NewScanner(conn)
+		for scanner.Scan() {
+			var evt struct {
+				Event string `json:"event"`
+				Reason string `json:"reason"`
+			}
+			if err := json.Unmarshal(scanner.Bytes(), &evt); err != nil {
+				continue
+			}
+			if evt.Event != "end-file" {
+				continue
+			}
+			a.logger.Printf("mpv events: end-file reason=%s", evt.Reason)
+			if evt.Reason == "eof" {
+				a.advanceTrack()
+			}
 		}
-		if pos >= 0 && pos != lastPos && lastPos >= 0 {
-			a.mpdHub.notify(SubPlayer)
-		}
-		lastPos = pos
+
+		conn.Close()
+		a.logger.Printf("mpv events: connection lost, reconnecting...")
+		time.Sleep(1 * time.Second)
 	}
 }
 
@@ -997,61 +1220,28 @@ func (a *app) addSongsToPlaylist(songIDs []string, mode string) error {
 	a.playQueueMu.Lock()
 	defer a.playQueueMu.Unlock()
 
-	t := a.target()
 	switch mode {
 	case "replace":
-		if err := t.playlistClear(); err != nil {
-			return err
-		}
 		a.playQueue = nil
 		a.queueIDs = nil
-		urls := make([]string, len(songIDs))
-		for i, id := range songIDs {
-			urls[i] = a.streamURLForActiveDevice(id)
-		}
-		if err := t.loadFileBatch(urls, "replace"); err != nil {
-			return err
-		}
 		a.playQueue = append(a.playQueue, songIDs...)
 		for range songIDs {
 			a.queueIDCounter++
 			a.queueIDs = append(a.queueIDs, a.queueIDCounter)
 		}
 		a.queueVersion++
+		a.curQueuePos = 0
 		a.savePlayQueue()
-		return t.setProperty("pause", false)
+		a.syncTarget()
+		return a.target().setProperty("pause", false)
 
 	case "insert":
-		posRaw, _ := t.getProperty("playlist-pos")
-		pos := 0
-		if f, ok := posRaw.(float64); ok && f >= 0 {
-			pos = int(f) + 1
-		}
-		urls := make([]string, len(songIDs))
-		for i, id := range songIDs {
-			urls[i] = a.streamURLForActiveDevice(id)
-		}
-		if err := t.loadFileBatch(urls, "append"); err != nil {
-			return err
-		}
-		// Move from end to insert positions
-		var moveCmds [][]any
-		for i := range songIDs {
-			endIdx := len(a.playQueue) + i
-			targetIdx := pos + i
-			if endIdx > targetIdx {
-				moveCmds = append(moveCmds, []any{"playlist-move", endIdx, targetIdx})
-			}
-		}
-		if len(moveCmds) > 0 {
-			t.commandBatch(moveCmds)
-		}
+		pos := a.curQueuePos + 1
 		var newIDs []int
 		for range songIDs {
 			a.queueIDCounter++
 			newIDs = append(newIDs, a.queueIDCounter)
 		}
-		// Update our tracking
 		newQueue := make([]string, 0, len(a.playQueue)+len(songIDs))
 		newQueue = append(newQueue, a.playQueue[:pos]...)
 		newQueue = append(newQueue, songIDs...)
@@ -1059,7 +1249,6 @@ func (a *app) addSongsToPlaylist(songIDs []string, mode string) error {
 			newQueue = append(newQueue, a.playQueue[pos:]...)
 		}
 		a.playQueue = newQueue
-		// Insert IDs at same position
 		newQueueIDs := make([]int, 0, len(a.queueIDs)+len(newIDs))
 		newQueueIDs = append(newQueueIDs, a.queueIDs[:pos]...)
 		newQueueIDs = append(newQueueIDs, newIDs...)
@@ -1069,16 +1258,12 @@ func (a *app) addSongsToPlaylist(songIDs []string, mode string) error {
 		a.queueIDs = newQueueIDs
 		a.queueVersion++
 		a.savePlayQueue()
-		return t.setProperty("pause", false)
+		// Resync preloaded next track since insert may change it
+		a.syncNextTrack()
+		return a.target().setProperty("pause", false)
 
 	default: // "add"
-		urls := make([]string, len(songIDs))
-		for i, id := range songIDs {
-			urls[i] = a.streamURLForActiveDevice(id)
-		}
-		if err := t.loadFileBatch(urls, "append"); err != nil {
-			return err
-		}
+		wasEmpty := len(a.playQueue) == 0
 		a.playQueue = append(a.playQueue, songIDs...)
 		for range songIDs {
 			a.queueIDCounter++
@@ -1086,6 +1271,13 @@ func (a *app) addSongsToPlaylist(songIDs []string, mode string) error {
 		}
 		a.queueVersion++
 		a.savePlayQueue()
+		if wasEmpty {
+			a.curQueuePos = 0
+			a.syncTarget()
+		} else {
+			// Resync preloaded next track in case it changed
+			a.syncNextTrack()
+		}
 		return nil
 	}
 }
@@ -1128,7 +1320,7 @@ func (a *app) restorePlayQueue() {
 	}
 }
 
-// reloadQueueIntoTarget loads the saved playQueue into the current target (paused).
+// reloadQueueIntoTarget loads the 2-track window into the current target (paused).
 func (a *app) reloadQueueIntoTarget() {
 	// Wait for mpv to be ready
 	for i := 0; i < 20; i++ {
@@ -1143,24 +1335,22 @@ func (a *app) reloadQueueIntoTarget() {
 	}
 
 	a.playQueueMu.Lock()
-	queue := make([]string, len(a.playQueue))
-	copy(queue, a.playQueue)
+	qLen := len(a.playQueue)
 	a.playQueueMu.Unlock()
 
-	t := a.target()
-	for i, songID := range queue {
-		mode := "append"
-		if i == 0 {
-			mode = "replace"
-		}
-		if err := t.loadFile(a.streamURLForActiveDevice(songID), mode, a.replayGainMeta(songID)); err != nil {
-			a.logger.Printf("restore: failed to load track %d: %v", i, err)
-			return
-		}
+	if qLen == 0 {
+		return
 	}
-	// Pause initially; restorePlayState will seek and optionally resume
-	_ = t.setProperty("pause", true)
-	a.logger.Printf("restored %d tracks into mpv (paused)", len(queue))
+
+	// Restore curQueuePos from saved play state before syncing
+	a.restorePlayStatePos()
+
+	a.playQueueMu.Lock()
+	a.syncTarget()
+	a.playQueueMu.Unlock()
+
+	_ = a.target().setProperty("pause", true)
+	a.logger.Printf("restored 2-track window at pos %d (paused)", a.curQueuePos)
 
 	a.restorePlayState()
 }
@@ -1170,6 +1360,10 @@ type playState struct {
 	SongPos int     `json:"song_pos"`
 	TimePos float64 `json:"time_pos"`
 	Playing bool    `json:"playing"`
+	Repeat  bool    `json:"repeat"`
+	Random  bool    `json:"random"`
+	Single  bool    `json:"single"`
+	Consume bool    `json:"consume"`
 }
 
 func (a *app) savePlayState() {
@@ -1178,11 +1372,11 @@ func (a *app) savePlayState() {
 		return
 	}
 	var ps playState
-	if posRaw, err := t.getProperty("playlist-pos"); err == nil {
-		if f, ok := posRaw.(float64); ok {
-			ps.SongPos = int(f)
-		}
-	}
+	ps.SongPos = a.curQueuePos
+	ps.Repeat = a.modeRepeat
+	ps.Random = a.modeRandom
+	ps.Single = a.modeSingle
+	ps.Consume = a.modeConsume
 	if tpRaw, err := t.getProperty("time-pos"); err == nil {
 		if f, ok := tpRaw.(float64); ok {
 			ps.TimePos = f
@@ -1197,6 +1391,27 @@ func (a *app) savePlayState() {
 	_ = os.WriteFile(a.paths.PlayStateFile, data, 0o644)
 }
 
+// restorePlayStatePos reads saved play state and sets curQueuePos.
+// Called before syncTarget during startup.
+func (a *app) restorePlayStatePos() {
+	data, err := os.ReadFile(a.paths.PlayStateFile)
+	if err != nil {
+		return
+	}
+	var ps playState
+	if json.Unmarshal(data, &ps) != nil {
+		return
+	}
+	if ps.SongPos >= 0 && ps.SongPos < len(a.playQueue) {
+		a.curQueuePos = ps.SongPos
+	}
+	a.modeRepeat = ps.Repeat
+	a.modeRandom = ps.Random
+	a.modeSingle = ps.Single
+	a.modeConsume = ps.Consume
+	a.logger.Printf("restored modes: repeat=%v random=%v single=%v consume=%v", ps.Repeat, ps.Random, ps.Single, ps.Consume)
+}
+
 func (a *app) restorePlayState() {
 	data, err := os.ReadFile(a.paths.PlayStateFile)
 	if err != nil {
@@ -1208,10 +1423,6 @@ func (a *app) restorePlayState() {
 	}
 
 	t := a.target()
-
-	if ps.SongPos > 0 {
-		_ = t.setProperty("playlist-pos", ps.SongPos)
-	}
 
 	// Wait for track to load
 	for i := 0; i < 40; i++ {
@@ -1227,7 +1438,6 @@ func (a *app) restorePlayState() {
 		_ = t.setProperty("time-pos", ps.TimePos)
 	}
 
-	// Always restore paused — clients decide whether to resume.
 	a.logger.Printf("restored position: track %d, %.1fs (paused)", ps.SongPos, ps.TimePos)
 }
 
@@ -1243,15 +1453,10 @@ func (a *app) currentPlayingSongID() string {
 	a.playQueueMu.Lock()
 	defer a.playQueueMu.Unlock()
 
-	posRaw, err := a.target().getProperty("playlist-pos")
-	if err != nil {
+	if a.curQueuePos < 0 || a.curQueuePos >= len(a.playQueue) {
 		return ""
 	}
-	pos, ok := posRaw.(float64)
-	if !ok || int(pos) < 0 || int(pos) >= len(a.playQueue) {
-		return ""
-	}
-	return a.playQueue[int(pos)]
+	return a.playQueue[a.curQueuePos]
 }
 
 
@@ -1506,15 +1711,9 @@ func (a *app) switchDevice(newID string) error {
 	a.devicesMu.Unlock()
 
 	// Capture state from old target
-	var playlistPos int
 	var timePos float64
 	var wasPaused bool
 
-	if posRaw, err := oldTarget.getProperty("playlist-pos"); err == nil {
-		if f, ok := posRaw.(float64); ok {
-			playlistPos = int(f)
-		}
-	}
 	if tpRaw, err := oldTarget.getProperty("time-pos"); err == nil {
 		if f, ok := tpRaw.(float64); ok {
 			timePos = f
@@ -1530,75 +1729,36 @@ func (a *app) switchDevice(newID string) error {
 	_ = oldTarget.setProperty("pause", true)
 	_ = oldTarget.playlistClear()
 
-	// Load playQueue into new target with device-specific stream URLs
-	a.playQueueMu.Lock()
-	queue := make([]string, len(a.playQueue))
-	copy(queue, a.playQueue)
-	a.playQueueMu.Unlock()
-
-	isTranscoding := newDev.Format != "" || newDev.MaxBitRate > 0
-	for i, songID := range queue {
-		loadMode := "append"
-		if i == 0 {
-			loadMode = "replace"
-		}
-		streamURL := a.streamURLForDevice(songID, newDev.Format, newDev.MaxBitRate, "")
-		// Bake start time into URL for the current track when transcoding,
-		// so ffmpeg starts at the right position (Subsonic-style timeOffset).
-		if isTranscoding && i == playlistPos && timePos > 0 {
-			sep := "?"
-			if strings.Contains(streamURL, "?") {
-				sep = "&"
-			}
-			streamURL += sep + "start=" + strconv.FormatFloat(timePos, 'f', 3, 64)
-		}
-		if err := newTarget.loadFile(streamURL, loadMode, a.replayGainMeta(songID)); err != nil {
-			a.logger.Printf("device handoff: failed to load song %s: %v", songID, err)
-		}
-	}
-
-	// Set playlist position, seek, and resume
-	if len(queue) > 0 && playlistPos >= 0 && playlistPos < len(queue) {
-		switch {
-		case newDev.Type == "agent":
-			at := newTarget.(*agentTarget)
-			if err := at.handoff(playlistPos, timePos, wasPaused); err != nil {
-				a.logger.Printf("device handoff: agent handoff failed: %v", err)
-			}
-		case newDev.Type == "web":
-			// Web target: just set state, browser handles actual playback
-			_ = newTarget.setProperty("playlist-pos", playlistPos)
-			if timePos > 0 {
-				_ = newTarget.setProperty("time-pos", timePos)
-			}
-			_ = newTarget.setProperty("pause", wasPaused)
-		default: // local mpv
-			_ = newTarget.setProperty("playlist-pos", playlistPos)
-			deadline := time.Now().Add(5 * time.Second)
-			for time.Now().Before(deadline) {
-				time.Sleep(50 * time.Millisecond)
-				if v, err := newTarget.getProperty("duration"); err == nil {
-					if d, ok := v.(float64); ok && d > 0 {
-						break
-					}
-				}
-			}
-			if timePos > 0 {
-				_ = newTarget.setProperty("time-pos", timePos)
-			}
-			if !wasPaused {
-				_ = newTarget.setProperty("pause", false)
-			}
-		}
-	} else if !wasPaused {
-		_ = newTarget.setProperty("pause", false)
-	}
-
-	// Update active device
+	// Update active device before syncing so target() returns the new one
 	a.devicesMu.Lock()
 	a.activeDevice = newID
 	a.devicesMu.Unlock()
 	_ = os.WriteFile(a.paths.ActiveDeviceFile, []byte(newID), 0o644)
+
+	// Load 2-track window into new target
+	a.playQueueMu.Lock()
+	qLen := len(a.playQueue)
+	a.syncTarget()
+	a.playQueueMu.Unlock()
+
+	if qLen > 0 {
+		// Wait for track to load before seeking
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if v, err := newTarget.getProperty("duration"); err == nil {
+				if d, ok := v.(float64); ok && d > 0 {
+					break
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if timePos > 0 {
+			_ = newTarget.setProperty("time-pos", timePos)
+		}
+		if !wasPaused {
+			_ = newTarget.setProperty("pause", false)
+		}
+	}
 
 	a.logger.Printf("active device switched: %s -> %s", oldID, newID)
 	a.mpdHub.notify(SubOutput, SubPlayer)
@@ -1606,31 +1766,18 @@ func (a *app) switchDevice(newID string) error {
 }
 
 
-// reloadQueueIntoAgent loads the server's play queue into a reconnected agent
-// so that playback commands work immediately. Called when an agent re-registers
-// and was already the active device.
+// reloadQueueIntoAgent loads the 2-track window into a reconnected agent.
+// Called when an agent re-registers and was already the active device.
 func (a *app) reloadQueueIntoAgent(at *agentTarget, dev *device) {
 	a.playQueueMu.Lock()
-	queue := make([]string, len(a.playQueue))
-	copy(queue, a.playQueue)
-	a.playQueueMu.Unlock()
-
-	if len(queue) == 0 {
+	qLen := len(a.playQueue)
+	if qLen == 0 {
+		a.playQueueMu.Unlock()
 		return
 	}
-
-	for i, songID := range queue {
-		loadMode := "append"
-		if i == 0 {
-			loadMode = "replace"
-		}
-		streamURL := a.streamURLForDevice(songID, dev.Format, dev.MaxBitRate, "")
-		if err := at.loadFile(streamURL, loadMode, nil); err != nil {
-			a.logger.Printf("agent reload: failed to load song %s: %v", songID, err)
-			return
-		}
-	}
-	a.logger.Printf("agent reload: loaded %d tracks into %s", len(queue), dev.Name)
+	a.syncTarget()
+	a.playQueueMu.Unlock()
+	a.logger.Printf("agent reload: loaded 2-track window into %s at pos %d", dev.Name, a.curQueuePos)
 }
 
 func (a *app) deviceCleanup() {
