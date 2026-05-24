@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -278,6 +279,9 @@ func cmdPlay(c *mpdConn, args []string) *mpdError {
 			return mpdErr(errArg, "play", "invalid position")
 		}
 		a.curQueuePos = pos
+		if a.modeRandom {
+			a.generateShuffle()
+		}
 		a.syncTarget()
 	}
 	a.playQueueMu.Unlock()
@@ -345,6 +349,9 @@ func cmdNext(c *mpdConn, args []string) *mpdError {
 		return nil
 	}
 	a.curQueuePos = next
+	if a.modeRandom {
+		a.shufflePos++
+	}
 	a.syncTarget()
 	a.playQueueMu.Unlock()
 	if err := a.target().setProperty("pause", false); err != nil {
@@ -362,15 +369,24 @@ func cmdPrevious(c *mpdConn, args []string) *mpdError {
 		a.playQueueMu.Unlock()
 		return nil
 	}
-	prev := a.curQueuePos - 1
-	if prev < 0 {
-		if a.modeRepeat {
-			prev = qLen - 1
-		} else {
-			prev = 0
+	if a.modeRandom && len(a.shuffleOrder) > 0 {
+		// Walk backward through shuffle history
+		if a.shufflePos > 0 {
+			a.shufflePos--
+			a.curQueuePos = a.shuffleOrder[a.shufflePos]
 		}
+		// At position 0 already — stay on current track (restart it)
+	} else {
+		prev := a.curQueuePos - 1
+		if prev < 0 {
+			if a.modeRepeat {
+				prev = qLen - 1
+			} else {
+				prev = 0
+			}
+		}
+		a.curQueuePos = prev
 	}
-	a.curQueuePos = prev
 	a.syncTarget()
 	a.playQueueMu.Unlock()
 	_ = a.target().setProperty("pause", false)
@@ -754,7 +770,77 @@ func cmdMoveID(c *mpdConn, args []string) *mpdError {
 }
 
 func cmdShuffle(c *mpdConn, args []string) *mpdError {
-	// Not implemented — return OK as no-op
+	a := c.app
+	a.playQueueMu.Lock()
+	defer a.playQueueMu.Unlock()
+
+	qLen := len(a.playQueue)
+	if qLen < 2 {
+		return nil
+	}
+
+	// Parse optional range START:END
+	start, end := 0, qLen
+	if len(args) > 0 {
+		parts := strings.SplitN(args[0], ":", 2)
+		if len(parts) == 2 {
+			if s, err := strconv.Atoi(parts[0]); err == nil {
+				start = s
+			}
+			if e, err := strconv.Atoi(parts[1]); err == nil {
+				end = e
+			}
+		}
+	}
+	if start < 0 {
+		start = 0
+	}
+	if end > qLen {
+		end = qLen
+	}
+	if end-start < 2 {
+		return nil
+	}
+
+	// Remember the current track's song ID so we can find it after shuffling
+	curID := ""
+	if a.curQueuePos >= 0 && a.curQueuePos < qLen {
+		curID = a.playQueue[a.curQueuePos]
+	}
+	curQueueID := -1
+	if a.curQueuePos >= 0 && a.curQueuePos < len(a.queueIDs) {
+		curQueueID = a.queueIDs[a.curQueuePos]
+	}
+
+	// Fisher-Yates shuffle the range
+	for i := end - 1; i > start; i-- {
+		j := start + rand.Intn(i-start+1)
+		a.playQueue[i], a.playQueue[j] = a.playQueue[j], a.playQueue[i]
+		a.queueIDs[i], a.queueIDs[j] = a.queueIDs[j], a.queueIDs[i]
+	}
+
+	// Find where the current track ended up
+	if curQueueID >= 0 {
+		for i, id := range a.queueIDs {
+			if id == curQueueID {
+				a.curQueuePos = i
+				break
+			}
+		}
+	}
+
+	a.queueVersion++
+	a.savePlayQueue()
+
+	// Regenerate shuffle order if random mode is on
+	if a.modeRandom {
+		a.generateShuffle()
+	}
+
+	// Resync target with new queue order
+	_ = curID // suppress unused warning
+	a.syncTarget()
+	a.mpdHub.notify(SubPlaylist)
 	return nil
 }
 
@@ -1781,6 +1867,9 @@ func cmdRandom(c *mpdConn, args []string) *mpdError {
 	a := c.app
 	a.modeRandom = args[0] == "1"
 	a.playQueueMu.Lock()
+	if a.modeRandom {
+		a.generateShuffle()
+	}
 	a.syncNextTrack()
 	a.playQueueMu.Unlock()
 	a.mpdHub.notify(SubOptions)

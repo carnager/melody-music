@@ -147,6 +147,9 @@ type app struct {
 	// playback state
 	curQueuePos    int // authoritative current position in playQueue
 	pendingNextPos int // queue position preloaded at target slot 1 (-1 if none)
+	// shuffle state for random mode
+	shuffleOrder []int // permutation of queue indices, walked sequentially
+	shufflePos   int   // current position within shuffleOrder
 	// playback modes
 	modeRepeat  bool // loop the queue
 	modeRandom  bool // random track order
@@ -664,6 +667,37 @@ func (a *app) ensureMPV() {
 	}
 }
 
+// generateShuffle creates a shuffled order for the queue.
+// The current track is placed at shufflePos (position 0), and only the
+// remaining (unplayed) tracks after it are shuffled — matching MPD behavior
+// when random is toggled on mid-playback.
+// Must be called with playQueueMu held.
+func (a *app) generateShuffle() {
+	qLen := len(a.playQueue)
+	if qLen == 0 {
+		a.shuffleOrder = nil
+		a.shufflePos = 0
+		return
+	}
+	// Build list of all indices except current
+	remaining := make([]int, 0, qLen-1)
+	for i := 0; i < qLen; i++ {
+		if i != a.curQueuePos {
+			remaining = append(remaining, i)
+		}
+	}
+	// Fisher-Yates shuffle the remaining
+	for i := len(remaining) - 1; i > 0; i-- {
+		j := rand.Intn(i + 1)
+		remaining[i], remaining[j] = remaining[j], remaining[i]
+	}
+	// Current track first, then shuffled rest
+	a.shuffleOrder = make([]int, 0, qLen)
+	a.shuffleOrder = append(a.shuffleOrder, a.curQueuePos)
+	a.shuffleOrder = append(a.shuffleOrder, remaining...)
+	a.shufflePos = 0
+}
+
 // nextQueuePos returns the queue position that should follow the current one,
 // applying playback modes. Returns -1 if there's no next track.
 func (a *app) nextQueuePos() int {
@@ -678,11 +712,20 @@ func (a *app) nextQueuePos() int {
 		return -1 // no next in single mode
 	}
 	if a.modeRandom && qLen > 1 {
-		next := rand.Intn(qLen)
-		if next == a.curQueuePos {
-			next = (next + 1) % qLen
+		next := a.shufflePos + 1
+		if next >= len(a.shuffleOrder) {
+			if a.modeRepeat {
+				// Reshuffle for next pass
+				a.generateShuffle()
+				// Skip index 0 since that's the track we just finished
+				if len(a.shuffleOrder) > 1 {
+					return a.shuffleOrder[1]
+				}
+				return a.shuffleOrder[0]
+			}
+			return -1 // played all tracks
 		}
-		return next
+		return a.shuffleOrder[next]
 	}
 	next := a.curQueuePos + 1
 	if next >= qLen {
@@ -808,6 +851,9 @@ func (a *app) advanceTrack() {
 		// The preloaded track is now playing — use pendingNextPos as new curQueuePos
 		if a.pendingNextPos >= 0 && a.pendingNextPos < qLen {
 			a.curQueuePos = a.pendingNextPos
+			if a.modeRandom {
+				a.shufflePos++
+			}
 		} else {
 			a.curQueuePos = 0
 			_ = t.playlistClear()
@@ -831,6 +877,9 @@ func (a *app) advanceTrack() {
 	// Normal advance: the preloaded track at slot 1 is already playing
 	if a.pendingNextPos >= 0 && a.pendingNextPos < qLen {
 		a.curQueuePos = a.pendingNextPos
+		if a.modeRandom {
+			a.shufflePos++
+		}
 	} else {
 		// No next track was preloaded — end of queue
 		a.mpdHub.notify(SubPlayer)
@@ -1231,6 +1280,9 @@ func (a *app) addSongsToPlaylist(songIDs []string, mode string) error {
 		}
 		a.queueVersion++
 		a.curQueuePos = 0
+		if a.modeRandom {
+			a.generateShuffle()
+		}
 		a.savePlayQueue()
 		a.syncTarget()
 		return a.target().setProperty("pause", false)
@@ -1409,6 +1461,9 @@ func (a *app) restorePlayStatePos() {
 	a.modeRandom = ps.Random
 	a.modeSingle = ps.Single
 	a.modeConsume = ps.Consume
+	if a.modeRandom {
+		a.generateShuffle()
+	}
 	a.logger.Printf("restored modes: repeat=%v random=%v single=%v consume=%v", ps.Repeat, ps.Random, ps.Single, ps.Consume)
 }
 

@@ -101,16 +101,16 @@ class MainViewModel : ViewModel() {
     private var idleRefreshJob: Job? = null
 
     private fun startIdle() {
-        mpd.onIdleNotification = { _ ->
+        mpd.onIdleNotification = { changed ->
             // Coalesce rapid idle notifications into a single refresh
             if (idleRefreshJob?.isActive != true) {
-                idleRefreshJob = viewModelScope.launch { refresh() }
+                idleRefreshJob = viewModelScope.launch { refresh(forceQueue = "rating" in changed) }
             }
         }
         mpd.startIdle()
     }
 
-    private suspend fun refresh() {
+    private suspend fun refresh(forceQueue: Boolean = false) {
         try {
             status = mpd.getStatus()
             if (status != null && (status!!.title.isNotBlank() || status!!.artist.isNotBlank())) {
@@ -118,7 +118,7 @@ class MainViewModel : ViewModel() {
             }
             val curPos = status?.currentSongPos ?: -1
             val plVersion = status?.playlistVersion ?: 0
-            if (plVersion != lastPlaylistVersion || queue.isEmpty()) {
+            if (plVersion != lastPlaylistVersion || queue.isEmpty() || forceQueue) {
                 queue = mpd.getQueue().map { it.copy(current = it.position == curPos) }
                 lastPlaylistVersion = plVersion
             } else {
@@ -128,6 +128,8 @@ class MainViewModel : ViewModel() {
         } catch (_: Exception) {}
         currentTrackOffline = PlaybackService.instance?.isCurrentTrackOffline ?: false
         codecInfo = PlaybackService.instance?.codecInfo ?: ""
+        // Cancel existing poll so it restarts immediately with fresh status
+        playbackPollJob?.cancel()
         updatePlaybackPolling()
         // Retry loading artists if connection recovered (but not when filtering to cached-only)
         if (artists.isEmpty() && mpd.connected && !showCachedOnly) {
@@ -316,6 +318,8 @@ class MainViewModel : ViewModel() {
         viewModelScope.launch {
             try {
                 mpd.rateTrack(songId, rating)
+                // Update queue item locally for immediate UI feedback
+                queue = queue.map { if (it.songId == songId) it.copy(rating = rating) else it }
                 refresh()
             } catch (_: Exception) {}
         }
@@ -341,7 +345,11 @@ class MainViewModel : ViewModel() {
 
     fun rateQueueTrack(songId: String, rating: Int) {
         viewModelScope.launch {
-            try { mpd.rateTrack(songId, rating) } catch (_: Exception) {}
+            try {
+                mpd.rateTrack(songId, rating)
+                // Update queue item locally for immediate UI feedback
+                queue = queue.map { if (it.songId == songId) it.copy(rating = rating) else it }
+            } catch (_: Exception) {}
         }
     }
 
@@ -466,6 +474,23 @@ class MainViewModel : ViewModel() {
     fun playPrev() { viewModelScope.launch { try { mpd.prev() } catch (e: Exception) { android.util.Log.e("VM", "prev: ${e.message}") } } }
     fun stopPlayback() { viewModelScope.launch { try { mpd.stop() } catch (_: Exception) {} } }
     fun seek(pos: Double) { viewModelScope.launch { try { mpd.seek(pos) } catch (_: Exception) {} } }
+
+    fun toggleRepeat() { viewModelScope.launch { try { mpd.cmd("repeat ${if (status?.repeat == true) "0" else "1"}") } catch (_: Exception) {} } }
+    fun toggleRandom() { viewModelScope.launch { try { mpd.cmd("random ${if (status?.random == true) "0" else "1"}") } catch (_: Exception) {} } }
+    fun toggleSingle() { viewModelScope.launch { try { mpd.cmd("single ${if (status?.single == true) "0" else "1"}") } catch (_: Exception) {} } }
+    fun toggleConsume() { viewModelScope.launch { try { mpd.cmd("consume ${if (status?.consume == true) "0" else "1"}") } catch (_: Exception) {} } }
+    fun cycleReplayGain() {
+        viewModelScope.launch {
+            try {
+                val next = when (status?.replayGainMode) {
+                    "track" -> "album"
+                    "album" -> "off"
+                    else -> "track"
+                }
+                mpd.cmd("replay_gain_mode $next")
+            } catch (_: Exception) {}
+        }
+    }
 
     fun randomAlbum() {
         val doIt: suspend () -> Unit = {

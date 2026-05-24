@@ -61,6 +61,7 @@ import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.foundation.Canvas
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.Clear
@@ -72,16 +73,19 @@ import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
+import androidx.compose.material.icons.filled.Equalizer
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.LibraryMusic
+import androidx.compose.material.icons.filled.LooksOne
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Settings
@@ -830,7 +834,47 @@ fun NowPlayingScreen(vm: MainViewModel, onDismiss: () -> Unit) {
                 }
             }
 
+            Spacer(Modifier.height(24.dp))
+
+            // Mode buttons
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ModeIconButton(Icons.Default.Repeat, "Repeat", active = st?.repeat == true) { vm.toggleRepeat() }
+                ModeIconButton(Icons.Default.Shuffle, "Random", active = st?.random == true) { vm.toggleRandom() }
+                ModeIconButton(Icons.Default.LooksOne, "Single", active = st?.single == true) { vm.toggleSingle() }
+                PacManButton(active = st?.consume == true) { vm.toggleConsume() }
+            }
+
             Spacer(Modifier.weight(1f))
+        }
+    }
+}
+
+@Composable
+fun ModeIconButton(icon: androidx.compose.ui.graphics.vector.ImageVector, description: String, active: Boolean, onClick: () -> Unit) {
+    val tint = if (active) Color.White else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+    IconButton(onClick = onClick, modifier = Modifier.size(44.dp)) {
+        Icon(icon, contentDescription = description, modifier = Modifier.size(24.dp), tint = tint)
+    }
+}
+
+@Composable
+fun PacManButton(active: Boolean, onClick: () -> Unit) {
+    val color = if (active) Color.White else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+    IconButton(onClick = onClick, modifier = Modifier.size(44.dp)) {
+        Canvas(modifier = Modifier.size(24.dp)) {
+            val r = size.minDimension / 2f
+            drawArc(
+                color = color,
+                startAngle = 35f,
+                sweepAngle = 290f,
+                useCenter = true,
+                topLeft = androidx.compose.ui.geometry.Offset.Zero,
+                size = size
+            )
         }
     }
 }

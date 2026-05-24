@@ -207,7 +207,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     private suspend fun listenForIdle() {
         while (true) {
             val w = idleWs ?: return
-            w.send("idle player playlist mixer options database stored_playlist\n")
+            w.send("idle player playlist mixer options database stored_playlist rating\n")
 
             val changed = mutableSetOf<String>()
             while (true) {
@@ -499,9 +499,10 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     suspend fun getStatus(): PlaybackStatus? {
         if (!isConfigured) return null
         return try {
-            val results = cmdBatch(listOf("status", "currentsong"))
+            val results = cmdBatch(listOf("status", "currentsong", "replay_gain_status"))
             val statusMap = parseKV(results.getOrElse(0) { emptyList() })
             val songMap = parseKV(results.getOrElse(1) { emptyList() })
+            val rgMap = parseKV(results.getOrElse(2) { emptyList() })
 
             val state = statusMap["state"] ?: "stop"
             val elapsed = statusMap["elapsed"]?.toDoubleOrNull() ?: 0.0
@@ -526,7 +527,12 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
                 rating = songMap["X-Rating"]?.toIntOrNull() ?: 0,
                 songId = songMap["X-SongId"] ?: "",
                 currentSongPos = statusMap["song"]?.toIntOrNull() ?: -1,
-                playlistVersion = statusMap["playlist"]?.toIntOrNull() ?: 0
+                playlistVersion = statusMap["playlist"]?.toIntOrNull() ?: 0,
+                repeat = statusMap["repeat"] == "1",
+                random = statusMap["random"] == "1",
+                single = statusMap["single"] == "1",
+                consume = statusMap["consume"] == "1",
+                replayGainMode = rgMap["replay_gain_mode"] ?: "off"
             )
         } catch (e: Exception) { null }
     }

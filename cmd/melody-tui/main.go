@@ -617,6 +617,10 @@ type model struct {
 	ratingIsAlbum bool        // true when rating an album
 	ratingAlbum   *albumEntry // album being rated (from album list)
 
+	// modes popup
+	showModes   bool
+	modesCursor int
+
 	// devices (outputs)
 	showDevices  bool
 	devices      []deviceInfo
@@ -1825,7 +1829,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
 			seekY := m.height - 1
-			if msg.Y == seekY && m.status.Dur > 0 {
+			if (msg.Y >= seekY-3 && msg.Y <= seekY+1) && m.status.Dur > 0 {
 				// Offset for album art on the left
 				artOffset := 0
 				if len(m.artRGBA) > 0 {
@@ -1865,7 +1869,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+c" {
 		return m, tea.Quit
 	}
-	if key == "q" && !m.searching && !m.showMenu && !m.showHelp && !m.showRating && !m.showTrackInfo && !m.libFiltering {
+	if key == "q" && !m.searching && !m.showMenu && !m.showHelp && !m.showRating && !m.showTrackInfo && !m.showModes && !m.libFiltering {
 		return m, tea.Quit
 	}
 
@@ -1889,6 +1893,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.showPlPicker {
 		return m.handlePlPickerKey(msg, key)
+	}
+
+	if m.showModes {
+		return m.handleModesKey(key)
 	}
 
 	if m.showDevices {
@@ -2003,6 +2011,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "P":
 		return m, fetchPlaylists
+	case "M":
+		m.showModes = true
+		m.modesCursor = 0
+		return m, nil
 	case "D":
 		m.showDevices = true
 		m.devCursor = 0
@@ -2791,6 +2803,63 @@ func (m model) handleDeviceKey(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) handleModesKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc", "q", "M":
+		m.showModes = false
+		return m, nil
+	case "j", "down":
+		if m.modesCursor < 4 {
+			m.modesCursor++
+		}
+		return m, nil
+	case "k", "up":
+		if m.modesCursor > 0 {
+			m.modesCursor--
+		}
+		return m, nil
+	case "enter", " ":
+		switch m.modesCursor {
+		case 0: // ReplayGain — cycle
+			var nextMode string
+			switch m.status.ReplayGainMode {
+			case "track":
+				nextMode = "album"
+			case "album":
+				nextMode = "off"
+			default:
+				nextMode = "track"
+			}
+			return m, mpdCommand("replay_gain_mode " + nextMode)
+		case 1: // Repeat
+			v := "1"
+			if m.status.Repeat {
+				v = "0"
+			}
+			return m, mpdCommand("repeat " + v)
+		case 2: // Random
+			v := "1"
+			if m.status.Random {
+				v = "0"
+			}
+			return m, mpdCommand("random " + v)
+		case 3: // Single
+			v := "1"
+			if m.status.Single {
+				v = "0"
+			}
+			return m, mpdCommand("single " + v)
+		case 4: // Consume
+			v := "1"
+			if m.status.Consume {
+				v = "0"
+			}
+			return m, mpdCommand("consume " + v)
+		}
+	}
+	return m, nil
+}
+
 func (m model) handleGotoKey(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "esc", "q", "o":
@@ -3007,6 +3076,9 @@ func (m model) View() string {
 	}
 	if m.showPlPicker {
 		return m.plPickerView()
+	}
+	if m.showModes {
+		return m.modesView()
 	}
 	if m.showDevices {
 		return m.deviceView()
@@ -3891,6 +3963,57 @@ func (m model) plPickerView() string {
 
 	hints := "\n\n" + dimStyle.Render("[↑↓]navigate [enter]add [n]new playlist [esc]close")
 	content := header + strings.Join(items, "\n") + newLine + hints
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(accentColor).
+		Padding(1, 3).
+		Render(content)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+func (m model) modesView() string {
+	header := titleStyle.Render("Playback Modes") + "\n\n"
+
+	type modeItem struct {
+		label string
+		value string
+		on    bool
+	}
+
+	rgLabel := m.status.ReplayGainMode
+	if rgLabel == "" {
+		rgLabel = "off"
+	}
+
+	items := []modeItem{
+		{"ReplayGain", rgLabel, rgLabel != "off"},
+		{"Repeat", "", m.status.Repeat},
+		{"Random", "", m.status.Random},
+		{"Single", "", m.status.Single},
+		{"Consume", "", m.status.Consume},
+	}
+
+	var lines []string
+	for i, it := range items {
+		indicator := dimStyle.Render("\u25cb")
+		if it.on {
+			indicator = lipgloss.NewStyle().Foreground(lipgloss.Color("#22c55e")).Render("\u25cf")
+		}
+		label := it.label
+		if it.value != "" {
+			label += ": " + it.value
+		}
+		if i == m.modesCursor {
+			s := lipgloss.NewStyle().Background(selectedBg).Foreground(lipgloss.Color("#ffffff")).Bold(true)
+			lines = append(lines, s.Render(" "+indicator+" "+label+" "))
+		} else {
+			lines = append(lines, " "+indicator+" "+label)
+		}
+	}
+
+	content := header + strings.Join(lines, "\n")
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
