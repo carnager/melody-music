@@ -1744,6 +1744,21 @@ fun QueueScreen(vm: MainViewModel, onSwitchToLibrary: () -> Unit = {}) {
                             }
                         }
 
+                        // Priority indicator
+                        if (item.priority > 0) {
+                            val prioColor = when {
+                                item.priority >= 30 -> Color(0xFFFF6600)
+                                item.priority >= 20 -> Color(0xFFFF9933)
+                                else -> Color(0xFFFFCC66)
+                            }
+                            Text(
+                                "\u25cf",
+                                color = prioColor,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(end = 4.dp)
+                            )
+                        }
+
                         // Track info
                         Column(
                             modifier = Modifier
