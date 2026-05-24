@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.11.1 (2026-05-24)
+
+### Bug Fixes
+
+- Fix end-of-queue not stopping playback (kept playing last track)
+- Fix playlistadd failing due to relative vs absolute path mismatch
+- Fix computed album rating showing with only 1 rated track (now requires 70% threshold)
+
+### Improvements
+
+- Search tracks display as columnar layout (artist, title, album, rating, duration)
+- Search results sorted by album then track number
+- Playlist picker redesigned as selectable list with "New Playlist..." entry
+- Empty stars on cover art rendered as gray outlines
+- pgup/pgdown/home/end work in all scrollable views
+- Persist ReplayGain mode across server restarts
+- TUI cover art shows computed album rating stars (with threshold)
+
 ## 0.11.0 (2026-05-24)
 
 ### Features
