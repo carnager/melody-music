@@ -44,6 +44,9 @@ func init() {
 	"move":         cmdMove,
 	"moveid":       cmdMoveID,
 	"shuffle":      cmdShuffle,
+	"prio":         cmdPrio,
+	"prioid":       cmdPrioID,
+	"addidprio":    cmdAddIDPrio,
 
 	// Database
 	"lsinfo":  cmdLsInfo,
@@ -232,18 +235,22 @@ func cmdCurrentSong(c *mpdConn, args []string) *mpdError {
 	a.playQueueMu.Lock()
 	pos := -1
 	mpdID := 0
+	prio := 0
 	for i, id := range a.playQueue {
 		if id == songID {
 			pos = i
 			if i < len(a.queueIDs) {
 				mpdID = a.queueIDs[i]
 			}
+			if i < len(a.queuePriority) {
+				prio = a.queuePriority[i]
+			}
 			break
 		}
 	}
 	a.playQueueMu.Unlock()
 
-	c.writeTrack(track, pos, mpdID)
+	c.writeTrack(track, pos, mpdID, prio)
 	return nil
 }
 
@@ -348,6 +355,31 @@ func cmdNext(c *mpdConn, args []string) *mpdError {
 		a.playQueueMu.Unlock()
 		return nil
 	}
+
+	// Save return position when first jumping to a priority track
+	nextHasPrio := next >= 0 && next < len(a.queuePriority) && a.queuePriority[next] > 0
+	if nextHasPrio && a.prioReturnPos < 0 {
+		a.prioReturnPos = oldPos
+	}
+	// Clear return position when we're past all priority tracks
+	if !nextHasPrio && a.prioReturnPos >= 0 {
+		a.prioReturnPos = -1
+	}
+
+	// Auto-consume prioritized track that was playing
+	oldHadPrio := oldPos >= 0 && oldPos < len(a.queuePriority) && a.queuePriority[oldPos] > 0
+	if oldHadPrio {
+		// Adjust prioReturnPos for the removal
+		if a.prioReturnPos > oldPos {
+			a.prioReturnPos--
+		}
+		a.removeFromQueue(oldPos)
+		// Adjust next position after removal
+		if next > oldPos {
+			next--
+		}
+	}
+
 	a.curQueuePos = next
 	if a.modeRandom {
 		a.shufflePos++
@@ -480,6 +512,8 @@ func cmdPlaylistInfo(c *mpdConn, args []string) *mpdError {
 	copy(queue, a.playQueue)
 	ids := make([]int, len(a.queueIDs))
 	copy(ids, a.queueIDs)
+	prios := make([]int, len(a.queuePriority))
+	copy(prios, a.queuePriority)
 	a.playQueueMu.Unlock()
 
 	start, end := 0, len(queue)
@@ -497,6 +531,10 @@ func cmdPlaylistInfo(c *mpdConn, args []string) *mpdError {
 		if i < len(ids) {
 			mpdID = ids[i]
 		}
+		p := 0
+		if i < len(prios) {
+			p = prios[i]
+		}
 		if track == nil {
 			// Write minimal placeholder so item count matches playlistlength
 			c.writeKV("file", "unknown")
@@ -504,9 +542,12 @@ func cmdPlaylistInfo(c *mpdConn, args []string) *mpdError {
 			if mpdID > 0 {
 				c.writeKV("Id", mpdID)
 			}
+			if p > 0 {
+				c.writeKV("Prio", p)
+			}
 			continue
 		}
-		c.writeTrack(track, i, mpdID)
+		c.writeTrack(track, i, mpdID, p)
 	}
 	return nil
 }
@@ -614,10 +655,22 @@ func cmdAddID(c *mpdConn, args []string) *mpdError {
 			from := len(a.playQueue) - 1
 			entry := a.playQueue[from]
 			entryID := a.queueIDs[from]
+			entryPrio := 0
+			if from < len(a.queuePriority) {
+				entryPrio = a.queuePriority[from]
+				a.queuePriority = append(a.queuePriority[:from], a.queuePriority[from+1:]...)
+			}
 			a.playQueue = append(a.playQueue[:from], a.playQueue[from+1:]...)
 			a.queueIDs = append(a.queueIDs[:from], a.queueIDs[from+1:]...)
 			a.playQueue = append(a.playQueue[:targetPos], append([]string{entry}, a.playQueue[targetPos:]...)...)
 			a.queueIDs = append(a.queueIDs[:targetPos], append([]int{entryID}, a.queueIDs[targetPos:]...)...)
+			for len(a.queuePriority) < targetPos {
+				a.queuePriority = append(a.queuePriority, 0)
+			}
+			a.queuePriority = append(a.queuePriority[:targetPos], append([]int{entryPrio}, a.queuePriority[targetPos:]...)...)
+			for len(a.queuePriority) < len(a.playQueue) {
+				a.queuePriority = append(a.queuePriority, 0)
+			}
 			a.savePlayQueue()
 			a.syncNextTrack()
 			newMPDID = entryID
@@ -649,6 +702,9 @@ func cmdDelete(c *mpdConn, args []string) *mpdError {
 	// Remove from server queue
 	a.playQueue = append(a.playQueue[:start], a.playQueue[end:]...)
 	a.queueIDs = append(a.queueIDs[:start], a.queueIDs[end:]...)
+	if start < len(a.queuePriority) {
+		a.queuePriority = append(a.queuePriority[:start], a.queuePriority[end:]...)
+	}
 	a.queueVersion++
 
 	// Adjust curQueuePos
@@ -694,8 +750,10 @@ func cmdClear(c *mpdConn, args []string) *mpdError {
 	_ = t.playlistClear()
 	a.playQueue = nil
 	a.queueIDs = nil
+	a.queuePriority = nil
 	a.curQueuePos = 0
 	a.pendingNextPos = -1
+	a.prioReturnPos = -1
 	a.queueVersion++
 	a.savePlayQueue()
 	a.playQueueMu.Unlock()
@@ -722,6 +780,11 @@ func cmdMove(c *mpdConn, args []string) *mpdError {
 
 	entry := a.playQueue[from]
 	entryID := a.queueIDs[from]
+	entryPrio := 0
+	if from < len(a.queuePriority) {
+		entryPrio = a.queuePriority[from]
+		a.queuePriority = append(a.queuePriority[:from], a.queuePriority[from+1:]...)
+	}
 	a.playQueue = append(a.playQueue[:from], a.playQueue[from+1:]...)
 	a.queueIDs = append(a.queueIDs[:from], a.queueIDs[from+1:]...)
 
@@ -747,6 +810,13 @@ func cmdMove(c *mpdConn, args []string) *mpdError {
 	}
 	a.playQueue = append(a.playQueue[:to], append([]string{entry}, a.playQueue[to:]...)...)
 	a.queueIDs = append(a.queueIDs[:to], append([]int{entryID}, a.queueIDs[to:]...)...)
+	for len(a.queuePriority) < to {
+		a.queuePriority = append(a.queuePriority, 0)
+	}
+	a.queuePriority = append(a.queuePriority[:to], append([]int{entryPrio}, a.queuePriority[to:]...)...)
+	for len(a.queuePriority) < len(a.playQueue) {
+		a.queuePriority = append(a.queuePriority, 0)
+	}
 	a.queueVersion++
 	a.savePlayQueue()
 	a.syncNextTrack()
@@ -812,11 +882,17 @@ func cmdShuffle(c *mpdConn, args []string) *mpdError {
 		curQueueID = a.queueIDs[a.curQueuePos]
 	}
 
+	// Ensure queuePriority matches queue length
+	for len(a.queuePriority) < qLen {
+		a.queuePriority = append(a.queuePriority, 0)
+	}
+
 	// Fisher-Yates shuffle the range
 	for i := end - 1; i > start; i-- {
 		j := start + rand.Intn(i-start+1)
 		a.playQueue[i], a.playQueue[j] = a.playQueue[j], a.playQueue[i]
 		a.queueIDs[i], a.queueIDs[j] = a.queueIDs[j], a.queueIDs[i]
+		a.queuePriority[i], a.queuePriority[j] = a.queuePriority[j], a.queuePriority[i]
 	}
 
 	// Find where the current track ended up
@@ -840,6 +916,116 @@ func cmdShuffle(c *mpdConn, args []string) *mpdError {
 	// Resync target with new queue order
 	_ = curID // suppress unused warning
 	a.syncTarget()
+	a.mpdHub.notify(SubPlaylist)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Priority commands
+// ---------------------------------------------------------------------------
+
+// cmdPrio handles "prio {PRIORITY} {START:END ...}" — set priority on queue items by position range.
+func cmdPrio(c *mpdConn, args []string) *mpdError {
+	if len(args) < 2 {
+		return mpdErr(errArg, "prio", "need priority and position range")
+	}
+	prio, err := strconv.Atoi(args[0])
+	if err != nil || prio < 0 {
+		return mpdErr(errArg, "prio", "invalid priority")
+	}
+	a := c.app
+	a.playQueueMu.Lock()
+	defer a.playQueueMu.Unlock()
+
+	qLen := len(a.playQueue)
+	for len(a.queuePriority) < qLen {
+		a.queuePriority = append(a.queuePriority, 0)
+	}
+
+	for _, rangeArg := range args[1:] {
+		start, end, err := parseRange(rangeArg, qLen)
+		if err != nil {
+			return mpdErr(errArg, "prio", err.Error())
+		}
+		for i := start; i < end; i++ {
+			a.queuePriority[i] = prio
+		}
+	}
+	a.queueVersion++
+	a.savePlayQueue()
+	a.syncNextTrack()
+	a.mpdHub.notify(SubPlaylist)
+	return nil
+}
+
+// cmdPrioID handles "prioid {PRIORITY} {ID ...}" — set priority on queue items by MPD song ID.
+func cmdPrioID(c *mpdConn, args []string) *mpdError {
+	if len(args) < 2 {
+		return mpdErr(errArg, "prioid", "need priority and song id(s)")
+	}
+	prio, err := strconv.Atoi(args[0])
+	if err != nil || prio < 0 {
+		return mpdErr(errArg, "prioid", "invalid priority")
+	}
+	a := c.app
+	a.playQueueMu.Lock()
+	defer a.playQueueMu.Unlock()
+
+	qLen := len(a.playQueue)
+	for len(a.queuePriority) < qLen {
+		a.queuePriority = append(a.queuePriority, 0)
+	}
+
+	for _, idStr := range args[1:] {
+		mpdID, err := strconv.Atoi(idStr)
+		if err != nil {
+			return mpdErr(errArg, "prioid", "invalid id")
+		}
+		pos := a.queuePosByMPDID(mpdID)
+		if pos < 0 {
+			return mpdErr(errNoExist, "prioid", "song not found")
+		}
+		a.queuePriority[pos] = prio
+	}
+	a.queueVersion++
+	a.savePlayQueue()
+	a.syncNextTrack()
+	a.mpdHub.notify(SubPlaylist)
+	return nil
+}
+
+// cmdAddIDPrio handles "addidprio {URI} {PRIORITY}" — add a track with priority.
+func cmdAddIDPrio(c *mpdConn, args []string) *mpdError {
+	if len(args) < 2 {
+		return mpdErr(errArg, "addidprio", "need URI and priority")
+	}
+	uri := args[0]
+	prio, err := strconv.Atoi(args[1])
+	if err != nil || prio < 0 {
+		return mpdErr(errArg, "addidprio", "invalid priority")
+	}
+	a := c.app
+
+	absPath := filepath.Join(a.cfg.Library.MusicDir, uri)
+	track, err := a.db.trackByPath(absPath)
+	if err != nil {
+		return mpdErr(errNoExist, "addidprio", "not found in database")
+	}
+	songID := stringify(track["song_id"])
+
+	if err := a.addSongsWithPriority([]string{songID}, "add", prio); err != nil {
+		return mpdErr(errSystem, "addidprio", err.Error())
+	}
+
+	// Get the newly assigned MPD ID
+	a.playQueueMu.Lock()
+	newMPDID := 0
+	if len(a.queueIDs) > 0 {
+		newMPDID = a.queueIDs[len(a.queueIDs)-1]
+	}
+	a.playQueueMu.Unlock()
+
+	c.writeKV("Id", newMPDID)
 	a.mpdHub.notify(SubPlaylist)
 	return nil
 }
@@ -1958,7 +2144,7 @@ func cmdDecoders(c *mpdConn, args []string) *mpdError {
 // ---------------------------------------------------------------------------
 
 // writeTrack writes a track in MPD response format.
-func (c *mpdConn) writeTrack(track map[string]any, pos int, mpdID int) {
+func (c *mpdConn) writeTrack(track map[string]any, pos int, mpdID int, prio ...int) {
 	path := stringify(track["path"])
 	if path == "" {
 		// Build path from metadata if not available
@@ -2000,6 +2186,9 @@ func (c *mpdConn) writeTrack(track map[string]any, pos int, mpdID int) {
 	}
 	if mpdID > 0 {
 		c.writeKV("Id", mpdID)
+	}
+	if len(prio) > 0 && prio[0] > 0 {
+		c.writeKV("Prio", prio[0])
 	}
 	// Custom extensions for melody clients
 	if v := stringify(track["song_id"]); v != "" {

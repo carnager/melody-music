@@ -15,7 +15,7 @@ data class Track(
     val uri: String = "",
     val rating: Int = 0
 )
-data class QueueItem(val position: Int, val songId: String, val title: String, val artist: String, val album: String, val albumId: String, val duration: Double, val current: Boolean, val uri: String = "", val rating: Int = 0)
+data class QueueItem(val position: Int, val songId: String, val title: String, val artist: String, val album: String, val albumId: String, val duration: Double, val current: Boolean, val uri: String = "", val rating: Int = 0, val priority: Int = 0)
 data class PlaybackStatus(val state: String, val title: String, val artist: String, val album: String, val date: String, val albumId: String, val timePos: Double, val duration: Double, val rating: Int = 0, val songId: String = "", val currentSongPos: Int = -1, val playlistVersion: Int = 0, val repeat: Boolean = false, val random: Boolean = false, val single: Boolean = false, val consume: Boolean = false, val replayGainMode: String = "off")
 data class DeviceInfo(val id: String, val name: String, val isLocal: Boolean, val type: String, val online: Boolean, val format: String, val maxBitrate: Int, val active: Boolean)
 data class SearchResult(val albums: List<Album>, val tracks: List<Track>)

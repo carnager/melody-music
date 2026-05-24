@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.12.0 (2026-05-24)
+
+### Features
+
+- Track priorities: add tracks with Low/Medium/High priority to play them next regardless of playback mode
+- Prioritized tracks are auto-consumed (removed from queue) after playing
+- Playback resumes from the original queue position after all priority tracks finish
+- Priority works in all modes: sequential, random, repeat, single
+- Multiple prioritized tracks play in priority order (highest first), ties broken by queue position
+- Colored priority indicators in queue: bright orange (high), orange (medium), light orange (low)
+- TUI: "Add with priority" option in action menu with Low/Medium/High popup
+- Web UI: priority options in right-click context menu for tracks
+- Android: priority field parsed and displayed, API methods for priority commands
+- MPD commands: `prio`, `prioid`, `addidprio` for setting priorities
+- Queue priorities persist across server restarts
+
 ## 0.11.1 (2026-05-24)
 
 ### Bug Fixes

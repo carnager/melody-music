@@ -385,6 +385,11 @@
     await mpd.cmd('add "' + eu + '"');
   }
 
+  async function addWithPriority(uri, prio) {
+    const eu = uri.replace(/"/g, '\\"');
+    await mpd.cmd('addidprio "' + eu + '" ' + prio);
+  }
+
   async function addIdToQueue(uri, pos) {
     const eu = uri.replace(/"/g, '\\"');
     if (pos !== undefined) {
@@ -851,10 +856,14 @@
         });
         el.addEventListener("contextmenu", function (e) {
           e.preventDefault();
+          var trackUri = el.dataset.uri;
           showContextMenu(e.clientX, e.clientY, [
-            { label: "Play", action: function () { playTrack(el.dataset.uri, tracks, parseInt(el.dataset.pos, 10)); } },
-            { label: "Add to queue", action: function () { addToQueue(el.dataset.uri); } },
-            { label: "Add next", action: function () { insertTrackNext(el.dataset.uri); } },
+            { label: "Play", action: function () { playTrack(trackUri, tracks, parseInt(el.dataset.pos, 10)); } },
+            { label: "Add to queue", action: function () { addToQueue(trackUri); } },
+            { label: "Add next", action: function () { insertTrackNext(trackUri); } },
+            { label: "Priority: Low", action: function () { addWithPriority(trackUri, 10).then(refreshQueuePanel); } },
+            { label: "Priority: Medium", action: function () { addWithPriority(trackUri, 20).then(refreshQueuePanel); } },
+            { label: "Priority: High", action: function () { addWithPriority(trackUri, 30).then(refreshQueuePanel); } },
           ]);
         });
       });
@@ -1033,10 +1042,14 @@
         });
         el.addEventListener("contextmenu", function (e) {
           e.preventDefault();
+          var srUri = el.dataset.uri;
           showContextMenu(e.clientX, e.clientY, [
-            { label: "Add to queue", action: function () { addToQueue(el.dataset.uri); } },
-            { label: "Add next", action: function () { insertTrackNext(el.dataset.uri); } },
-            { label: "Play now", action: function () { playTrackByURI(el.dataset.uri); } },
+            { label: "Add to queue", action: function () { addToQueue(srUri); } },
+            { label: "Add next", action: function () { insertTrackNext(srUri); } },
+            { label: "Play now", action: function () { playTrackByURI(srUri); } },
+            { label: "Priority: Low", action: function () { addWithPriority(srUri, 10).then(refreshQueuePanel); } },
+            { label: "Priority: Medium", action: function () { addWithPriority(srUri, 20).then(refreshQueuePanel); } },
+            { label: "Priority: High", action: function () { addWithPriority(srUri, 30).then(refreshQueuePanel); } },
           ]);
         });
       });
@@ -1075,7 +1088,12 @@
         const t = queue[i];
         const active = i === currentPos ? " active" : "";
         html += '<tr class="queue-row' + active + '" data-pos="' + i + '" data-id="' + escAttr(t.Id) + '">';
-        html += '<td class="qt-pos">' + (i === currentPos ? '<span class="now-playing-icon">\u266A</span>' : (i + 1)) + "</td>";
+        var prioDot = "";
+        var p = parseInt(t.Prio || "0", 10);
+        if (p >= 30) prioDot = '<span class="prio-high">\u25cf</span>';
+        else if (p >= 20) prioDot = '<span class="prio-med">\u25cf</span>';
+        else if (p > 0) prioDot = '<span class="prio-low">\u25cf</span>';
+        html += '<td class="qt-pos">' + prioDot + (i === currentPos ? '<span class="now-playing-icon">\u266A</span>' : (i + 1)) + "</td>";
         html += '<td class="qt-title">' + esc(t.Title || t.file) + "</td>";
         html += '<td class="qt-artist">' + esc(t.Artist || t.AlbumArtist || "") + "</td>";
         html += '<td class="qt-album">' + esc(t.Album || "") + "</td>";
@@ -1135,8 +1153,13 @@
       for (let i = 0; i < queue.length; i++) {
         const t = queue[i];
         const active = i === currentPos ? " active" : "";
+        var sidePrioDot = "";
+        var sp = parseInt(t.Prio || "0", 10);
+        if (sp >= 30) sidePrioDot = '<span class="prio-high">\u25cf</span> ';
+        else if (sp >= 20) sidePrioDot = '<span class="prio-med">\u25cf</span> ';
+        else if (sp > 0) sidePrioDot = '<span class="prio-low">\u25cf</span> ';
         html += '<div class="queue-item' + active + '" data-pos="' + i + '">';
-        html += '<div class="queue-item-info"><div class="queue-item-title">' + esc(t.Title || t.file) + "</div>";
+        html += '<div class="queue-item-info"><div class="queue-item-title">' + sidePrioDot + esc(t.Title || t.file) + "</div>";
         html += '<div class="queue-item-artist">' + esc(t.Artist || t.AlbumArtist || "") + "</div></div>";
         html += "</div>";
       }

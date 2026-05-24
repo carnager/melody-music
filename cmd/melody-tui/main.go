@@ -401,6 +401,7 @@ type queueItem struct {
 	Current  bool
 	File     string
 	Rating   int
+	Priority int
 }
 
 type albumEntry struct {
@@ -618,6 +619,11 @@ type model struct {
 	ratingIsAlbum bool        // true when rating an album
 	ratingAlbum   *albumEntry // album being rated (from album list)
 
+	// priority popup
+	showPrioMenu  bool
+	prioCursor    int    // 0=Low, 1=Medium, 2=High
+	prioSourceURI string // file URI to add with priority
+
 	// modes popup
 	showModes   bool
 	modesCursor int
@@ -817,6 +823,7 @@ func fetchStatus() tea.Msg {
 			dur, _ = strconv.ParseFloat(g["Time"], 64)
 		}
 		r, _ := strconv.Atoi(g["X-Rating"])
+		prio, _ := strconv.Atoi(g["Prio"])
 		queue = append(queue, queueItem{
 			Position: pos,
 			SongID:   g["Id"],
@@ -828,6 +835,7 @@ func fetchStatus() tea.Msg {
 			Current:  pos == curPos,
 			File:     g["file"],
 			Rating:   r,
+			Priority: prio,
 		})
 	}
 
@@ -1897,7 +1905,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+c" {
 		return m, tea.Quit
 	}
-	if key == "q" && !m.searching && !m.showMenu && !m.showHelp && !m.showRating && !m.showTrackInfo && !m.showModes && !m.libFiltering {
+	if key == "q" && !m.searching && !m.showMenu && !m.showHelp && !m.showRating && !m.showTrackInfo && !m.showModes && !m.showPrioMenu && !m.libFiltering {
 		return m, tea.Quit
 	}
 
@@ -1921,6 +1929,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.showPlPicker {
 		return m.handlePlPickerKey(msg, key)
+	}
+
+	if m.showPrioMenu {
+		return m.handlePrioKey(key)
 	}
 
 	if m.showModes {
@@ -2062,19 +2074,19 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.handleQueueKey(key)
 }
 
-var menuOptions = []string{"Add to queue", "Insert after current", "Replace queue", "Browse into"}
+var menuOptions = []string{"Add to queue", "Add with priority", "Insert after current", "Replace queue", "Browse into"}
 
 func (m model) menuOptionCount() int {
 	if m.menuSource == "search" {
 		idx := m.srCursor
 		nAlbums := len(m.searchRes.Albums)
 		if idx < nAlbums {
-			return 4
+			return 5 // all options including Browse into
 		}
-		return 3
+		return 4 // tracks: no Browse into
 	}
 	if m.libMode == libTracks || m.libMode == libPlaylistTracks {
-		return 3
+		return 4 // tracks: no Browse into
 	}
 	return len(menuOptions)
 }
@@ -2102,10 +2114,12 @@ func (m model) handleMenuKey(key string) (tea.Model, tea.Cmd) {
 			case 0:
 				return m.searchAction("add")
 			case 1:
-				return m.searchAction("insert")
+				return m.searchPrioAction()
 			case 2:
-				return m.searchAction("replace")
+				return m.searchAction("insert")
 			case 3:
+				return m.searchAction("replace")
+			case 4:
 				return m.searchDrillIn()
 			}
 		} else {
@@ -2113,10 +2127,12 @@ func (m model) handleMenuKey(key string) (tea.Model, tea.Cmd) {
 			case 0:
 				return m.libAction("add")
 			case 1:
-				return m.libAction("insert")
+				return m.libPrioAction()
 			case 2:
-				return m.libAction("replace")
+				return m.libAction("insert")
 			case 3:
+				return m.libAction("replace")
+			case 4:
 				return m.libDrillIn()
 			}
 		}
@@ -2893,6 +2909,85 @@ func (m model) handleDeviceKey(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) libPrioAction() (tea.Model, tea.Cmd) {
+	di := m.dataIndex()
+	if di < 0 {
+		return m, nil
+	}
+	var uri string
+	switch m.libMode {
+	case libTracks:
+		if di < len(m.tracks) {
+			uri = m.tracks[di].ID
+		}
+	case libPlaylistTracks:
+		if di < len(m.playlistTracks) {
+			uri = m.playlistTracks[di].ID
+		}
+	}
+	if uri != "" {
+		m.showPrioMenu = true
+		m.prioCursor = 1
+		m.prioSourceURI = uri
+	}
+	return m, nil
+}
+
+func (m model) searchPrioAction() (tea.Model, tea.Cmd) {
+	if m.srTotal == 0 {
+		return m, nil
+	}
+	idx := m.srCursor
+	nAlbums := len(m.searchRes.Albums)
+	if idx >= nAlbums {
+		t := m.searchRes.Tracks[idx-nAlbums]
+		m.showPrioMenu = true
+		m.prioCursor = 1
+		m.prioSourceURI = t.ID
+	}
+	return m, nil
+}
+
+func (m model) handlePrioKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc", "q":
+		m.showPrioMenu = false
+		return m, nil
+	case "j", "down":
+		if m.prioCursor < 2 {
+			m.prioCursor++
+		}
+		return m, nil
+	case "k", "up":
+		if m.prioCursor > 0 {
+			m.prioCursor--
+		}
+		return m, nil
+	case "enter":
+		prio := 10 // Low
+		switch m.prioCursor {
+		case 1:
+			prio = 20 // Medium
+		case 2:
+			prio = 30 // High
+		}
+		m.showPrioMenu = false
+		uri := m.prioSourceURI
+		return m, addWithPriority(uri, prio)
+	}
+	return m, nil
+}
+
+func addWithPriority(uri string, prio int) tea.Cmd {
+	return func() tea.Msg {
+		if mpd == nil {
+			return fetchStatus()
+		}
+		mpd.cmd(fmt.Sprintf("addidprio %s %d", mpdEscape(uri), prio))
+		return fetchStatus()
+	}
+}
+
 func (m model) handleModesKey(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "esc", "q", "M":
@@ -3166,6 +3261,9 @@ func (m model) View() string {
 	}
 	if m.showPlPicker {
 		return m.plPickerView()
+	}
+	if m.showPrioMenu {
+		return m.prioView()
 	}
 	if m.showModes {
 		return m.modesView()
@@ -3485,13 +3583,23 @@ func (m model) queueView(w, h int) string {
 		} else if isSelected {
 			marker = "*"
 		}
+		// Priority indicator
+		prioDot := " "
+		if q.Priority >= 30 {
+			prioDot = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff6600")).Render("\u25cf")
+		} else if q.Priority >= 20 {
+			prioDot = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff9933")).Render("\u25cf")
+		} else if q.Priority > 0 {
+			prioDot = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffcc66")).Render("\u25cf")
+		}
+
 		stars := padRight(renderRating(q.Rating), ratingW)
 		ratingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#e6b422"))
 		var row string
 		if isCursor {
-			row = marker + num + " " + artist + " " + title + " " + album + " " + stars + dur
+			row = marker + prioDot + num + " " + artist + " " + title + " " + album + " " + stars + dur
 		} else {
-			row = marker + dimStyle.Render(num) + " " + artist + " " + title + " " + dimStyle.Render(album) + " " + ratingStyle.Render(stars) + dimStyle.Render(dur)
+			row = marker + prioDot + dimStyle.Render(num) + " " + artist + " " + title + " " + dimStyle.Render(album) + " " + ratingStyle.Render(stars) + dimStyle.Render(dur)
 		}
 		items = append(items, s.Render(row))
 	}
@@ -3942,7 +4050,7 @@ func (m model) helpView() string {
 		}, "\n")},
 		{"Library", strings.Join([]string{
 			"  j/k        Navigate up/down",
-			"  Enter      Action menu (Add/Insert/Replace/Browse)",
+			"  Enter      Action menu (Add/Priority/Insert/Replace)",
 			"  p          Add track to playlist",
 			"  PgUp/PgDn  Jump 20 items",
 			"  g/G        Go to first/last",
@@ -3959,6 +4067,11 @@ func (m model) helpView() string {
 			"  c          Clear queue (confirm)",
 			"  PgUp/PgDn  Jump 20 items",
 			"  g/G        Go to first/last",
+		}, "\n")},
+		{"Search", strings.Join([]string{
+			"  j/k        Navigate results",
+			"  Enter      Action menu",
+			"  Esc        Close search",
 		}, "\n")},
 		{"Seekbar", strings.Join([]string{
 			"  Click      Seek to position",
@@ -4081,6 +4194,34 @@ func (m model) plPickerView() string {
 
 	hints := "\n\n" + dimStyle.Render("[↑↓]navigate [enter]select [esc]close")
 	content := header + strings.Join(items, "\n") + hints
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(accentColor).
+		Padding(1, 3).
+		Render(content)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+func (m model) prioView() string {
+	header := titleStyle.Render("Add Prioritized") + "\n\n"
+
+	labels := []string{"Low", "Medium", "High"}
+	colors := []string{"#ffcc66", "#ff9933", "#ff6600"}
+
+	var lines []string
+	for i, label := range labels {
+		dot := lipgloss.NewStyle().Foreground(lipgloss.Color(colors[i])).Render("\u25cf")
+		if i == m.prioCursor {
+			s := lipgloss.NewStyle().Background(selectedBg).Foreground(lipgloss.Color("#ffffff")).Bold(true)
+			lines = append(lines, s.Render(" "+dot+" "+label+" "))
+		} else {
+			lines = append(lines, " "+dot+" "+label)
+		}
+	}
+
+	content := header + strings.Join(lines, "\n")
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

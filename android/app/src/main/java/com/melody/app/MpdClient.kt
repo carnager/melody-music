@@ -567,7 +567,8 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
                     duration = g["duration"]?.toDoubleOrNull() ?: g["Time"]?.toDoubleOrNull() ?: 0.0,
                     current = false,
                     uri = g["file"] ?: "",
-                    rating = g["X-Rating"]?.toIntOrNull() ?: 0
+                    rating = g["X-Rating"]?.toIntOrNull() ?: 0,
+                    priority = g["Prio"]?.toIntOrNull() ?: 0
                 )
             }
         } catch (e: Exception) { emptyList() }
@@ -577,6 +578,8 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     suspend fun queueRemove(position: Int) { cmd("delete $position") }
     suspend fun queueMove(from: Int, to: Int) { cmd("move $from $to") }
     suspend fun queueClear() { cmd("clear") }
+    suspend fun setPriority(position: Int, priority: Int) { cmd("prio $priority $position") }
+    suspend fun addWithPriority(uri: String, priority: Int) { cmd("addidprio ${mpdEscape(uri)} $priority") }
 
     // ---- Ratings ----
 

@@ -143,10 +143,12 @@ type app struct {
 	playQueueMu    sync.Mutex
 	queueVersion   int   // incremented on every queue change, used by MPD plchanges
 	queueIDs       []int // parallel to playQueue, unique MPD songid per entry
+	queuePriority  []int // parallel to playQueue, 0=normal, 10=low, 20=medium, 30=high
 	queueIDCounter int   // monotonically incrementing counter for MPD songids
 	// playback state
 	curQueuePos    int // authoritative current position in playQueue
 	pendingNextPos int // queue position preloaded at target slot 1 (-1 if none)
+	prioReturnPos  int // position to resume after priority tracks are consumed (-1 = none)
 	// shuffle state for random mode
 	shuffleOrder []int // permutation of queue indices, walked sequentially
 	shufflePos   int   // current position within shuffleOrder
@@ -204,8 +206,9 @@ func main() {
 		},
 		agentTargets: make(map[string]*agentTarget),
 		webTargets:   make(map[string]*webTarget),
-		activeDevice: "local",
-		mpdHub:       newNotifyHub(),
+		activeDevice:  "local",
+		prioReturnPos: -1,
+		mpdHub:        newNotifyHub(),
 	}
 
 	a.scanner.onScanComplete = func() {
@@ -679,12 +682,16 @@ func (a *app) generateShuffle() {
 		a.shufflePos = 0
 		return
 	}
-	// Build list of all indices except current
+	// Build list of all indices except current and prioritized tracks
 	remaining := make([]int, 0, qLen-1)
 	for i := 0; i < qLen; i++ {
-		if i != a.curQueuePos {
-			remaining = append(remaining, i)
+		if i == a.curQueuePos {
+			continue
 		}
+		if i < len(a.queuePriority) && a.queuePriority[i] > 0 {
+			continue // prioritized tracks are played via priority override, not shuffle
+		}
+		remaining = append(remaining, i)
 	}
 	// Fisher-Yates shuffle the remaining
 	for i := len(remaining) - 1; i > 0; i-- {
@@ -711,6 +718,44 @@ func (a *app) nextQueuePos() int {
 		}
 		return -1 // no next in single mode
 	}
+
+	// Priority override: find highest-priority track (not current)
+	bestPos := -1
+	bestPrio := 0
+	for i := 0; i < qLen; i++ {
+		if i == a.curQueuePos {
+			continue
+		}
+		if i < len(a.queuePriority) && a.queuePriority[i] > bestPrio {
+			bestPrio = a.queuePriority[i]
+			bestPos = i
+		}
+	}
+	if bestPos >= 0 {
+		return bestPos
+	}
+
+	// No priority tracks left — return to saved position if we were in priority mode
+	if a.prioReturnPos >= 0 {
+		ret := a.prioReturnPos
+		// Adjust for queue bounds (tracks may have been removed)
+		if ret >= qLen {
+			ret = qLen - 1
+		}
+		if ret < 0 {
+			return -1
+		}
+		// Next track after the saved position
+		next := ret + 1
+		if next >= qLen {
+			if a.modeRepeat {
+				return 0
+			}
+			return -1
+		}
+		return next
+	}
+
 	if a.modeRandom && qLen > 1 {
 		next := a.shufflePos + 1
 		if next >= len(a.shuffleOrder) {
@@ -820,10 +865,20 @@ func (a *app) advanceTrack() {
 		return
 	}
 
-	// Consume mode: remove the track that just finished from the server queue
-	if a.modeConsume && a.curQueuePos >= 0 && a.curQueuePos < qLen {
+	// Auto-consume prioritized tracks: if the track that just finished had priority > 0, remove it
+	isPrioConsume := a.curQueuePos >= 0 && a.curQueuePos < len(a.queuePriority) && a.queuePriority[a.curQueuePos] > 0
+
+	// Consume mode or priority auto-consume: remove the track that just finished
+	if (a.modeConsume || isPrioConsume) && a.curQueuePos >= 0 && a.curQueuePos < qLen {
+		// Adjust prioReturnPos for the removal
+		if isPrioConsume && a.prioReturnPos > a.curQueuePos {
+			a.prioReturnPos--
+		}
 		a.playQueue = append(a.playQueue[:a.curQueuePos], a.playQueue[a.curQueuePos+1:]...)
 		a.queueIDs = append(a.queueIDs[:a.curQueuePos], a.queueIDs[a.curQueuePos+1:]...)
+		if a.curQueuePos < len(a.queuePriority) {
+			a.queuePriority = append(a.queuePriority[:a.curQueuePos], a.queuePriority[a.curQueuePos+1:]...)
+		}
 		a.queueVersion++
 		a.savePlayQueue()
 		qLen = len(a.playQueue)
@@ -876,6 +931,14 @@ func (a *app) advanceTrack() {
 
 	// Normal advance: the preloaded track at slot 1 is already playing
 	if a.pendingNextPos >= 0 && a.pendingNextPos < qLen {
+		// Track prioReturnPos when entering/leaving priority mode
+		pendingHasPrio := a.pendingNextPos < len(a.queuePriority) && a.queuePriority[a.pendingNextPos] > 0
+		if pendingHasPrio && a.prioReturnPos < 0 {
+			a.prioReturnPos = a.curQueuePos
+		}
+		if !pendingHasPrio && a.prioReturnPos >= 0 {
+			a.prioReturnPos = -1
+		}
 		a.curQueuePos = a.pendingNextPos
 		if a.modeRandom {
 			a.shufflePos++
@@ -910,6 +973,9 @@ func (a *app) removeFromQueue(pos int) {
 	}
 	a.playQueue = append(a.playQueue[:pos], a.playQueue[pos+1:]...)
 	a.queueIDs = append(a.queueIDs[:pos], a.queueIDs[pos+1:]...)
+	if pos < len(a.queuePriority) {
+		a.queuePriority = append(a.queuePriority[:pos], a.queuePriority[pos+1:]...)
+	}
 	a.queueVersion++
 	a.savePlayQueue()
 }
@@ -1264,6 +1330,10 @@ func (a *app) findTrackBySongID(songID string) map[string]any {
 }
 
 func (a *app) addSongsToPlaylist(songIDs []string, mode string) error {
+	return a.addSongsWithPriority(songIDs, mode, 0)
+}
+
+func (a *app) addSongsWithPriority(songIDs []string, mode string, priority int) error {
 	if len(songIDs) == 0 {
 		return nil
 	}
@@ -1271,11 +1341,19 @@ func (a *app) addSongsToPlaylist(songIDs []string, mode string) error {
 	a.playQueueMu.Lock()
 	defer a.playQueueMu.Unlock()
 
+	// Build priority slice for the new tracks
+	prios := make([]int, len(songIDs))
+	for i := range prios {
+		prios[i] = priority
+	}
+
 	switch mode {
 	case "replace":
 		a.playQueue = nil
 		a.queueIDs = nil
+		a.queuePriority = nil
 		a.playQueue = append(a.playQueue, songIDs...)
+		a.queuePriority = append(a.queuePriority, prios...)
 		for range songIDs {
 			a.queueIDCounter++
 			a.queueIDs = append(a.queueIDs, a.queueIDCounter)
@@ -1310,6 +1388,13 @@ func (a *app) addSongsToPlaylist(songIDs []string, mode string) error {
 			newQueueIDs = append(newQueueIDs, a.queueIDs[pos:]...)
 		}
 		a.queueIDs = newQueueIDs
+		newPrios := make([]int, 0, len(a.queuePriority)+len(prios))
+		newPrios = append(newPrios, a.queuePriority[:pos]...)
+		newPrios = append(newPrios, prios...)
+		if pos < len(a.queuePriority) {
+			newPrios = append(newPrios, a.queuePriority[pos:]...)
+		}
+		a.queuePriority = newPrios
 		a.queueVersion++
 		a.savePlayQueue()
 		// Resync preloaded next track since insert may change it
@@ -1319,6 +1404,7 @@ func (a *app) addSongsToPlaylist(songIDs []string, mode string) error {
 	default: // "add"
 		wasEmpty := len(a.playQueue) == 0
 		a.playQueue = append(a.playQueue, songIDs...)
+		a.queuePriority = append(a.queuePriority, prios...)
 		for range songIDs {
 			a.queueIDCounter++
 			a.queueIDs = append(a.queueIDs, a.queueIDCounter)
@@ -1329,7 +1415,7 @@ func (a *app) addSongsToPlaylist(songIDs []string, mode string) error {
 			a.curQueuePos = 0
 			a.syncTarget()
 		} else {
-			// Resync preloaded next track in case it changed
+			// Resync preloaded next track in case it changed (priority may affect next)
 			a.syncNextTrack()
 		}
 		return nil
@@ -1348,9 +1434,16 @@ func (a *app) queuePosByMPDID(mpdID int) int {
 	return -1
 }
 
+// savedQueue is the on-disk format for the play queue.
+type savedQueue struct {
+	Songs      []string `json:"songs"`
+	Priorities []int    `json:"priorities,omitempty"`
+}
+
 // savePlayQueue persists the current play queue to disk (caller must hold playQueueMu or be safe).
 func (a *app) savePlayQueue() {
-	data, _ := json.Marshal(a.playQueue)
+	sq := savedQueue{Songs: a.playQueue, Priorities: a.queuePriority}
+	data, _ := json.Marshal(sq)
 	_ = os.WriteFile(a.paths.PlayQueueFile, data, 0o644)
 }
 
@@ -1361,12 +1454,24 @@ func (a *app) restorePlayQueue() {
 	if err != nil {
 		return
 	}
-	var queue []string
-	if json.Unmarshal(data, &queue) != nil || len(queue) == 0 {
-		return
+	// Try new format first
+	var sq savedQueue
+	if json.Unmarshal(data, &sq) == nil && len(sq.Songs) > 0 {
+		a.playQueue = sq.Songs
+		a.queuePriority = sq.Priorities
+		if len(a.queuePriority) < len(a.playQueue) {
+			a.queuePriority = append(a.queuePriority, make([]int, len(a.playQueue)-len(a.queuePriority))...)
+		}
+	} else {
+		// Fall back to old format (bare string array)
+		var queue []string
+		if json.Unmarshal(data, &queue) != nil || len(queue) == 0 {
+			return
+		}
+		a.playQueue = queue
+		a.queuePriority = make([]int, len(queue))
 	}
-	a.playQueue = queue
-	a.logger.Printf("restored play queue: %d tracks", len(queue))
+	a.logger.Printf("restored play queue: %d tracks", len(a.playQueue))
 
 	// For local target, reload into mpv (paused) so clients can browse/click
 	if a.activeDevice == "" || a.activeDevice == "local" {

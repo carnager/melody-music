@@ -369,6 +369,10 @@ input { font: inherit; }
   font-size: 16px;
 }
 
+.prio-high { color: #ff6600; margin-right: 4px; }
+.prio-med { color: #ff9933; margin-right: 4px; }
+.prio-low { color: #ffcc66; margin-right: 4px; }
+
 .qt-pos { width: 40px; text-align: right; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .qt-title { max-width: 300px; }
 .qt-artist { max-width: 200px; color: var(--text-secondary); }
