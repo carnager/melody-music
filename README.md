@@ -6,6 +6,25 @@
 
 A personal music server that plays your local music library across all your devices.
 
+## Screenshots
+
+### Terminal UI
+
+![TUI Queue](Screenshots/melody-tui-queue.png)
+![TUI Search](Screenshots/melody-tui-search.png)
+
+### Web UI
+
+![Web UI](Screenshots/melody-web-latest.png)
+
+### Android
+
+<p float="left">
+  <img src="Screenshots/android-queue.png" width="250" />
+  <img src="Screenshots/android-search.png" width="250" />
+  <img src="Screenshots/android-devices.png" width="250" />
+</p>
+
 ## What it does
 
 Melody scans your music folder and lets you browse, search, queue, and play your music from anywhere — your terminal, your phone, or any other machine on your network.
