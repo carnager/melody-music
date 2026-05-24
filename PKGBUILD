@@ -1,12 +1,12 @@
 # Maintainer: Rasmus Steinke <rasi at xssn dot at>
 pkgname=('melodyd' 'melody-agent' 'melody-tui' 'melody-cli' 'melody-rofi' 'melody-musiclist')
-pkgver=0.8.0
+pkgver=0.11.0
 pkgrel=1
 arch=('x86_64')
 url="https://github.com/carnager/melody-music"
 license=('MIT')
 makedepends=('go')
-source=("git+https://github.com/carnager/melody-music.git#tag=${pkgver}")
+source=("git+https://github.com/carnager/melody-music.git#tag=v${pkgver}")
 sha256sums=('SKIP')
 
 build() {
