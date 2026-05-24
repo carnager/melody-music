@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +37,7 @@ type config struct {
 		BindToAddress []string `toml:"bind_to_address"`
 		APISecret     string   `toml:"api_secret"`
 		BaseURL       string   `toml:"base_url"` // externally reachable URL for stream URLs sent to remote devices
+		WebSecret     string   `toml:"web_secret"`
 	} `toml:"server"`
 	Library struct {
 		MusicDir string `toml:"music_dir"`
@@ -146,6 +148,7 @@ type app struct {
 	// device management
 	devices      map[string]*device
 	agentTargets map[string]*agentTarget // keyed by device ID
+	webTargets   map[string]*webTarget   // keyed by device ID
 	devicesMu    sync.RWMutex
 	activeDevice string // device ID, "" = local
 }
@@ -188,16 +191,22 @@ func main() {
 			},
 		},
 		agentTargets: make(map[string]*agentTarget),
+		webTargets:   make(map[string]*webTarget),
 		activeDevice: "local",
 		mpdHub:       newNotifyHub(),
 	}
 
 	a.scanner.onScanComplete = func() {
+		db.invalidateCache()
 		if err := db.rebuildFTS(); err != nil {
 			logger.Printf("warning: FTS rebuild after scan failed: %v", err)
 		}
+		db.warmCache()
 		a.mpdHub.notify(SubDatabase)
 	}
+
+	// Pre-warm expensive query caches at startup
+	db.warmCache()
 
 	a.restorePlayQueue()
 	a.restoreActiveDevice()
@@ -303,6 +312,7 @@ func loadConfig() (config, paths, error) {
 	cfg.Server.BindToAddress = stringSlice(server["bind_to_address"])
 	cfg.Server.APISecret = stringify(server["api_secret"])
 	cfg.Server.BaseURL = stringify(server["base_url"])
+	cfg.Server.WebSecret = stringify(server["web_secret"])
 	cfg.Library.MusicDir = stringify(library["music_dir"])
 	cfg.MPV.Socket = stringify(mpvSection["socket"])
 	cfg.MPV.Executable = stringify(mpvSection["executable"])
@@ -372,6 +382,17 @@ func (a *app) serve() error {
 	listeners, err := a.listenConfigured()
 	if err != nil {
 		return err
+	}
+
+	// Log web UI availability for each TCP listener
+	for _, l := range listeners {
+		if addr, ok := l.Addr().(*net.TCPAddr); ok {
+			host := addr.IP.String()
+			if host == "0.0.0.0" {
+				host = "localhost"
+			}
+			a.logger.Printf("web UI available at http://%s:%d/web/", host, addr.Port)
+		}
 	}
 
 	errCh := make(chan error, len(listeners))
@@ -464,17 +485,28 @@ func defaultBindToAddress() []string {
 func (a *app) routes() http.Handler {
 	mux := http.NewServeMux()
 
-	// Audio streaming (the only HTTP-served binary data)
-	mux.HandleFunc("GET /api/v1/stream/{id}", a.handleStream)
+	// Audio streaming
+	mux.Handle("GET /api/v1/stream/{id}", a.authMiddleware(http.HandlerFunc(a.handleStream)))
 
-	// Cover art over HTTP (convenience for clients that prefer URLs over MPD binary)
-	mux.HandleFunc("GET /api/v1/cover/{id}", a.handleCoverArt)
+	// Cover art
+	mux.Handle("GET /api/v1/cover/{id}", a.authMiddleware(http.HandlerFunc(a.handleCoverArt)))
 
-	// WebSocket MPD transport (same protocol as TCP, over HTTP for reverse proxies)
-	mux.Handle("GET /mpd", websocket.Server{
+	// WebSocket MPD transport
+	mux.Handle("GET /mpd", a.authMiddleware(websocket.Server{
 		Handler:   a.serveMPDWebSocket,
-		Handshake: func(*websocket.Config, *http.Request) error { return nil }, // accept all origins
+		Handshake: func(*websocket.Config, *http.Request) error { return nil },
+	}))
+
+	// Web UI auth (no middleware — this IS the login endpoint)
+	mux.HandleFunc("POST /web/auth", a.handleWebAuth)
+
+	// Web UI: redirect /web to /web/
+	mux.HandleFunc("GET /web", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/web/", http.StatusMovedPermanently)
 	})
+
+	// Web UI static files (no auth — the JS handles login flow)
+	mux.Handle("/web/", http.StripPrefix("/web/", a.webHandler()))
 
 	return mux
 }
@@ -888,6 +920,9 @@ func (a *app) target() playbackTarget {
 	}
 	if at, ok := a.agentTargets[a.activeDevice]; ok && at.isRunning() {
 		return at
+	}
+	if wt, ok := a.webTargets[a.activeDevice]; ok && wt.isRunning() {
+		return wt
 	}
 	return a.mpv
 }
@@ -1331,7 +1366,8 @@ func (a *app) streamTranscoded(w http.ResponseWriter, r *http.Request, songID, p
 	args = append(args, "pipe:1")
 
 	cmd := exec.Command("ffmpeg", args...)
-	cmd.Stderr = nil
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		http.Error(w, "transcode error", http.StatusInternalServerError)
@@ -1355,6 +1391,7 @@ func (a *app) streamTranscoded(w http.ResponseWriter, r *http.Request, songID, p
 			os.Rename(tmpFile.Name(), cachePath)
 		} else {
 			os.Remove(tmpFile.Name())
+			a.logger.Printf("transcode error for %s: %v — %s", songID, err, stderrBuf.String())
 		}
 	} else {
 		if tmpFile != nil {
@@ -1362,7 +1399,9 @@ func (a *app) streamTranscoded(w http.ResponseWriter, r *http.Request, songID, p
 			os.Remove(tmpFile.Name())
 		}
 		io.Copy(w, stdout)
-		cmd.Wait()
+		if err := cmd.Wait(); err != nil {
+			a.logger.Printf("transcode error for %s: %v — %s", songID, err, stderrBuf.String())
+		}
 	}
 }
 
@@ -1439,6 +1478,8 @@ func (a *app) switchDevice(newID string) error {
 		oldTarget = a.mpv
 	} else if at, ok := a.agentTargets[oldID]; ok && at.isRunning() {
 		oldTarget = at
+	} else if wt, ok := a.webTargets[oldID]; ok && wt.isRunning() {
+		oldTarget = wt
 	} else {
 		oldTarget = a.mpv
 	}
@@ -1449,9 +1490,11 @@ func (a *app) switchDevice(newID string) error {
 		newTarget = a.mpv
 	} else if at, ok := a.agentTargets[newDev.ID]; ok && at.isRunning() {
 		newTarget = at
+	} else if wt, ok := a.webTargets[newDev.ID]; ok && wt.isRunning() {
+		newTarget = wt
 	} else {
 		a.devicesMu.Unlock()
-		return fmt.Errorf("agent %s not connected", newDev.ID)
+		return fmt.Errorf("device %s not connected", newDev.ID)
 	}
 
 	a.devicesMu.Unlock()
@@ -1513,12 +1556,16 @@ func (a *app) switchDevice(newID string) error {
 		switch {
 		case newDev.Type == "agent":
 			at := newTarget.(*agentTarget)
-			// Always pass real timePos — the agent handles both cases:
-			// - transcoded stream: start= in URL handles seek, agent skips redundant seek
-			// - offline file: agent seeks directly with ExoPlayer
 			if err := at.handoff(playlistPos, timePos, wasPaused); err != nil {
 				a.logger.Printf("device handoff: agent handoff failed: %v", err)
 			}
+		case newDev.Type == "web":
+			// Web target: just set state, browser handles actual playback
+			_ = newTarget.setProperty("playlist-pos", playlistPos)
+			if timePos > 0 {
+				_ = newTarget.setProperty("time-pos", timePos)
+			}
+			_ = newTarget.setProperty("pause", wasPaused)
 		default: // local mpv
 			_ = newTarget.setProperty("playlist-pos", playlistPos)
 			deadline := time.Now().Add(5 * time.Second)
@@ -1552,6 +1599,33 @@ func (a *app) switchDevice(newID string) error {
 	return nil
 }
 
+
+// reloadQueueIntoAgent loads the server's play queue into a reconnected agent
+// so that playback commands work immediately. Called when an agent re-registers
+// and was already the active device.
+func (a *app) reloadQueueIntoAgent(at *agentTarget, dev *device) {
+	a.playQueueMu.Lock()
+	queue := make([]string, len(a.playQueue))
+	copy(queue, a.playQueue)
+	a.playQueueMu.Unlock()
+
+	if len(queue) == 0 {
+		return
+	}
+
+	for i, songID := range queue {
+		loadMode := "append"
+		if i == 0 {
+			loadMode = "replace"
+		}
+		streamURL := a.streamURLForDevice(songID, dev.Format, dev.MaxBitRate, "")
+		if err := at.loadFile(streamURL, loadMode, nil); err != nil {
+			a.logger.Printf("agent reload: failed to load song %s: %v", songID, err)
+			return
+		}
+	}
+	a.logger.Printf("agent reload: loaded %d tracks into %s", len(queue), dev.Name)
+}
 
 func (a *app) deviceCleanup() {
 	// Agent connections are managed by handleAgentRegister — cleanup on disconnect

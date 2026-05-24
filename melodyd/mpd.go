@@ -421,6 +421,7 @@ func (c *mpdConn) handleAgentRegister(args []string) {
 
 	c.app.devicesMu.Lock()
 	// Close old agent with same name if it exists
+	wasActive := c.app.activeDevice == devID
 	if oldAt, ok := c.app.agentTargets[devID]; ok {
 		oldAt.close()
 		c.app.logger.Printf("agent replaced: %s (old connection closed)", name)
@@ -432,6 +433,13 @@ func (c *mpdConn) handleAgentRegister(args []string) {
 	c.app.logger.Printf("agent registered: %s (id=%s, addr=%s)", name, devID, dev.Address)
 	c.writeLine("OK")
 	c.flush()
+
+	// If this agent was the active device, reload the play queue into it
+	// so playback commands work immediately without a manual device switch.
+	if wasActive {
+		c.app.reloadQueueIntoAgent(at, dev)
+	}
+
 	c.app.mpdHub.notify(SubOutput)
 
 	// Keepalive: ping agent periodically to detect disconnection

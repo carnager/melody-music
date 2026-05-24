@@ -342,6 +342,7 @@ func mpdFilterEq(tag, value string) string {
 var mpd *mpdClient
 var idleConn *mpdClient  // dedicated connection for MPD idle
 var lastQueueVersion int // tracks MPD playlist version to skip redundant queue fetches
+var forceQueueRefresh bool // set when ratings change to bypass version check
 
 // Track last transmitted art to avoid re-transmitting on every render
 var artTxFile string
@@ -397,6 +398,8 @@ type albumEntry struct {
 	AlbumArtist string
 	Album       string
 	Date        string
+	Rating      int
+	Computed    float64
 }
 
 type deviceInfo struct {
@@ -514,7 +517,7 @@ type model struct {
 
 	// library
 	libMode      libView
-	libSortMtime bool
+	libSortLatest bool
 	artists      []string
 	albums       []albumEntry
 	tracks       []trackEntry
@@ -655,7 +658,7 @@ func listenIdle() tea.Msg {
 
 	// Send idle command (no mutex needed — this connection is exclusively for idle)
 	idleConn.conn.SetDeadline(time.Time{}) // no deadline for idle
-	_, err := idleConn.w.WriteString("idle player playlist mixer options database stored_playlist\n")
+	_, err := idleConn.w.WriteString("idle player playlist mixer options database stored_playlist rating\n")
 	if err != nil {
 		idleConn.close()
 		idleConn = nil
@@ -735,10 +738,11 @@ func fetchStatus() tea.Msg {
 
 	// Check if queue version changed
 	qVersion, _ := strconv.Atoi(st["playlist"])
-	if qVersion == lastQueueVersion && lastQueueVersion > 0 {
+	if qVersion == lastQueueVersion && lastQueueVersion > 0 && !forceQueueRefresh {
 		// Queue unchanged — return status only, update current position
 		return statusMsg{status: ps, queueVersion: qVersion, queueChanged: false, reconnected: reconnected}
 	}
+	forceQueueRefresh = false
 
 	// Queue changed — fetch it
 	qResults, err := mpd.cmdBatch([]string{"playlistinfo"})
@@ -825,6 +829,20 @@ func fetchAlbums(artist string) tea.Cmd {
 			a.ID = artist + "\x00" + a.Album + "\x00" + a.Date
 			albums = append(albums, a)
 		}
+		// Fetch album ratings
+		for i := range albums {
+			a := &albums[i]
+			rLines, err := mpd.cmd("getalbumrating " + mpdEscape(a.AlbumArtist) + " " + mpdEscape(a.Album) + " " + mpdEscape(a.Date))
+			if err == nil {
+				rKV := parseKV(rLines)
+				if v, ok := rKV["rating"]; ok {
+					a.Rating, _ = strconv.Atoi(v)
+				}
+				if v, ok := rKV["computed"]; ok {
+					a.Computed, _ = strconv.ParseFloat(v, 64)
+				}
+			}
+		}
 		// Sort by date then album name
 		sort.Slice(albums, func(i, j int) bool {
 			if albums[i].Date != albums[j].Date {
@@ -834,6 +852,30 @@ func fetchAlbums(artist string) tea.Cmd {
 		})
 		return albumsMsg(albums)
 	}
+}
+
+func fetchAllAlbumsLatest() tea.Msg {
+	if mpd == nil {
+		return albumsMsg(nil)
+	}
+	lines, err := mpd.cmd("list Album group AlbumArtist group Date sort latest")
+	if err != nil {
+		return albumsMsg(nil)
+	}
+	groups := parseGroups(lines, "Album")
+	var albums []albumEntry
+	for _, g := range groups {
+		a := albumEntry{
+			AlbumArtist: g["AlbumArtist"],
+			Album:       g["Album"],
+			Date:        g["Date"],
+		}
+		a.ID = a.AlbumArtist + "\x00" + a.Album + "\x00" + a.Date
+		albums = append(albums, a)
+	}
+	// Skip per-album rating fetch — too many round-trips for full library.
+	// Ratings are shown when browsing a specific artist's albums.
+	return albumsMsg(albums)
 }
 
 func fetchTracks(albumID string) tea.Cmd {
@@ -1197,6 +1239,18 @@ func rateTrack(songID, rating string) tea.Cmd {
 	}
 }
 
+func rateTracks(songIDs []string, rating string) tea.Cmd {
+	return func() tea.Msg {
+		if mpd == nil {
+			return fetchStatus()
+		}
+		for _, id := range songIDs {
+			mpd.cmd("rate " + id + " " + rating)
+		}
+		return fetchStatus()
+	}
+}
+
 func rateAlbum(albumArtist, album, date, rating string) tea.Cmd {
 	return func() tea.Msg {
 		if mpd == nil {
@@ -1418,6 +1472,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickCmd()
 
 	case idleMsg:
+		// On rating changes, force queue refetch to pick up new X-Rating values
+		for _, sub := range []string(msg) {
+			if sub == "rating" {
+				forceQueueRefresh = true
+				break
+			}
+		}
 		// Server notified us of changes — fetch status immediately
 		return m, tea.Batch(tea.Cmd(fetchStatus), tea.Cmd(listenIdle))
 
@@ -1507,6 +1568,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case albumRatingMsg:
 		m.albumRating = msg.rating
 		m.albumComputedRating = msg.computed
+		// Update the album entry in the albums list so the view refreshes
+		if m.ratingAlbum != nil {
+			for i := range m.albums {
+				if m.albums[i].AlbumArtist == m.ratingAlbum.AlbumArtist &&
+					m.albums[i].Album == m.ratingAlbum.Album &&
+					m.albums[i].Date == m.ratingAlbum.Date {
+					m.albums[i].Rating = msg.rating
+					m.albums[i].Computed = msg.computed
+					break
+				}
+			}
+		} else if m.curAlbum != nil {
+			for i := range m.albums {
+				if m.albums[i].AlbumArtist == m.curAlbum.AlbumArtist &&
+					m.albums[i].Album == m.curAlbum.Album &&
+					m.albums[i].Date == m.curAlbum.Date {
+					m.albums[i].Rating = msg.rating
+					m.albums[i].Computed = msg.computed
+					break
+				}
+			}
+		}
 		return m, nil
 
 	case ratingPopupMsg:
@@ -1856,11 +1939,27 @@ func (m model) handleLibKey(key string) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "S":
-		if m.libMode == libArtists {
-			m.libSortMtime = !m.libSortMtime
+		if m.libMode == libArtists && !m.libSortLatest {
+			// Toggle on: switch to latest-sorted album list
+			m.libSortLatest = true
+			m.savedArtistCursor = m.libCursor
+			m.savedArtistOffset = m.libOffset
 			m.libCursor = 0
 			m.libOffset = 0
-			return m, fetchArtists
+			m.libFiltering = false
+			m.libFilter = ""
+			m.libFiltered = nil
+			return m, fetchAllAlbumsLatest
+		} else if m.libMode == libAlbums && m.libSortLatest {
+			// Toggle off: go back to artist list
+			m.libSortLatest = false
+			m.libMode = libArtists
+			m.libCursor = m.savedArtistCursor
+			m.libOffset = m.savedArtistOffset
+			m.libFiltering = false
+			m.libFilter = ""
+			m.libFiltered = nil
+			return m, tea.ClearScreen
 		}
 	}
 	return m, nil
@@ -1954,9 +2053,17 @@ func (m *model) rebuildLibFilter() {
 		}
 	case libAlbums:
 		for i, a := range m.albums {
-			label := a.Album
-			if a.Date != "" {
-				label = a.Date + " " + a.Album
+			var label string
+			if m.libSortLatest {
+				label = a.AlbumArtist + " - " + a.Album
+				if a.Date != "" {
+					label = a.Date + " " + label
+				}
+			} else {
+				label = a.Album
+				if a.Date != "" {
+					label = a.Date + " " + a.Album
+				}
 			}
 			if strings.Contains(strings.ToLower(label), query) {
 				indices = append(indices, i)
@@ -2036,6 +2143,7 @@ func (m model) libDrillIn() (tea.Model, tea.Cmd) {
 			m.savedAlbumOffset = m.libOffset
 			a := m.albums[di]
 			m.curAlbum = &a
+			m.curArtist = a.AlbumArtist
 			m.albumRating = 0
 			m.albumComputedRating = 0
 			return m, tea.Batch(fetchTracks(a.ID), fetchAlbumRating(a.AlbumArtist, a.Album, a.Date))
@@ -2062,10 +2170,21 @@ func (m model) libDrillIn() (tea.Model, tea.Cmd) {
 func (m model) libBack() (tea.Model, tea.Cmd) {
 	switch m.libMode {
 	case libAlbums:
+		if m.libSortLatest {
+			// Back from latest-sorted albums returns to artist list with sort off
+			m.libSortLatest = false
+		}
 		m.libMode = libArtists
 		m.libCursor = m.savedArtistCursor
 		m.libOffset = m.savedArtistOffset
 	case libTracks:
+		if m.libSortLatest {
+			// Back from tracks in latest mode returns to the latest album list
+			m.libMode = libAlbums
+			m.libCursor = m.savedAlbumCursor
+			m.libOffset = m.savedAlbumOffset
+			return m, tea.ClearScreen
+		}
 		m.libMode = libAlbums
 		m.libCursor = m.savedAlbumCursor
 		m.libOffset = m.savedAlbumOffset
@@ -2493,7 +2612,20 @@ func (m model) handleRatingKey(key string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Track rating — same context logic as before
-		if m.focus == panelQueue && m.qCursor < len(m.queue) {
+		if m.focus == panelQueue && len(m.qSelected) > 0 {
+			// Batch rate all selected queue items
+			var ids []string
+			for pos := range m.qSelected {
+				if pos < len(m.queue) && m.queue[pos].XSongID != "" {
+					ids = append(ids, m.queue[pos].XSongID)
+				}
+			}
+			m.qSelected = nil
+			if len(ids) > 0 {
+				return m, rateTracks(ids, ratingStr)
+			}
+			return m, nil
+		} else if m.focus == panelQueue && m.qCursor < len(m.queue) {
 			q := m.queue[m.qCursor]
 			if q.XSongID != "" {
 				return m, rateTrack(q.XSongID, ratingStr)
@@ -2637,13 +2769,35 @@ func (m model) libraryView(w, h int) string {
 			allItems = append(allItems, libItem{text: a, srcIdx: i})
 		}
 	case libAlbums:
-		breadcrumbs = []string{"Artists", m.curArtist, fmt.Sprintf("Albums (%d)", len(m.albums))}
+		if m.libSortLatest {
+			breadcrumbs = []string{fmt.Sprintf("Latest Albums (%d)", len(m.albums))}
+		} else {
+			breadcrumbs = []string{"Artists", m.curArtist, fmt.Sprintf("Albums (%d)", len(m.albums))}
+		}
 		for i, a := range m.albums {
-			label := a.Album
-			if a.Date != "" && a.Date != "0000" {
-				label = a.Date + " " + a.Album
+			var label string
+			if m.libSortLatest {
+				if a.Date != "" && a.Date != "0000" {
+					label = a.Date + " " + a.AlbumArtist + " - " + a.Album
+				} else {
+					label = a.AlbumArtist + " - " + a.Album
+				}
+			} else {
+				label = a.Album
+				if a.Date != "" && a.Date != "0000" {
+					label = a.Date + " " + a.Album
+				}
 			}
-			allItems = append(allItems, libItem{text: label, srcIdx: i})
+			displayRating := a.Rating
+			if displayRating == 0 && a.Computed > 0 {
+				displayRating = int(math.Round(a.Computed))
+				if displayRating < 1 {
+					displayRating = 1
+				} else if displayRating > 10 {
+					displayRating = 10
+				}
+			}
+			allItems = append(allItems, libItem{text: label, rating: displayRating, srcIdx: i})
 		}
 	case libTracks:
 		albumName := ""
@@ -2722,9 +2876,13 @@ func (m model) libraryView(w, h int) string {
 		var hint string
 		switch m.libMode {
 		case libArtists:
-			hint = "[enter]browse  [f]filter  [?]help"
+			hint = "[enter]browse  [f]filter  [S]latest  [?]help"
 		case libAlbums:
-			hint = "[enter]browse  [f]filter  [bksp]back"
+			if m.libSortLatest {
+				hint = "[enter]browse  [f]filter  [S]latest off  [bksp]back"
+			} else {
+				hint = "[enter]browse  [f]filter  [bksp]back"
+			}
 		case libTracks, libPlaylistTracks:
 			hint = "[enter]add  [f]filter  [bksp]back"
 		case libPlaylists:
@@ -3312,9 +3470,17 @@ func (m model) menuView() string {
 		case libAlbums:
 			if di >= 0 && di < len(m.albums) {
 				a := m.albums[di]
-				label = a.Album
-				if a.Date != "" && a.Date != "0000" {
-					label = a.Date + " " + a.Album
+				if m.libSortLatest {
+					if a.Date != "" && a.Date != "0000" {
+						label = a.Date + " " + a.AlbumArtist + " - " + a.Album
+					} else {
+						label = a.AlbumArtist + " - " + a.Album
+					}
+				} else {
+					label = a.Album
+					if a.Date != "" && a.Date != "0000" {
+						label = a.Date + " " + a.Album
+					}
 				}
 			}
 		case libTracks:

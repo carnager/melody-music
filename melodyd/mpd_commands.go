@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // commandTable maps MPD command names to handler functions.
@@ -85,6 +86,10 @@ func init() {
 	"albumrate":      cmdAlbumRate,
 	"getrating":      cmdGetRating,
 	"getalbumrating": cmdGetAlbumRating,
+
+	// Web client
+	"web_register":   cmdWebRegister,
+	"web_unregister": cmdWebUnregister,
 
 	// Cover art
 	"albumart":    cmdAlbumArt,
@@ -771,12 +776,17 @@ func cmdList(c *mpdConn, args []string) *mpdError {
 		filterVal = args[i+1]
 		i += 2
 	}
-	// Parse group clauses
+	// Parse group and sort clauses
+	sortMode := ""
 	for i+1 < len(args) {
-		if strings.ToLower(args[i]) == "group" {
+		switch strings.ToLower(args[i]) {
+		case "group":
 			groupTags = append(groupTags, strings.ToLower(args[i+1]))
 			i += 2
-		} else {
+		case "sort":
+			sortMode = strings.ToLower(args[i+1])
+			i += 2
+		default:
 			i++
 		}
 	}
@@ -800,12 +810,20 @@ func cmdList(c *mpdConn, args []string) *mpdError {
 			c.writeKV(key, name)
 		}
 	case "album":
+		// Fast path: pre-formatted cached response for "list Album ... sort latest"
+		if sortMode == "latest" && filterTag == "" && groupSet["albumartist"] && groupSet["date"] {
+			if cached := a.db.cachedAlbumsLatestResponse(); cached != "" {
+				c.writef("%s", cached)
+				break
+			}
+		}
+
 		var albums []map[string]any
 		var err error
 		if filterTag == "artist" || filterTag == "albumartist" {
 			albums, err = a.db.albumsByArtist(filterVal)
 		} else {
-			albums, err = a.db.allAlbums(false)
+			albums, err = a.db.allAlbums(sortMode == "latest")
 		}
 		if err != nil {
 			return mpdErr(errSystem, "list", err.Error())
@@ -1477,17 +1495,24 @@ func cmdEnableOutput(c *mpdConn, args []string) *mpdError {
 	if len(args) < 1 {
 		return mpdErr(errArg, "enableoutput", "need output id")
 	}
-	idx, err := strconv.Atoi(args[0])
-	if err != nil {
-		return mpdErr(errArg, "enableoutput", "invalid output id")
-	}
 
 	a := c.app
 	a.devicesMu.RLock()
 	devs := a.sortedDevices()
 	var target *device
-	if idx >= 0 && idx < len(devs) {
-		target = devs[idx]
+	if idx, err := strconv.Atoi(args[0]); err == nil {
+		// Numeric index
+		if idx >= 0 && idx < len(devs) {
+			target = devs[idx]
+		}
+	} else {
+		// String device ID
+		for _, d := range devs {
+			if d.ID == args[0] {
+				target = d
+				break
+			}
+		}
 	}
 	a.devicesMu.RUnlock()
 
@@ -1510,6 +1535,92 @@ func cmdDisableOutput(c *mpdConn, args []string) *mpdError {
 	if err := c.app.switchDevice("local"); err != nil {
 		return mpdErr(errSystem, "disableoutput", err.Error())
 	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Web client registration
+// ---------------------------------------------------------------------------
+
+func cmdWebRegister(c *mpdConn, args []string) *mpdError {
+	name := "Web"
+	if len(args) > 0 {
+		name = args[0]
+	}
+
+	a := c.app
+	devID := "web-" + name
+
+	wt := newWebTarget()
+	dev := &device{
+		ID:       devID,
+		Name:     name,
+		IsLocal:  false,
+		Type:     "web",
+		LastSeen: time.Now(),
+	}
+
+	a.devicesMu.Lock()
+	// Close old web target with same name if it exists
+	wasActive := a.activeDevice == devID
+	if oldWt, ok := a.webTargets[devID]; ok {
+		oldWt.close()
+	}
+	a.devices[devID] = dev
+	a.webTargets[devID] = wt
+	a.devicesMu.Unlock()
+
+	a.logger.Printf("web client registered: %s (id=%s)", name, devID)
+
+	if wasActive {
+		// Re-registering the already-active web device: load current queue
+		// into the new webTarget so playlist-next/prev work.
+		a.playQueueMu.Lock()
+		queue := make([]string, len(a.playQueue))
+		copy(queue, a.playQueue)
+		a.playQueueMu.Unlock()
+		for i, songID := range queue {
+			mode := "append"
+			if i == 0 {
+				mode = "replace"
+			}
+			url := a.streamURLForDevice(songID, "", 0, "")
+			_ = wt.loadFile(url, mode, nil)
+		}
+		// Preserve paused=false so status reports "play" state
+		_ = wt.setProperty("pause", false)
+	} else {
+		// First registration: switch to this web device (loads queue via switchDevice)
+		if err := a.switchDevice(devID); err != nil {
+			a.logger.Printf("web client auto-switch failed: %v", err)
+		}
+	}
+
+	a.mpdHub.notify(SubOutput)
+	c.writeKV("device_id", devID)
+	return nil
+}
+
+func cmdWebUnregister(c *mpdConn, args []string) *mpdError {
+	if len(args) < 1 {
+		return mpdErr(errArg, "web_unregister", "need device id")
+	}
+	devID := args[0]
+	a := c.app
+
+	a.devicesMu.Lock()
+	if wt, ok := a.webTargets[devID]; ok {
+		wt.close()
+		delete(a.webTargets, devID)
+		delete(a.devices, devID)
+		if a.activeDevice == devID {
+			a.activeDevice = "local"
+		}
+		a.logger.Printf("web client unregistered: %s", devID)
+	}
+	a.devicesMu.Unlock()
+
+	a.mpdHub.notify(SubOutput)
 	return nil
 }
 

@@ -36,6 +36,7 @@ class MainViewModel : ViewModel() {
     var savedArtistScrollOffset by mutableStateOf(0); private set
     var savedAlbumScrollIndex by mutableStateOf(0); private set
     var savedAlbumScrollOffset by mutableStateOf(0); private set
+    var libSortLatest by mutableStateOf(false); private set
 
     // Search
     var searchQuery by mutableStateOf("")
@@ -54,6 +55,10 @@ class MainViewModel : ViewModel() {
 
     // Devices
     var devices by mutableStateOf<List<DeviceInfo>>(emptyList()); private set
+
+    // "Play on phone?" prompt — shown when on mobile data and phone isn't the active device
+    var showPhonePrompt by mutableStateOf(false); private set
+    private var pendingPhoneAction: (suspend () -> Unit)? = null
 
     // Playlists
     var playlists by mutableStateOf<List<PlaylistInfo>>(emptyList()); private set
@@ -80,6 +85,7 @@ class MainViewModel : ViewModel() {
         startPolling()
         startIdle()
         loadArtists()
+        loadDevices()
     }
 
     private fun startPolling() {
@@ -161,6 +167,22 @@ class MainViewModel : ViewModel() {
         }
     }
 
+    fun toggleLibSortLatest() {
+        libSortLatest = !libSortLatest
+        if (libSortLatest) {
+            loadAllAlbumsLatest()
+        } else {
+            loadArtists()
+        }
+    }
+
+    fun loadAllAlbumsLatest() {
+        viewModelScope.launch {
+            try { albums = mpd.getAllAlbumsLatest() } catch (_: Exception) {}
+            libView = LibView.Albums
+        }
+    }
+
     fun saveArtistScroll(index: Int, offset: Int) {
         savedArtistScrollIndex = index
         savedArtistScrollOffset = offset
@@ -200,14 +222,27 @@ class MainViewModel : ViewModel() {
     fun libBack() {
         when (libView) {
             LibView.Tracks -> {
-                libView = LibView.Albums
-                tracks = emptyList()
-                albumRating = 0
-                albumComputedRating = 0.0
+                if (libSortLatest) {
+                    // Go back to all-albums-latest view
+                    tracks = emptyList()
+                    albumRating = 0
+                    albumComputedRating = 0.0
+                    loadAllAlbumsLatest()
+                } else {
+                    libView = LibView.Albums
+                    tracks = emptyList()
+                    albumRating = 0
+                    albumComputedRating = 0.0
+                }
             }
             LibView.Albums -> {
-                libView = LibView.Artists
-                albums = emptyList()
+                if (libSortLatest) {
+                    libSortLatest = false
+                    loadArtists()
+                } else {
+                    libView = LibView.Artists
+                    albums = emptyList()
+                }
             }
             LibView.Artists -> {}
         }
@@ -237,20 +272,20 @@ class MainViewModel : ViewModel() {
 
     fun executeAction(mode: String) {
         val t = actionTarget ?: return
-        viewModelScope.launch {
-            try {
-                when (t) {
-                    is ActionTarget.ArtistTarget -> mpd.addAllArtistAlbums(t.name, mode)
-                    is ActionTarget.AlbumTarget -> mpd.addAlbum(t.album.albumArtist, t.album.album, mode)
-                    is ActionTarget.TrackTarget -> mpd.addTrack(t.track.uri, mode)
-                    is ActionTarget.SearchAlbumTarget -> mpd.addAlbum(t.album.albumArtist, t.album.album, mode)
-                    is ActionTarget.SearchTrackTarget -> mpd.addTrack(t.track.uri, mode)
-                    is ActionTarget.QueueItemTarget -> {}
-                    is ActionTarget.PlaylistTarget -> mpd.loadPlaylist(t.playlist.name, mode)
-                }
-            } catch (_: Exception) {}
-        }
         dismissAction()
+        val doIt: suspend () -> Unit = {
+            when (t) {
+                is ActionTarget.ArtistTarget -> mpd.addAllArtistAlbums(t.name, mode)
+                is ActionTarget.AlbumTarget -> mpd.addAlbum(t.album.albumArtist, t.album.album, mode)
+                is ActionTarget.TrackTarget -> mpd.addTrack(t.track.uri, mode)
+                is ActionTarget.SearchAlbumTarget -> mpd.addAlbum(t.album.albumArtist, t.album.album, mode)
+                is ActionTarget.SearchTrackTarget -> mpd.addTrack(t.track.uri, mode)
+                is ActionTarget.QueueItemTarget -> {}
+                is ActionTarget.PlaylistTarget -> mpd.loadPlaylist(t.playlist.name, mode)
+            }
+        }
+        if (mode == "replace" && shouldPromptPhone(doIt)) return
+        viewModelScope.launch { try { doIt() } catch (_: Exception) {} }
     }
 
     fun browseIntoAction() {
@@ -401,24 +436,20 @@ class MainViewModel : ViewModel() {
     fun executeBatchAction(mode: String) {
         val albums = selectedSearchAlbums.toList()
         val trackUris = selectedSearchTracks.toList()
-        viewModelScope.launch {
-            try {
-                if (mode == "replace") {
-                    mpd.queueClear()
-                }
-                val addMode = if (mode == "replace") "add" else mode
-                for (album in albums) {
-                    mpd.addAlbum(album.albumArtist, album.album, addMode)
-                }
-                for (uri in trackUris) {
-                    mpd.addTrack(uri, addMode)
-                }
-                if (mode == "replace") {
-                    mpd.resume()
-                }
-            } catch (_: Exception) {}
-        }
         exitSearchSelectionMode()
+        val doIt: suspend () -> Unit = {
+            if (mode == "replace") mpd.queueClear()
+            val addMode = if (mode == "replace") "add" else mode
+            for (album in albums) {
+                mpd.addAlbum(album.albumArtist, album.album, addMode)
+            }
+            for (uri in trackUris) {
+                mpd.addTrack(uri, addMode)
+            }
+            if (mode == "replace") mpd.resume()
+        }
+        if (mode == "replace" && shouldPromptPhone(doIt)) return
+        viewModelScope.launch { try { doIt() } catch (_: Exception) {} }
     }
 
     // --- Playback ---
@@ -437,15 +468,15 @@ class MainViewModel : ViewModel() {
     fun seek(pos: Double) { viewModelScope.launch { try { mpd.seek(pos) } catch (_: Exception) {} } }
 
     fun randomAlbum() {
-        viewModelScope.launch {
-            try {
-                val allAlbums = mpd.getAllAlbums()
-                if (allAlbums.isNotEmpty()) {
-                    val album = allAlbums.random()
-                    mpd.addAlbum(album.albumArtist, album.album, "replace")
-                }
-            } catch (_: Exception) {}
+        val doIt: suspend () -> Unit = {
+            val allAlbums = mpd.getAllAlbums()
+            if (allAlbums.isNotEmpty()) {
+                val album = allAlbums.random()
+                mpd.addAlbum(album.albumArtist, album.album, "replace")
+            }
         }
+        if (shouldPromptPhone(doIt)) return
+        viewModelScope.launch { try { doIt() } catch (_: Exception) {} }
     }
 
     // --- Queue ---
@@ -588,6 +619,59 @@ class MainViewModel : ViewModel() {
                 delay(300)
                 devices = mpd.getOutputs()
             } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * Check if we should prompt to switch to phone. Returns true (and shows dialog)
+     * if on mobile data and phone agent isn't the active device.
+     */
+    private fun isPhoneAgent(dev: DeviceInfo): Boolean {
+        return dev.type == "agent" && dev.name.contains("android", ignoreCase = true)
+    }
+
+    private fun shouldPromptPhone(action: suspend () -> Unit): Boolean {
+        if (!MelodyApp.instance.isOnMobileData()) return false
+        val active = devices.firstOrNull { it.active }
+        if (active != null && isPhoneAgent(active)) return false
+        pendingPhoneAction = action
+        showPhonePrompt = true
+        return true
+    }
+
+    fun phonePromptConfirm() {
+        val action = pendingPhoneAction
+        showPhonePrompt = false
+        pendingPhoneAction = null
+        viewModelScope.launch {
+            // Stop playback before switching so the old track doesn't briefly play on phone
+            try { mpd.stop() } catch (_: Exception) {}
+            // Switch to phone first, then run the play action
+            try {
+                devices = mpd.getOutputs()
+                val phoneDev = devices.find { isPhoneAgent(it) }
+                if (phoneDev != null && !phoneDev.active) {
+                    mpd.enableOutput(phoneDev.id)
+                    delay(500)
+                    devices = mpd.getOutputs()
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("MainViewModel", "Phone switch failed: ${e.message}")
+            }
+            try {
+                action?.invoke()
+            } catch (e: Exception) {
+                android.util.Log.e("MainViewModel", "Pending action failed: ${e.message}")
+            }
+        }
+    }
+
+    fun phonePromptDismiss() {
+        val action = pendingPhoneAction
+        showPhonePrompt = false
+        pendingPhoneAction = null
+        viewModelScope.launch {
+            try { action?.invoke() } catch (_: Exception) {}
         }
     }
 }

@@ -7,12 +7,18 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	_ "modernc.org/sqlite"
 )
 
 type musicDB struct {
 	db *sql.DB
+
+	// Cached results for expensive queries, invalidated on scan.
+	cacheMu                  sync.Mutex
+	cachedAlbumsLatest       []map[string]any
+	cachedAlbumsLatestFormatted string // pre-formatted MPD response lines
 }
 
 func openMusicDB(path string) (*musicDB, error) {
@@ -214,13 +220,24 @@ func (m *musicDB) upsertAlbum(artistID int64, title, date string) (int64, error)
 }
 
 func (m *musicDB) allAlbums(sortLatest bool) ([]map[string]any, error) {
+	if sortLatest {
+		m.cacheMu.Lock()
+		cached := m.cachedAlbumsLatest
+		m.cacheMu.Unlock()
+		if cached != nil {
+			return cached, nil
+		}
+	}
+
 	order := "a.name COLLATE NOCASE, al.date, al.title COLLATE NOCASE"
 	if sortLatest {
-		order = "al.created_at DESC"
+		order = "max_mtime DESC"
 	}
-	query := fmt.Sprintf(`SELECT al.id, a.name, al.title, al.date, al.created_at
+	query := fmt.Sprintf(`SELECT al.id, a.name, al.title, al.date, COALESCE(MAX(t.file_modified), 0) AS max_mtime
 		FROM albums al
 		INNER JOIN artists a ON a.id = al.artist_id
+		LEFT JOIN tracks t ON t.album_id = al.id
+		GROUP BY al.id
 		ORDER BY %s`, order)
 	rows, err := m.db.Query(query)
 	if err != nil {
@@ -229,9 +246,9 @@ func (m *musicDB) allAlbums(sortLatest bool) ([]map[string]any, error) {
 	defer rows.Close()
 	var albums []map[string]any
 	for rows.Next() {
-		var id int64
-		var artist, title, date, createdAt string
-		if err := rows.Scan(&id, &artist, &title, &date, &createdAt); err != nil {
+		var id, maxMtime int64
+		var artist, title, date string
+		if err := rows.Scan(&id, &artist, &title, &date, &maxMtime); err != nil {
 			return nil, err
 		}
 		albums = append(albums, map[string]any{
@@ -245,7 +262,47 @@ func (m *musicDB) allAlbums(sortLatest bool) ([]map[string]any, error) {
 	if albums == nil {
 		albums = []map[string]any{}
 	}
-	return albums, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if sortLatest {
+		// Pre-format the MPD response string
+		var sb strings.Builder
+		for _, album := range albums {
+			fmt.Fprintf(&sb, "AlbumArtist: %s\n", album["albumartist"])
+			fmt.Fprintf(&sb, "Date: %s\n", album["date"])
+			fmt.Fprintf(&sb, "Album: %s\n", album["album"])
+			if v, _ := album["album_id"].(string); v != "" {
+				fmt.Fprintf(&sb, "X-AlbumId: %s\n", v)
+			}
+		}
+
+		m.cacheMu.Lock()
+		m.cachedAlbumsLatest = albums
+		m.cachedAlbumsLatestFormatted = sb.String()
+		m.cacheMu.Unlock()
+	}
+	return albums, nil
+}
+
+func (m *musicDB) invalidateCache() {
+	m.cacheMu.Lock()
+	m.cachedAlbumsLatest = nil
+	m.cachedAlbumsLatestFormatted = ""
+	m.cacheMu.Unlock()
+}
+
+func (m *musicDB) warmCache() {
+	m.allAlbums(true)
+}
+
+// cachedAlbumsLatestResponse returns the pre-formatted MPD response for
+// "list Album ... sort latest" if available. Returns "" on cache miss.
+func (m *musicDB) cachedAlbumsLatestResponse() string {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	return m.cachedAlbumsLatestFormatted
 }
 
 func (m *musicDB) albumsByArtist(artist string) ([]map[string]any, error) {

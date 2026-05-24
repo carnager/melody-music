@@ -437,6 +437,21 @@ fun MainScreen(vm: MainViewModel) {
             PlaylistPickerSheet(vm)
         }
 
+        // "Play on phone?" prompt
+        if (vm.showPhonePrompt) {
+            AlertDialog(
+                onDismissRequest = { vm.phonePromptDismiss() },
+                title = { Text("Play on phone?") },
+                text = { Text("You're on mobile data. Switch playback to this device?") },
+                confirmButton = {
+                    TextButton(onClick = { vm.phonePromptConfirm() }) { Text("Phone") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { vm.phonePromptDismiss() }) { Text("Keep current") }
+                }
+            )
+        }
+
         // Now Playing overlay
         AnimatedVisibility(
             visible = showNowPlaying,
@@ -552,7 +567,7 @@ fun MiniPlayerBar(vm: MainViewModel, onClick: () -> Unit) {
                             Text(
                                 vm.codecInfo,
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.outline,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1
                             )
                         }
@@ -824,7 +839,7 @@ fun NowPlayingScreen(vm: MainViewModel, onDismiss: () -> Unit) {
 
 @Composable
 fun LibraryScreen(vm: MainViewModel) {
-    BackHandler(enabled = vm.libView != LibView.Artists) {
+    BackHandler(enabled = vm.libView != LibView.Artists || vm.libSortLatest) {
         vm.libBack()
     }
 
@@ -951,13 +966,22 @@ fun ArtistList(vm: MainViewModel) {
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    IconButton(onClick = { vm.toggleCachedOnly() }) {
-                        Icon(
-                            Icons.Default.FilterList,
-                            contentDescription = if (vm.showCachedOnly) "Show all" else "Show offline only",
-                            tint = if (vm.showCachedOnly) MaterialTheme.colorScheme.primary
-                                   else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                    Row {
+                        IconButton(onClick = { vm.toggleLibSortLatest() }) {
+                            Icon(
+                                Icons.Default.Schedule,
+                                contentDescription = "Sort by latest",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        IconButton(onClick = { vm.toggleCachedOnly() }) {
+                            Icon(
+                                Icons.Default.FilterList,
+                                contentDescription = if (vm.showCachedOnly) "Show all" else "Show offline only",
+                                tint = if (vm.showCachedOnly) MaterialTheme.colorScheme.primary
+                                       else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
             }
@@ -1060,9 +1084,10 @@ fun AlbumList(vm: MainViewModel) {
                         }
                     },
                     supportingContent = {
-                        if (album.date.isNotBlank() && album.date != "0000") {
-                            Text(album.date)
-                        }
+                        val parts = mutableListOf<String>()
+                        if (vm.libSortLatest && album.albumArtist.isNotBlank()) parts.add(album.albumArtist)
+                        if (album.date.isNotBlank() && album.date != "0000") parts.add(album.date)
+                        if (parts.isNotEmpty()) Text(parts.joinToString(" \u00B7 "))
                     },
                     modifier = Modifier.clickable {
                         vm.saveAlbumScroll(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)

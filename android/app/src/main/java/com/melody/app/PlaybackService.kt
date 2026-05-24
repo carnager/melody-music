@@ -71,6 +71,9 @@ class PlaybackService : Service() {
                     }
                     updateCodecInfo()
                 }
+                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                    android.util.Log.e("PlaybackService", "ExoPlayer error: ${error.errorCodeName} — ${error.message}")
+                }
             })
         }
         android.util.Log.d("PlaybackService", "ExoPlayer initialized")
@@ -146,7 +149,7 @@ class PlaybackService : Service() {
 
         val client = OkHttpClient.Builder()
             .readTimeout(0, java.util.concurrent.TimeUnit.SECONDS)
-            .pingInterval(3, java.util.concurrent.TimeUnit.SECONDS)
+            .pingInterval(30, java.util.concurrent.TimeUnit.SECONDS)
             .build()
         val request = Request.Builder().url(wsUrl).build()
 
@@ -276,8 +279,9 @@ class PlaybackService : Service() {
                     val url = args[0]
                     val mode = args[1]
                     val songId = extractSongIdFromUrl(url)
-                    val resolvedUrl = resolveUrl(url, songId)
-                    val isOffline = resolvedUrl != url
+                    val localPath = if (songId.isNotBlank()) MelodyApp.instance.offlineManager.getLocalPath(songId) else null
+                    val isOffline = localPath != null
+                    val resolvedUrl = localPath ?: resolveUrl(url, songId)
 
                     // Parse start= offset from URL (baked in by server for transcoded handoff)
                     val startParam = android.net.Uri.parse(url).getQueryParameter("start")
@@ -350,7 +354,16 @@ class PlaybackService : Service() {
                     val name = args[0]
                     val value = args[1]
                     when (name) {
-                        "pause" -> if (value == "true") p.pause() else p.play()
+                        "pause" -> {
+                            if (value == "true") {
+                                p.pause()
+                            } else {
+                                if (p.playbackState == Player.STATE_IDLE && p.mediaItemCount > 0) {
+                                    p.prepare()
+                                }
+                                p.play()
+                            }
+                        }
                         "playlist-pos" -> {
                             streamStartOffset = 0.0
                             p.seekToDefaultPosition(value.toIntOrNull() ?: 0)
@@ -392,7 +405,7 @@ class PlaybackService : Service() {
                     val timePos = args[1].toDoubleOrNull() ?: 0.0
                     val paused = args[2] == "true" || args[2] == "1"
 
-                    android.util.Log.d("PlaybackService", "handoff: pos=$playlistPos timePos=$timePos paused=$paused offset=$streamStartOffset")
+                    android.util.Log.d("PlaybackService", "handoff: pos=$playlistPos timePos=$timePos paused=$paused")
 
                     p.pause()
                     p.seekToDefaultPosition(playlistPos)
@@ -406,16 +419,31 @@ class PlaybackService : Service() {
                     if (timePos > 0) {
                         val currentUri = p.currentMediaItem?.localConfiguration?.uri?.toString() ?: ""
                         if (isTranscodedUrl(currentUri)) {
-                            // For transcoded handoff, start= is already baked into the URL
-                            // by the server during loadfile. streamStartOffset was set in
-                            // loadfile handler. No need to reload — just start playing.
+                            // The start= offset is baked into the URL for transcoded streams.
+                            // Ensure streamStartOffset reflects the actual position so the
+                            // seekbar and get_property time-pos report correctly.
+                            val startParam = android.net.Uri.parse(currentUri).getQueryParameter("start")
+                            streamStartOffset = startParam?.toDoubleOrNull() ?: 0.0
                         } else {
                             p.seekTo((timePos * 1000).toLong())
                         }
                     }
 
-                    if (!paused) p.play() else p.pause()
-                    android.util.Log.d("PlaybackService", "handoff: done, offset=$streamStartOffset paused=$paused")
+                    if (!paused) {
+                        p.play()
+                        // Wait for playback to actually start
+                        for (i in 1..100) {
+                            if (p.playbackState == Player.STATE_READY && p.playWhenReady) break
+                            if (p.playbackState == Player.STATE_IDLE) break // error occurred
+                            delay(50)
+                        }
+                        if (p.playbackState == Player.STATE_IDLE) {
+                            android.util.Log.e("PlaybackService", "handoff: playback failed to start")
+                        }
+                    } else {
+                        p.pause()
+                    }
+                    android.util.Log.d("PlaybackService", "handoff: done, state=${p.playbackState} offset=$streamStartOffset paused=$paused")
                     "OK"
                 }
 

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.9.0 (2026-05-24)
+
+### Features
+
+- Library sort by latest (mtime): all clients (web UI, Android, TUI)
+- Server-side cache for latest-albums query with pre-formatted MPD response
+- "Play on phone?" prompt when on mobile data and phone agent isn't active
+- Web UI library view with latest sort toggle, cover art, and context menus
+- Server accepts both numeric index and string device ID for enableoutput
+- ExoPlayer error logging for silent playback failures
+
+### Bug Fixes
+
+- Fix mtime sort using DB insertion time instead of actual filesystem mtime
+- Fix TUI latest-sort performance (remove N+1 album rating RPCs)
+- Fix agent reconnect not reloading play queue (reloadQueueIntoAgent)
+- Fix seekbar reset to zero on device handoff with transcoded streams
+- Fix offline checkmark always showing when transcoding enabled
+- Fix codec info text readability in Android mini player
+- Fix WebSocket ping timeout (3s→30s) causing agent disconnects during queue reload
+- Capture ffmpeg stderr for transcoding error diagnostics
+
 ## 0.8.0 (2026-05-23)
 
 ### Features

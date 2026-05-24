@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Melody</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+
+<audio id="player" preload="none"></audio>
+
+<div id="login-view" class="hidden">
+  <div class="login-card">
+    <h1 class="login-title">Melody</h1>
+    <form id="login-form">
+      <input type="password" id="login-secret" placeholder="Secret" autocomplete="current-password" required>
+      <button type="submit" class="btn-primary">Sign in</button>
+      <p id="login-error" class="login-error hidden"></p>
+    </form>
+  </div>
+</div>
+
+<div id="app" style="display:none">
+  <nav id="sidebar">
+    <div class="sidebar-title">Melody</div>
+    <ul class="nav-list">
+      <li class="nav-item active" data-view="library">Library</li>
+      <li class="nav-item" data-view="search">Search</li>
+      <li class="nav-item" data-view="queue">Queue</li>
+      <li class="nav-item" data-view="playlists">Playlists</li>
+    </ul>
+  </nav>
+
+  <main id="content"></main>
+
+  <aside id="queue-panel">
+    <div class="queue-header">
+      <span class="queue-title">Queue</span>
+      <button id="queue-clear" class="btn-ghost">Clear</button>
+    </div>
+    <div id="queue-list" class="queue-list"></div>
+  </aside>
+
+  <div id="now-playing">
+    <img id="np-art" class="np-art" src="" alt="">
+    <div class="np-info">
+      <div id="np-title" class="np-title">Not playing</div>
+      <div id="np-artist" class="np-artist"></div>
+    </div>
+    <div class="np-seek">
+      <span id="np-time-current" class="np-time">0:00</span>
+      <input type="range" id="seek-bar" min="0" max="100" value="0" step="0.1">
+      <span id="np-time-total" class="np-time">0:00</span>
+    </div>
+    <div class="np-controls">
+      <button id="prev-btn" class="ctrl-btn ctrl-sm" aria-label="Previous">&#9198;</button>
+      <button id="play-btn" class="ctrl-btn ctrl-lg" aria-label="Play">&#9654;</button>
+      <button id="next-btn" class="ctrl-btn ctrl-sm" aria-label="Next">&#9197;</button>
+    </div>
+    <div class="np-volume">
+      <input type="range" id="volume-slider" min="0" max="100" value="80" step="1">
+    </div>
+    <div id="np-rating" class="np-rating"></div>
+  </div>
+</div>
+
+<div id="context-menu" class="context-menu hidden"></div>
+
+</body>
+</html>

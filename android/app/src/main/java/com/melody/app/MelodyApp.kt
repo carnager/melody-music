@@ -75,6 +75,13 @@ class MelodyApp : Application() {
         }
     }
 
+    fun isOnMobileData(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val network = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(network) ?: return false
+        return caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+    }
+
     fun isOnHomeWifi(): Boolean {
         val currentSSID = getCurrentSSID() ?: return false // no WiFi = not home
         val prefs = getSharedPreferences("melody", Context.MODE_PRIVATE)

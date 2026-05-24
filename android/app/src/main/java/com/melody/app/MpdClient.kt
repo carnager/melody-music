@@ -370,6 +370,21 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
         }
     }
 
+    suspend fun getAllAlbumsLatest(): List<Album> {
+        val lines = cmd("list Album group Date group AlbumArtist sort latest")
+        val groups = parseGroups(lines, "AlbumArtist")
+        return groups.mapNotNull { g ->
+            val name = g["Album"] ?: return@mapNotNull null
+            if (name.isBlank()) return@mapNotNull null
+            Album(
+                id = g["X-AlbumId"] ?: "",
+                albumArtist = g["AlbumArtist"] ?: "",
+                album = name,
+                date = g["Date"] ?: ""
+            )
+        }
+    }
+
     suspend fun getTracks(artist: String, album: String): List<Track> {
         val lines = cmd("find ${mpdFilterEq("AlbumArtist", artist)} ${mpdFilterEq("Album", album)}")
         val groups = parseGroups(lines, "file")
