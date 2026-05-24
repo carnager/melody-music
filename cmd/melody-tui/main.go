@@ -426,6 +426,7 @@ type trackEntry struct {
 	Album       string
 	TrackNumber int
 	Rating      int
+	Duration    float64
 }
 
 type playlistEntry struct {
@@ -1018,6 +1019,10 @@ func fetchTracks(albumID string) tea.Cmd {
 		for _, g := range groups {
 			tn, _ := strconv.Atoi(g["Track"])
 			r, _ := strconv.Atoi(g["X-Rating"])
+			dur, _ := strconv.ParseFloat(g["duration"], 64)
+			if dur == 0 {
+				dur, _ = strconv.ParseFloat(g["Time"], 64)
+			}
 			tracks = append(tracks, trackEntry{
 				ID:          g["file"],
 				XSongID:     g["X-SongId"],
@@ -1026,6 +1031,7 @@ func fetchTracks(albumID string) tea.Cmd {
 				Album:       g["Album"],
 				TrackNumber: tn,
 				Rating:      r,
+				Duration:    dur,
 			})
 		}
 		sort.Slice(tracks, func(i, j int) bool {
@@ -1069,6 +1075,17 @@ func fetchNPAlbumRating(albumArtist, album, date string) tea.Cmd {
 		}
 		kv := parseKV(lines)
 		r, _ := strconv.Atoi(kv["rating"])
+		if r == 0 {
+			// Fall back to computed average (server already applies 70% threshold)
+			if c, err := strconv.ParseFloat(kv["computed"], 64); err == nil && c > 0 {
+				r = int(math.Round(c))
+				if r < 1 {
+					r = 1
+				} else if r > 10 {
+					r = 10
+				}
+			}
+		}
 		return npAlbumRatingMsg{rating: r}
 	}
 }
@@ -1281,6 +1298,10 @@ func doSearch(q string) tea.Cmd {
 		for _, g := range groups {
 			tn, _ := strconv.Atoi(g["Track"])
 			r, _ := strconv.Atoi(g["X-Rating"])
+			dur, _ := strconv.ParseFloat(g["duration"], 64)
+			if dur == 0 {
+				dur, _ = strconv.ParseFloat(g["Time"], 64)
+			}
 			tracks = append(tracks, trackEntry{
 				ID:          g["file"],
 				XSongID:     g["X-SongId"],
@@ -1289,6 +1310,7 @@ func doSearch(q string) tea.Cmd {
 				Album:       g["Album"],
 				TrackNumber: tn,
 				Rating:      r,
+				Duration:    dur,
 			})
 			aa := g["AlbumArtist"]
 			if aa == "" {
@@ -1309,6 +1331,12 @@ func doSearch(q string) tea.Cmd {
 				}
 			}
 		}
+		sort.Slice(tracks, func(i, j int) bool {
+			if tracks[i].Album != tracks[j].Album {
+				return tracks[i].Album < tracks[j].Album
+			}
+			return tracks[i].TrackNumber < tracks[j].TrackNumber
+		})
 		return searchMsg(searchResult{Albums: albums, Tracks: tracks})
 	}
 }
@@ -2236,6 +2264,26 @@ func (m model) handleLibFilterKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cm
 			m.libCursor--
 		}
 		return m, nil
+	case "home":
+		m.libCursor = 0
+		return m, nil
+	case "end":
+		if listLen > 0 {
+			m.libCursor = listLen - 1
+		}
+		return m, nil
+	case "pgdown":
+		m.libCursor += 20
+		if m.libCursor >= listLen {
+			m.libCursor = listLen - 1
+		}
+		return m, nil
+	case "pgup":
+		m.libCursor -= 20
+		if m.libCursor < 0 {
+			m.libCursor = 0
+		}
+		return m, nil
 	case "enter":
 		// Show popup menu (same as normal mode)
 		di := m.dataIndex()
@@ -2646,6 +2694,8 @@ func (m model) handleQueueKey(key string) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handlePlPickerKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
+	plTotal := len(m.plPickerList) + 1 // +1 for "New Playlist..." entry at index 0
+
 	if m.plPickerNewMode {
 		switch key {
 		case "esc":
@@ -2673,24 +2723,41 @@ func (m model) handlePlPickerKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd
 		m.showPlPicker = false
 		return m, nil
 	case "j", "down":
-		if m.plPickerCursor < len(m.plPickerList)-1 {
+		if m.plPickerCursor < plTotal-1 {
 			m.plPickerCursor++
 		}
 	case "k", "up":
 		if m.plPickerCursor > 0 {
 			m.plPickerCursor--
 		}
+	case "g", "home":
+		m.plPickerCursor = 0
+	case "G", "end":
+		m.plPickerCursor = plTotal - 1
+	case "pgdown":
+		m.plPickerCursor += 20
+		if m.plPickerCursor >= plTotal {
+			m.plPickerCursor = plTotal - 1
+		}
+	case "pgup":
+		m.plPickerCursor -= 20
+		if m.plPickerCursor < 0 {
+			m.plPickerCursor = 0
+		}
 	case "enter":
-		if m.plPickerCursor < len(m.plPickerList) {
-			name := m.plPickerList[m.plPickerCursor].Name
+		if m.plPickerCursor == 0 {
+			// "New Playlist..." selected
+			m.plPickerNewMode = true
+			m.plPickerInput.SetValue("")
+			m.plPickerInput.Focus()
+			return m, textinput.Blink
+		}
+		plIdx := m.plPickerCursor - 1
+		if plIdx < len(m.plPickerList) {
+			name := m.plPickerList[plIdx].Name
 			m.showPlPicker = false
 			return m, addToPlaylist(name, m.plPickerURI)
 		}
-	case "n":
-		m.plPickerNewMode = true
-		m.plPickerInput.SetValue("")
-		m.plPickerInput.Focus()
-		return m, textinput.Blink
 	}
 	return m, nil
 }
@@ -2708,6 +2775,29 @@ func (m model) handleSearchKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd) 
 	case "down":
 		if m.srCursor < m.srTotal-1 {
 			m.srCursor++
+		}
+		return m, nil
+	case "g", "home":
+		m.srCursor = 0
+		return m, nil
+	case "G", "end":
+		if m.srTotal > 0 {
+			m.srCursor = m.srTotal - 1
+		}
+		return m, nil
+	case "pgdown":
+		m.srCursor += 20
+		if m.srCursor >= m.srTotal {
+			m.srCursor = m.srTotal - 1
+		}
+		if m.srCursor < 0 {
+			m.srCursor = 0
+		}
+		return m, nil
+	case "pgup":
+		m.srCursor -= 20
+		if m.srCursor < 0 {
+			m.srCursor = 0
 		}
 		return m, nil
 	case "enter":
@@ -3109,6 +3199,9 @@ func (m model) View() string {
 	}
 
 	libH := mainH - 2
+	if m.libMode == libPlaylists || m.libMode == libPlaylistTracks {
+		libH--
+	}
 
 	lib := m.libraryView(libW-2, libH)
 	que := m.queueView(queueW-2, mainH-2)
@@ -3512,12 +3605,32 @@ func drawStar(rgba *image.RGBA, cx, cy, radius int, filled bool) {
 			if px < 0 || px >= w || py < 0 || py >= rgba.Bounds().Dy() {
 				continue
 			}
-			if pointInPolygon(float64(px)+0.5, float64(py)+0.5, points[:]) {
+			inside := pointInPolygon(float64(px)+0.5, float64(py)+0.5, points[:])
+			if !inside {
+				continue
+			}
+			if filled {
 				idx := (py*w + px) * 4
 				rgba.Pix[idx+0] = r
 				rgba.Pix[idx+1] = g
 				rgba.Pix[idx+2] = b
 				rgba.Pix[idx+3] = 255
+			} else {
+				// Outline only: check if any neighbor is outside the polygon
+				isEdge := false
+				for _, d := range [][2]int{{-1, 0}, {1, 0}, {0, -1}, {0, 1}} {
+					if !pointInPolygon(float64(px+d[0])+0.5, float64(py+d[1])+0.5, points[:]) {
+						isEdge = true
+						break
+					}
+				}
+				if isEdge {
+					idx := (py*w + px) * 4
+					rgba.Pix[idx+0] = r
+					rgba.Pix[idx+1] = g
+					rgba.Pix[idx+2] = b
+					rgba.Pix[idx+3] = 255
+				}
 			}
 		}
 	}
@@ -3938,31 +4051,36 @@ func (m model) gotoView() string {
 func (m model) plPickerView() string {
 	header := titleStyle.Render("Add to Playlist") + "\n\n"
 
-	if len(m.plPickerList) == 0 && !m.plPickerNewMode {
-		header += dimStyle.Render("No playlists found")
+	var items []string
+
+	// First entry: "New Playlist..."
+	if m.plPickerNewMode {
+		items = append(items, " New Playlist...\n "+m.plPickerInput.View())
+	} else if m.plPickerCursor == 0 {
+		s := lipgloss.NewStyle().Background(selectedBg).Foreground(lipgloss.Color("#ffffff")).Bold(true)
+		items = append(items, s.Render(" New Playlist... "))
+	} else {
+		items = append(items, " "+dimStyle.Render("New Playlist..."))
 	}
 
-	var items []string
+	// Existing playlists
 	for i, pl := range m.plPickerList {
 		name := pl.Name
+		info := ""
 		if pl.SongCount > 0 {
-			name += dimStyle.Render(fmt.Sprintf(" (%d)", pl.SongCount))
+			info = dimStyle.Render(fmt.Sprintf(" (%d)", pl.SongCount))
 		}
-		if i == m.plPickerCursor && !m.plPickerNewMode {
+		cursorIdx := i + 1 // offset by 1 for "New Playlist..." entry
+		if cursorIdx == m.plPickerCursor && !m.plPickerNewMode {
 			s := lipgloss.NewStyle().Background(selectedBg).Foreground(lipgloss.Color("#ffffff")).Bold(true)
-			items = append(items, s.Render(" "+pl.Name+" "))
+			items = append(items, s.Render(" "+name+" "))
 		} else {
-			items = append(items, " "+name)
+			items = append(items, " "+name+info)
 		}
 	}
 
-	var newLine string
-	if m.plPickerNewMode {
-		newLine = "\n\n" + m.plPickerInput.View()
-	}
-
-	hints := "\n\n" + dimStyle.Render("[↑↓]navigate [enter]add [n]new playlist [esc]close")
-	content := header + strings.Join(items, "\n") + newLine + hints
+	hints := "\n\n" + dimStyle.Render("[↑↓]navigate [enter]select [esc]close")
+	content := header + strings.Join(items, "\n") + hints
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -4212,12 +4330,41 @@ func (m model) searchView() string {
 	}
 	if len(m.searchRes.Tracks) > 0 {
 		items = append(items, dimStyle.Render(fmt.Sprintf(" Tracks (%d)", len(m.searchRes.Tracks))))
+		timeW := 6
+		ratingW := 6
+		innerW := w - timeW - ratingW - 4
+		artistW := innerW * 25 / 100
+		titleW := innerW * 35 / 100
+		albumW := innerW - artistW - titleW
+		if artistW < 5 {
+			artistW = 5
+		}
+		if titleW < 5 {
+			titleW = 5
+		}
+		if albumW < 5 {
+			albumW = 5
+		}
+		ratingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#e6b422"))
 		for i, t := range m.searchRes.Tracks {
 			if nAlbums+i == m.srCursor {
 				cursorVisual = len(items)
 			}
-			label := t.Title + " \u2014 " + t.Artist
-			items = append(items, m.srRow(nAlbums+i, label, w))
+			artist := padRight(truncate(t.Artist, artistW), artistW)
+			title := padRight(truncate(t.Title, titleW), titleW)
+			album := padRight(truncate(t.Album, albumW), albumW)
+			stars := padRight(renderRating(t.Rating), ratingW)
+			dur := fmtTime(t.Duration)
+			dur = strings.Repeat(" ", timeW-len(dur)) + dur
+
+			isCursor := nAlbums+i == m.srCursor
+			s := lipgloss.NewStyle().Width(w)
+			if isCursor {
+				s = s.Background(selectedBg).Foreground(lipgloss.Color("#ffffff")).Bold(true)
+				items = append(items, s.Render(" "+artist+" "+title+" "+album+" "+stars+dur))
+			} else {
+				items = append(items, s.Render(" "+artist+" "+title+" "+dimStyle.Render(album)+" "+ratingStyle.Render(stars)+dimStyle.Render(dur)))
+			}
 		}
 	}
 

@@ -1610,7 +1610,8 @@ func cmdPlaylistAdd(c *mpdConn, args []string) *mpdError {
 		return mpdErr(errSystem, "playlistadd", err.Error())
 	}
 
-	trackID, err := a.db.trackIDByPath(uri)
+	absPath := filepath.Join(a.cfg.Library.MusicDir, uri)
+	trackID, err := a.db.trackIDByPath(absPath)
 	if err != nil {
 		return mpdErr(errNoExist, "playlistadd", "track not found")
 	}
@@ -2241,7 +2242,7 @@ func cmdGetAlbumRating(c *mpdConn, args []string) *mpdError {
 	userRating, _ := c.app.db.getRating(hash)
 	c.writeKV("rating", userRating)
 
-	// Computed average from track ratings
+	// Computed average from track ratings (only if ≥70% of tracks are rated)
 	albums, err := c.app.db.albumsByArtist(albumArtist)
 	if err == nil {
 		for _, a := range albums {
@@ -2249,15 +2250,16 @@ func cmdGetAlbumRating(c *mpdConn, args []string) *mpdError {
 				albumID, _ := strconv.ParseInt(stringify(a["id"]), 10, 64)
 				tracks, err := c.app.db.tracksByAlbum(albumID)
 				if err == nil {
-					sum, count := 0, 0
+					total := len(tracks)
+					sum, rated := 0, 0
 					for _, t := range tracks {
 						if r := intFromAny(t["rating"], 0); r > 0 {
 							sum += r
-							count++
+							rated++
 						}
 					}
-					if count > 0 {
-						c.writef("computed: %.1f\n", float64(sum)/float64(count))
+					if total > 0 && rated > 0 && float64(rated)/float64(total) >= 0.7 {
+						c.writef("computed: %.1f\n", float64(sum)/float64(rated))
 					} else {
 						c.writeKV("computed", "0.0")
 					}

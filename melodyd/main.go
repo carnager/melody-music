@@ -881,7 +881,9 @@ func (a *app) advanceTrack() {
 			a.shufflePos++
 		}
 	} else {
-		// No next track was preloaded — end of queue
+		// No next track was preloaded — end of queue, stop playback
+		_ = t.setProperty("pause", true)
+		a.syncTarget() // reload current track at beginning, paused
 		a.mpdHub.notify(SubPlayer)
 		return
 	}
@@ -1409,13 +1411,14 @@ func (a *app) reloadQueueIntoTarget() {
 
 // playState represents saved playback position for resume across restarts.
 type playState struct {
-	SongPos int     `json:"song_pos"`
-	TimePos float64 `json:"time_pos"`
-	Playing bool    `json:"playing"`
-	Repeat  bool    `json:"repeat"`
-	Random  bool    `json:"random"`
-	Single  bool    `json:"single"`
-	Consume bool    `json:"consume"`
+	SongPos    int     `json:"song_pos"`
+	TimePos    float64 `json:"time_pos"`
+	Playing    bool    `json:"playing"`
+	Repeat     bool    `json:"repeat"`
+	Random     bool    `json:"random"`
+	Single     bool    `json:"single"`
+	Consume    bool    `json:"consume"`
+	ReplayGain string  `json:"replaygain,omitempty"`
 }
 
 func (a *app) savePlayState() {
@@ -1429,6 +1432,7 @@ func (a *app) savePlayState() {
 	ps.Random = a.modeRandom
 	ps.Single = a.modeSingle
 	ps.Consume = a.modeConsume
+	ps.ReplayGain = a.cfg.MPV.ReplayGain
 	if tpRaw, err := t.getProperty("time-pos"); err == nil {
 		if f, ok := tpRaw.(float64); ok {
 			ps.TimePos = f
@@ -1461,6 +1465,9 @@ func (a *app) restorePlayStatePos() {
 	a.modeRandom = ps.Random
 	a.modeSingle = ps.Single
 	a.modeConsume = ps.Consume
+	if ps.ReplayGain != "" {
+		a.cfg.MPV.ReplayGain = ps.ReplayGain
+	}
 	if a.modeRandom {
 		a.generateShuffle()
 	}

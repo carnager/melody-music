@@ -1,5 +1,9 @@
 # Melody
 
+> **This software was almost entirely written by an LLM (Claude by Anthropic).**
+> A human provided direction, design decisions, and testing — but the code itself is LLM-generated.
+> If that's a dealbreaker for you, now you know.
+
 A personal music server that plays your local music library across all your devices.
 
 ## What it does
