@@ -517,6 +517,96 @@ func parseRGValue(v any) float64 {
 }
 
 // ---------------------------------------------------------------------------
+// Lyrics detection and reading
+// ---------------------------------------------------------------------------
+
+// readLyrics reads lyrics from embedded tags or an .lrc sidecar file.
+// Returns the lyrics text and type ("synced" or "plain").
+func readLyrics(trackPath string) (string, string) {
+	// 1. Try embedded tags
+	f, err := os.Open(trackPath)
+	if err == nil {
+		defer f.Close()
+		m, err := tag.ReadFrom(f)
+		if err == nil {
+			raw := m.Raw()
+			if raw != nil {
+				// Check for synced lyrics first
+				for k, v := range raw {
+					lower := strings.ToLower(k)
+					if lower == "syncedlyrics" {
+						if s := stringFromRaw(v); s != "" {
+							return s, "synced"
+						}
+					}
+				}
+				// Check for unsynced lyrics in raw tags
+				for k, v := range raw {
+					lower := strings.ToLower(k)
+					if lower == "unsyncedlyrics" {
+						if s := stringFromRaw(v); s != "" {
+							return s, "plain"
+						}
+					}
+				}
+			}
+			// dhowden/tag Lyrics() handles USLT (ID3v2), lyrics (Vorbis), ©lyr (MP4)
+			if l := m.Lyrics(); l != "" {
+				if looksLikeLRC(l) {
+					return l, "synced"
+				}
+				return l, "plain"
+			}
+		}
+	}
+
+	// 2. Try .lrc sidecar
+	lrcPath := strings.TrimSuffix(trackPath, filepath.Ext(trackPath)) + ".lrc"
+	data, err := os.ReadFile(lrcPath)
+	if err == nil && len(data) > 0 {
+		return string(data), "synced"
+	}
+
+	return "", ""
+}
+
+// looksLikeLRC checks if the text looks like LRC-format synced lyrics.
+func looksLikeLRC(s string) bool {
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// LRC lines start with [MM:SS or [M:SS
+		if len(line) >= 5 && line[0] == '[' {
+			for i := 1; i < len(line); i++ {
+				if line[i] == ':' && i >= 2 {
+					return true
+				}
+				if line[i] < '0' || line[i] > '9' {
+					break
+				}
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// stringFromRaw extracts a string from a raw tag value.
+func stringFromRaw(v any) string {
+	switch val := v.(type) {
+	case string:
+		return val
+	case []string:
+		if len(val) > 0 {
+			return val[0]
+		}
+	}
+	return ""
+}
+
+// ---------------------------------------------------------------------------
 // Duration from tags (cheap, no subprocess)
 // ---------------------------------------------------------------------------
 

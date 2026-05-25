@@ -41,7 +41,9 @@ type config struct {
 		WebSecret     string   `toml:"web_secret"`
 	} `toml:"server"`
 	Library struct {
-		MusicDir string `toml:"music_dir"`
+		MusicDir    string `toml:"music_dir"`
+		EmbedLyrics bool   `toml:"embed_lyrics"`
+		SaveLRC     bool   `toml:"save_lrc"`
 	} `toml:"library"`
 	MPV struct {
 		Socket     string `toml:"socket"`
@@ -329,6 +331,8 @@ func loadConfig() (config, paths, error) {
 	cfg.Server.BaseURL = stringify(server["base_url"])
 	cfg.Server.WebSecret = stringify(server["web_secret"])
 	cfg.Library.MusicDir = stringify(library["music_dir"])
+	cfg.Library.EmbedLyrics = boolFromAny(library["embed_lyrics"], false)
+	cfg.Library.SaveLRC = boolFromAny(library["save_lrc"], false)
 	cfg.MPV.Socket = stringify(mpvSection["socket"])
 	cfg.MPV.Executable = stringify(mpvSection["executable"])
 	cfg.MPV.ReplayGain = stringify(mpvSection["replaygain"])

@@ -179,6 +179,16 @@ class MainActivity : ComponentActivity() {
                     SetupScreen(onConnected = { configured = true })
                 } else {
                     val vm: MainViewModel = viewModel()
+                    val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+                    androidx.compose.runtime.DisposableEffect(lifecycle) {
+                        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                                vm.onForeground()
+                            }
+                        }
+                        lifecycle.addObserver(observer)
+                        onDispose { lifecycle.removeObserver(observer) }
+                    }
                     MainScreen(vm)
                 }
             }

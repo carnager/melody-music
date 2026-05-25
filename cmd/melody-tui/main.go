@@ -498,6 +498,17 @@ type trackInfoLine struct {
 
 type trackInfoMsg []trackInfoLine
 
+type lyricsLine struct {
+	time float64 // timestamp in seconds (-1 for plain text)
+	text string
+}
+
+type lyricsMsg struct {
+	lines      []lyricsLine
+	lyricsType string
+	file       string
+}
+
 type gotoMetaMsg struct {
 	artist, albumArtist, album, date string
 }
@@ -604,6 +615,14 @@ type model struct {
 	// track info
 	showTrackInfo bool
 	trackInfo     []trackInfoLine // key-value pairs for display
+
+	// lyrics sidebar + now playing screen
+	showLyrics     bool
+	showNowPlaying bool
+	lyrics         []lyricsLine // parsed lyrics lines
+	lyricsType     string       // "synced" or "plain"
+	lyricsScroll   int          // scroll offset
+	lyricsFile     string       // file URI whose lyrics are loaded
 
 	// go-to menu
 	showGoto      bool
@@ -881,6 +900,102 @@ func fetchTrackInfo(file string) tea.Cmd {
 
 		return trackInfoMsg(info)
 	}
+}
+
+func fetchLyrics(file string) tea.Cmd {
+	return func() tea.Msg {
+		if mpd == nil || file == "" {
+			return lyricsMsg{}
+		}
+		resp, err := mpd.cmd(fmt.Sprintf("readlyrics %s", mpdEscape(file)))
+		if err != nil || len(resp) == 0 {
+			return lyricsMsg{}
+		}
+		kv := parseKV(resp)
+		lType := kv["X-Lyrics-Type"]
+		raw := kv["X-Lyrics"]
+		if raw == "" {
+			return lyricsMsg{}
+		}
+
+		// Unescape: \\n → \n, \\\\ → \\
+		text := unescapeLyrics(raw)
+
+		var lines []lyricsLine
+		if lType == "synced" {
+			lines = parseLRC(text)
+		} else {
+			for _, l := range strings.Split(text, "\n") {
+				lines = append(lines, lyricsLine{time: -1, text: l})
+			}
+		}
+		return lyricsMsg{lines: lines, lyricsType: lType, file: file}
+	}
+}
+
+func unescapeLyrics(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			switch s[i+1] {
+			case 'n':
+				b.WriteByte('\n')
+				i++
+			case '\\':
+				b.WriteByte('\\')
+				i++
+			default:
+				b.WriteByte(s[i])
+			}
+		} else {
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
+}
+
+func parseLRC(text string) []lyricsLine {
+	var lines []lyricsLine
+	for _, raw := range strings.Split(text, "\n") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			lines = append(lines, lyricsLine{time: -1, text: ""})
+			continue
+		}
+		// Parse [MM:SS.xx] or [MM:SS] timestamps
+		if len(raw) >= 5 && raw[0] == '[' {
+			end := strings.Index(raw, "]")
+			if end > 0 {
+				ts := raw[1:end]
+				rest := raw[end+1:]
+				if t, ok := parseLRCTime(ts); ok {
+					lines = append(lines, lyricsLine{time: t, text: rest})
+					continue
+				}
+			}
+		}
+		// Non-timestamped line (metadata tags like [ar:Artist])
+		lines = append(lines, lyricsLine{time: -1, text: raw})
+	}
+	return lines
+}
+
+func parseLRCTime(s string) (float64, bool) {
+	// MM:SS.xx or MM:SS
+	parts := strings.SplitN(s, ":", 2)
+	if len(parts) != 2 {
+		return 0, false
+	}
+	min, err := strconv.ParseFloat(parts[0], 64)
+	if err != nil {
+		return 0, false
+	}
+	sec, err := strconv.ParseFloat(parts[1], 64)
+	if err != nil {
+		return 0, false
+	}
+	return min*60 + sec, true
 }
 
 func fetchGotoMeta(file string) tea.Cmd {
@@ -1686,10 +1801,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if curFile != "" && curFile != m.artFile {
-			return m, tea.Batch(
+			cmds := []tea.Cmd{
 				fetchAlbumArt(curFile),
 				fetchNPAlbumRating(m.status.AlbumArtist, m.status.Album, m.status.Date),
-			)
+			}
+			if (m.showLyrics || m.showNowPlaying) && curFile != m.lyricsFile {
+				m.lyrics = nil
+				m.lyricsFile = curFile
+				m.lyricsScroll = 0
+				cmds = append(cmds, fetchLyrics(curFile))
+			}
+			return m, tea.Batch(cmds...)
 		}
 		return m, nil
 
@@ -1740,6 +1862,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case trackInfoMsg:
 		m.trackInfo = msg
+		return m, nil
+
+	case lyricsMsg:
+		m.lyrics = msg.lines
+		m.lyricsType = msg.lyricsType
+		m.lyricsFile = msg.file
 		return m, nil
 
 	case gotoMetaMsg:
@@ -1905,7 +2033,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+c" {
 		return m, tea.Quit
 	}
-	if key == "q" && !m.searching && !m.showMenu && !m.showHelp && !m.showRating && !m.showTrackInfo && !m.showModes && !m.showPrioMenu && !m.libFiltering {
+	if key == "q" && !m.searching && !m.showMenu && !m.showHelp && !m.showRating && !m.showTrackInfo && !m.showNowPlaying && !m.showModes && !m.showPrioMenu && !m.libFiltering {
 		return m, tea.Quit
 	}
 
@@ -1916,6 +2044,36 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.showTrackInfo {
 		m.showTrackInfo = false
+		return m, nil
+	}
+
+	if m.showNowPlaying {
+		switch key {
+		case "j", "down":
+			if m.lyricsScroll < len(m.lyrics)-1 {
+				m.lyricsScroll++
+			}
+		case "k", "up":
+			if m.lyricsScroll > 0 {
+				m.lyricsScroll--
+			}
+		case "pgdown":
+			m.lyricsScroll += 20
+			if m.lyricsScroll >= len(m.lyrics) {
+				m.lyricsScroll = len(m.lyrics) - 1
+			}
+		case "pgup":
+			m.lyricsScroll -= 20
+			if m.lyricsScroll < 0 {
+				m.lyricsScroll = 0
+			}
+		case "f":
+			if m.lyricsType == "synced" {
+				m.lyricsScroll = m.currentLyricsLine()
+			}
+		default:
+			m.showNowPlaying = false
+		}
 		return m, nil
 	}
 
@@ -2023,6 +2181,41 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showTrackInfo = true
 			m.trackInfo = nil
 			return m, fetchTrackInfo(file)
+		}
+		return m, nil
+	case "l":
+		file := m.status.File
+		if file == "" {
+			return m, nil
+		}
+		if m.showLyrics {
+			m.showLyrics = false
+			return m, nil
+		}
+		m.showLyrics = true
+		m.lyricsScroll = 0
+		if m.lyricsFile != file {
+			m.lyrics = nil
+			m.lyricsFile = file
+			return m, fetchLyrics(file)
+		}
+		return m, nil
+	case "L":
+		file := m.status.File
+		if file == "" {
+			return m, nil
+		}
+		if m.showNowPlaying {
+			m.showNowPlaying = false
+			return m, nil
+		}
+		m.showNowPlaying = true
+		// Also fetch lyrics if not already loaded for this track
+		if m.lyricsFile != file {
+			m.lyrics = nil
+			m.lyricsFile = file
+			m.lyricsScroll = 0
+			return m, fetchLyrics(file)
 		}
 		return m, nil
 	case "o":
@@ -3253,6 +3446,9 @@ func (m model) View() string {
 	if m.showTrackInfo {
 		return m.trackInfoView()
 	}
+	if m.showNowPlaying {
+		return m.nowPlayingView()
+	}
 	if m.showGoto {
 		return m.gotoView()
 	}
@@ -3284,14 +3480,26 @@ func (m model) View() string {
 		mainH = 3
 	}
 
-	libW := m.width * 25 / 100
+	lyricsW := 0
+	if m.showLyrics {
+		lyricsW = m.width * 30 / 100
+		if lyricsW < 25 {
+			lyricsW = 25
+		}
+		if lyricsW > 60 {
+			lyricsW = 60
+		}
+	}
+
+	remainW := m.width - lyricsW
+	libW := remainW * 25 / 100
 	if libW < 25 {
 		libW = 25
 	}
 	if libW > 55 {
 		libW = 55
 	}
-	queueW := m.width - libW
+	queueW := remainW - libW
 	if queueW < 20 {
 		queueW = 20
 	}
@@ -3315,7 +3523,15 @@ func (m model) View() string {
 	leftPanel := libBorder.Width(libW - 2).Height(libH).Render(lib)
 	quePanel := queBorder.Width(queueW - 2).Height(mainH - 2).Render(que)
 
-	main := lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, quePanel)
+	var main string
+	if m.showLyrics {
+		lyricsContent := m.lyricsSidebarView(lyricsW-4, mainH-2)
+		lyricsPanel := panelBorder.Width(lyricsW - 4).Height(mainH - 2).
+			BorderForeground(accentColor).Render(lyricsContent)
+		main = lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, quePanel, lyricsPanel)
+	} else {
+		main = lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, quePanel)
+	}
 	player := m.playerView()
 
 	return main + "\n" + player
@@ -4042,6 +4258,8 @@ func (m model) helpView() string {
 			"  P          Playlists",
 			"  D          Device picker",
 			"  i          Track info (library tracks / queue)",
+			"  l          Toggle lyrics sidebar",
+			"  L          Now playing (art + info + lyrics)",
 			"  o          Go to artist/album/search",
 			"  *          Rate track/album",
 			"  Ctrl+G     Cycle ReplayGain (off/track/album)",
@@ -4093,6 +4311,384 @@ func (m model) helpView() string {
 		Render(strings.Join(lines, "\n"))
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// displayLine represents a single rendered line with a reference back to its source lyrics line.
+type displayLine struct {
+	text    string
+	srcLine int // index into m.lyrics
+}
+
+// wrapLyrics wraps and centers lyrics lines to fit within maxW, tracking source line indices.
+func wrapLyrics(lyrics []lyricsLine, maxW int) []displayLine {
+	var result []displayLine
+	for i, l := range lyrics {
+		text := strings.TrimSpace(l.text)
+		if text == "" {
+			result = append(result, displayLine{text: "", srcLine: i})
+			continue
+		}
+		sw := runewidth.StringWidth(text)
+		if sw <= maxW {
+			pad := (maxW - sw) / 2
+			centered := strings.Repeat(" ", pad) + text
+			result = append(result, displayLine{text: centered, srcLine: i})
+			continue
+		}
+		// Word-wrap
+		wrapped := wordWrapLine(text, maxW)
+		for _, wl := range wrapped {
+			ww := runewidth.StringWidth(wl)
+			pad := (maxW - ww) / 2
+			if pad < 0 {
+				pad = 0
+			}
+			centered := strings.Repeat(" ", pad) + wl
+			result = append(result, displayLine{text: centered, srcLine: i})
+		}
+	}
+	return result
+}
+
+// wordWrapLine breaks a line into multiple lines at word boundaries to fit within maxW.
+func wordWrapLine(text string, maxW int) []string {
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return []string{""}
+	}
+	var lines []string
+	cur := words[0]
+	curW := runewidth.StringWidth(cur)
+	for _, word := range words[1:] {
+		ww := runewidth.StringWidth(word)
+		if curW+1+ww <= maxW {
+			cur += " " + word
+			curW += 1 + ww
+		} else {
+			lines = append(lines, cur)
+			cur = word
+			curW = ww
+		}
+	}
+	lines = append(lines, cur)
+	return lines
+}
+
+func (m model) lyricsSidebarView(w, h int) string {
+	var lines []string
+	lines = append(lines, titleStyle.Render("Lyrics"), "")
+
+	if len(m.lyrics) == 0 {
+		if m.lyricsFile != "" {
+			lines = append(lines, dimStyle.Render("No lyrics available"))
+		} else {
+			lines = append(lines, dimStyle.Render("Loading..."))
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	dLines := wrapLyrics(m.lyrics, w)
+
+	currentSrc := -1
+	if m.lyricsType == "synced" {
+		currentSrc = m.currentLyricsLine()
+		// Auto-scroll: find first display line for currentSrc
+		currentDisplay := 0
+		for j, dl := range dLines {
+			if dl.srcLine == currentSrc {
+				currentDisplay = j
+				break
+			}
+		}
+		visH := h - 4
+		if visH < 3 {
+			visH = 3
+		}
+		if currentDisplay >= m.lyricsScroll+visH || currentDisplay < m.lyricsScroll {
+			m.lyricsScroll = currentDisplay - visH/3
+			if m.lyricsScroll < 0 {
+				m.lyricsScroll = 0
+			}
+		}
+	}
+
+	visH := h - 4
+	if visH < 3 {
+		visH = 3
+	}
+	start := m.lyricsScroll
+	end := start + visH
+	if end > len(dLines) {
+		end = len(dLines)
+	}
+
+	activeStyle := lipgloss.NewStyle().Foreground(accentColor).Bold(true)
+	for i := start; i < end; i++ {
+		if dLines[i].srcLine == currentSrc {
+			lines = append(lines, activeStyle.Render(dLines[i].text))
+		} else {
+			lines = append(lines, dLines[i].text)
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func (m model) currentLyricsLine() int {
+	if m.lyricsType != "synced" || len(m.lyrics) == 0 {
+		return 0
+	}
+	pos := m.status.TimePos
+	best := 0
+	for i, l := range m.lyrics {
+		if l.time >= 0 && l.time <= pos {
+			best = i
+		}
+	}
+	return best
+}
+
+func (m model) nowPlayingView() string {
+	w := m.width
+	h := m.height
+
+	// Layout modes based on terminal width:
+	// wide (>=100): side-by-side (art+info left, lyrics right)
+	// medium (>=60): vertical (art+info top, lyrics bottom)
+	// narrow (<60): no art, info + lyrics stacked
+	horizontal := w >= 100
+	showArt := w >= 60 && len(m.artRGBA) > 0
+
+	// --- Track info lines (shared across layouts) ---
+	infoW := w - 4
+	var infoLines []string
+	if m.status.Title != "" {
+		infoLines = append(infoLines, titleStyle.Render(truncate(m.status.Title, infoW)))
+	}
+	if m.status.Artist != "" {
+		infoLines = append(infoLines, truncate(m.status.Artist, infoW))
+	}
+	if m.status.Album != "" {
+		albumLine := m.status.Album
+		if m.status.Date != "" {
+			albumLine += " (" + m.status.Date + ")"
+		}
+		infoLines = append(infoLines, dimStyle.Render(truncate(albumLine, infoW)))
+	}
+	if m.status.Rating > 0 {
+		infoLines = append(infoLines, lipgloss.NewStyle().Foreground(lipgloss.Color("#e6b422")).Render(renderRating(m.status.Rating)))
+	}
+
+	// --- Seekbar ---
+	seekW := infoW
+	posStr := fmtTime(m.status.TimePos)
+	durStr := fmtTime(m.status.Dur)
+	barW := seekW - len(posStr) - len(durStr) - 3
+	if barW < 5 {
+		barW = 5
+	}
+	filled := 0
+	if m.status.Dur > 0 {
+		filled = int(m.status.TimePos / m.status.Dur * float64(barW))
+	}
+	if filled > barW {
+		filled = barW
+	}
+	if filled < 0 {
+		filled = 0
+	}
+	seekBar := lipgloss.NewStyle().Foreground(accentColor).Render(strings.Repeat("\u2501", filled))
+	seekBar += lipgloss.NewStyle().Foreground(accentColor).Render("\u25cf")
+	seekBar += dimStyle.Render(strings.Repeat("\u2500", barW-filled))
+	seekLine := dimStyle.Render(posStr) + " " + seekBar + " " + dimStyle.Render(durStr)
+
+	// --- Lyrics hint ---
+	hint := "j/k scroll, any other key to close"
+	if m.lyricsType == "synced" {
+		hint = "j/k scroll, f follow, any other key to close"
+	}
+
+	if horizontal {
+		return m.npHorizontal(w, h, showArt, infoLines, seekLine, hint)
+	}
+	return m.npVertical(w, h, showArt, infoLines, seekLine, hint)
+}
+
+func (m model) npHorizontal(w, h int, showArt bool, infoLines []string, seekLine, hint string) string {
+	// Info block takes ~6 lines (title, artist, album, rating, blank, seekbar)
+	infoH := len(infoLines) + 2 // +blank +seekbar
+
+	// Art fills the left column, leaving room for info below
+	artRows := h - infoH - 2
+	if artRows < 4 {
+		artRows = 4
+	}
+	artCols := artRows * 2
+	maxLeftW := w/2 - 2
+	if artCols > maxLeftW {
+		artCols = maxLeftW
+		artRows = artCols / 2
+	}
+
+	leftW := artCols
+	if leftW < 30 {
+		leftW = 30
+	}
+
+	artStr := ""
+	if showArt {
+		if artCols != artTxCols || artRows != artTxRows {
+			artTxCols = artCols
+			artTxRows = artRows
+			transmitArtToTerminal(m.artRGBA, m.artW, m.artH, artCols, artRows)
+		}
+		artStr = kittyPlaceholders(artCols, artRows)
+	}
+
+	// Rebuild seekbar at left column width
+	posStr := fmtTime(m.status.TimePos)
+	durStr := fmtTime(m.status.Dur)
+	barW := leftW - len(posStr) - len(durStr) - 3
+	if barW < 5 {
+		barW = 5
+	}
+	filled := 0
+	if m.status.Dur > 0 {
+		filled = int(m.status.TimePos / m.status.Dur * float64(barW))
+	}
+	if filled > barW {
+		filled = barW
+	}
+	if filled < 0 {
+		filled = 0
+	}
+	bar := lipgloss.NewStyle().Foreground(accentColor).Render(strings.Repeat("\u2501", filled))
+	bar += lipgloss.NewStyle().Foreground(accentColor).Render("\u25cf")
+	bar += dimStyle.Render(strings.Repeat("\u2500", barW-filled))
+	seekLine = dimStyle.Render(posStr) + " " + bar + " " + dimStyle.Render(durStr)
+
+	// Truncate info to left column width
+	var leftInfo []string
+	for _, l := range infoLines {
+		leftInfo = append(leftInfo, truncate(l, leftW))
+	}
+
+	var leftParts []string
+	if artStr != "" {
+		leftParts = append(leftParts, artStr)
+	}
+	leftParts = append(leftParts, "")
+	leftParts = append(leftParts, leftInfo...)
+	leftParts = append(leftParts, "", seekLine)
+
+	leftBlock := lipgloss.NewStyle().Width(leftW + 2).Height(h).Render(strings.Join(leftParts, "\n"))
+
+	// Right column: lyrics fills full height
+	rightW := w - leftW - 6
+	if rightW < 20 {
+		rightW = 20
+	}
+	lyricsBlock := m.renderLyrics(rightW, h-2, hint)
+
+	rightBlock := lipgloss.NewStyle().
+		Width(rightW).
+		Height(h).
+		BorderLeft(true).
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(lipgloss.Color("#444")).
+		PaddingLeft(2).
+		Render(lyricsBlock)
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, leftBlock, rightBlock)
+}
+
+func (m model) npVertical(w, h int, showArt bool, infoLines []string, seekLine, hint string) string {
+	// Info takes ~4-6 lines, seekbar 1, blanks 2 = ~8 lines for non-art/lyrics
+	infoH := len(infoLines) + 3 // blanks + seekbar
+	artRowsUsed := 0
+
+	var sections []string
+
+	if showArt {
+		// Art gets ~40% of remaining height
+		artRows := (h - infoH) * 2 / 5
+		if artRows < 4 {
+			artRows = 4
+		}
+		artCols := artRows * 2
+		if artCols > w-4 {
+			artCols = w - 4
+			artRows = artCols / 2
+		}
+		artRowsUsed = artRows
+
+		if artCols != artTxCols || artRows != artTxRows {
+			artTxCols = artCols
+			artTxRows = artRows
+			transmitArtToTerminal(m.artRGBA, m.artW, m.artH, artCols, artRows)
+		}
+		sections = append(sections, kittyPlaceholders(artCols, artRows))
+	}
+
+	// Track info
+	sections = append(sections, "")
+	for _, l := range infoLines {
+		sections = append(sections, truncate(l, w-4))
+	}
+	sections = append(sections, seekLine, "")
+
+	// Lyrics fills remaining height
+	lyricsH := h - artRowsUsed - infoH - 2
+	if lyricsH < 3 {
+		lyricsH = 3
+	}
+	sections = append(sections, m.renderLyrics(w-4, lyricsH, hint))
+
+	content := strings.Join(sections, "\n")
+	return lipgloss.NewStyle().Width(w).Height(h).Render(content)
+}
+
+func (m model) renderLyrics(maxW, maxH int, hint string) string {
+	var lines []string
+	lines = append(lines, titleStyle.Render("Lyrics"), "")
+
+	if len(m.lyrics) == 0 {
+		if m.lyricsFile != "" {
+			lines = append(lines, dimStyle.Render("No lyrics available"))
+		} else {
+			lines = append(lines, dimStyle.Render("Loading..."))
+		}
+	} else {
+		dLines := wrapLyrics(m.lyrics, maxW)
+
+		currentSrc := -1
+		if m.lyricsType == "synced" {
+			currentSrc = m.currentLyricsLine()
+		}
+
+		lyricsH := maxH - 4
+		if lyricsH < 3 {
+			lyricsH = 3
+		}
+
+		start := m.lyricsScroll
+		end := start + lyricsH
+		if end > len(dLines) {
+			end = len(dLines)
+		}
+
+		activeStyle := lipgloss.NewStyle().Foreground(accentColor).Bold(true)
+		for i := start; i < end; i++ {
+			if dLines[i].srcLine == currentSrc {
+				lines = append(lines, activeStyle.Render(dLines[i].text))
+			} else {
+				lines = append(lines, dLines[i].text)
+			}
+		}
+	}
+
+	lines = append(lines, "", dimStyle.Render(hint))
+	return strings.Join(lines, "\n")
 }
 
 func (m model) trackInfoView() string {

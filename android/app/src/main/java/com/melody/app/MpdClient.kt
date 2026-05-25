@@ -29,10 +29,22 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     private var idlePartialLine = StringBuilder()
     private var idleJob: Job? = null
     var onIdleNotification: ((Set<String>) -> Unit)? = null
+    var onReconnected: (() -> Unit)? = null
 
-    private val httpClient = OkHttpClient.Builder()
+    // Command connection: short read timeout (commands respond quickly),
+    // but with ping to keep the long-lived WebSocket alive through NAT/mobile.
+    private val cmdClient = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
+        .pingInterval(30, TimeUnit.SECONDS)
+        .build()
+
+    // Idle connection: no read timeout (idle waits indefinitely for server
+    // notifications), with ping to survive NAT/carrier proxy timeouts.
+    private val idleClient = OkHttpClient.Builder()
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.SECONDS)
+        .pingInterval(30, TimeUnit.SECONDS)
         .build()
 
     val isConfigured: Boolean
@@ -60,7 +72,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
 
         val wsUrl = "$wsScheme://$serverHost:$serverPort/mpd"
         val request = Request.Builder().url(wsUrl).build()
-        ws = httpClient.newWebSocket(request, object : WebSocketListener() {
+        ws = cmdClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 android.util.Log.d("MpdClient", "WebSocket connected to $wsUrl")
             }
@@ -119,9 +131,22 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
                 if (!connected && ws == null && serverHost.isNotBlank()) {
                     android.util.Log.d("MpdClient", "Reconnecting...")
                     doConnect()
+                    if (connected) {
+                        android.util.Log.d("MpdClient", "Reconnected successfully")
+                        onReconnected?.invoke()
+                    }
                 }
             }
         }
+    }
+
+    suspend fun reconnectNow() {
+        android.util.Log.d("MpdClient", "Force reconnect")
+        ws?.close(1000, "force reconnect")
+        ws = null
+        connected = false
+        doConnect()
+        if (connected) onReconnected?.invoke()
     }
 
     fun disconnect() {
@@ -166,7 +191,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
         val request = Request.Builder().url(wsUrl).build()
         val latch = CompletableDeferred<Boolean>()
 
-        idleWs = httpClient.newWebSocket(request, object : WebSocketListener() {
+        idleWs = idleClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {}
             override fun onMessage(webSocket: WebSocket, text: String) {
                 val data = idlePartialLine.toString() + text

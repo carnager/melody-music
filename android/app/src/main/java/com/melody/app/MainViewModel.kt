@@ -107,7 +107,19 @@ class MainViewModel : ViewModel() {
                 idleRefreshJob = viewModelScope.launch { refresh(forceQueue = "rating" in changed) }
             }
         }
+        mpd.onReconnected = {
+            viewModelScope.launch { refresh(forceQueue = true) }
+        }
         mpd.startIdle()
+    }
+
+    fun onForeground() {
+        viewModelScope.launch {
+            if (!mpd.connected) {
+                mpd.reconnectNow()
+            }
+            refresh(forceQueue = true)
+        }
     }
 
     private suspend fun refresh(forceQueue: Boolean = false) {

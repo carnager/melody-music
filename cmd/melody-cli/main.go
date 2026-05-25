@@ -65,6 +65,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "  getrating <songid>                   Get track rating")
 		fmt.Fprintln(os.Stderr, "  getalbumrating <artist> <album> <date>")
 		fmt.Fprintln(os.Stderr, "  current                              Show current song with rating")
+		fmt.Fprintln(os.Stderr, "  lyrics                               Show lyrics for current song")
 		fmt.Fprintln(os.Stderr, "  raw <command>                        Send raw MPD command")
 		os.Exit(1)
 	}
@@ -120,6 +121,36 @@ func main() {
 		mpdCmd = fmt.Sprintf("getalbumrating %s %s %s", quote(args[0]), quote(args[1]), quote(args[2]))
 	case "current":
 		mpdCmd = "currentsong"
+	case "lyrics":
+		// Need to get current song file first, then request lyrics
+		conn.SetDeadline(time.Now().Add(10 * time.Second))
+		w.WriteString("currentsong\n")
+		w.Flush()
+
+		file := ""
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			line = strings.TrimRight(line, "\r\n")
+			if line == "OK" {
+				break
+			}
+			if strings.HasPrefix(line, "ACK ") {
+				fmt.Fprintln(os.Stderr, line)
+				os.Exit(1)
+			}
+			if strings.HasPrefix(line, "file: ") {
+				file = line[6:]
+			}
+		}
+		if file == "" {
+			fmt.Fprintln(os.Stderr, "Error: no track playing")
+			os.Exit(1)
+		}
+		mpdCmd = "readlyrics " + quote(file)
 	case "raw":
 		if len(args) == 0 {
 			fmt.Fprintln(os.Stderr, "Usage: melody-cli raw <command>")
@@ -138,6 +169,7 @@ func main() {
 	w.WriteString(mpdCmd + "\n")
 	w.Flush()
 
+	isLyrics := command == "lyrics"
 	for {
 		line, err := r.ReadString('\n')
 		if err != nil {
@@ -152,8 +184,36 @@ func main() {
 			fmt.Fprintln(os.Stderr, line)
 			os.Exit(1)
 		}
-		fmt.Println(line)
+		if isLyrics && strings.HasPrefix(line, "X-Lyrics: ") {
+			fmt.Println(unescapeLyrics(line[10:]))
+		} else if isLyrics && strings.HasPrefix(line, "X-Lyrics-Type: ") {
+			// skip type header for clean output
+		} else {
+			fmt.Println(line)
+		}
 	}
+}
+
+func unescapeLyrics(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			switch s[i+1] {
+			case 'n':
+				b.WriteByte('\n')
+				i++
+			case '\\':
+				b.WriteByte('\\')
+				i++
+			default:
+				b.WriteByte(s[i])
+			}
+		} else {
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
 }
 
 func buildFindCmd(cmd string, args []string) string {

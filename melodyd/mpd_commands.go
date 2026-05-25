@@ -100,6 +100,9 @@ func init() {
 	"albumart":    cmdAlbumArt,
 	"readpicture": cmdReadPicture,
 
+	// Lyrics
+	"readlyrics": cmdReadLyrics,
+
 	// Connection
 	"ping":         cmdPing,
 	"commands":     cmdCommands,
@@ -2508,6 +2511,69 @@ func cmdReadPicture(c *mpdConn, args []string) *mpdError {
 	}
 
 	return writeBinaryResponse(c, data, mimeType, offset)
+}
+
+func cmdReadLyrics(c *mpdConn, args []string) *mpdError {
+	if len(args) < 1 {
+		return mpdErr(errArg, "readlyrics", "need URI argument")
+	}
+	uri := args[0]
+	absPath := filepath.Join(c.app.cfg.Library.MusicDir, uri)
+
+	c.app.logger.Printf("lyrics: readlyrics called for %s", uri)
+
+	// 1. Try embedded tags and .lrc sidecar
+	text, lyricsType := readLyrics(absPath)
+	if text != "" {
+		c.app.logger.Printf("lyrics: found %s lyrics from local source (%d bytes)", lyricsType, len(text))
+	}
+
+	// 2. Fall back to lrclib.net
+	if text == "" {
+		track, err := c.app.db.trackByPath(absPath)
+		if err != nil {
+			c.app.logger.Printf("lyrics: track not found in db for %s: %v", absPath, err)
+		} else {
+			artist := stringify(track["artist"])
+			title := stringify(track["title"])
+			album := stringify(track["album"])
+			dur, _ := track["duration"].(float64)
+			c.app.logger.Printf("lyrics: querying lrclib for %s - %s", artist, title)
+			text, lyricsType = fetchLrclib(artist, title, album, dur)
+			if text == "" {
+				c.app.logger.Printf("lyrics: lrclib returned no results")
+			} else {
+				c.app.logger.Printf("lyrics: lrclib returned %s lyrics (%d bytes)", lyricsType, len(text))
+				if c.app.cfg.Library.SaveLRC {
+					if err := saveLRC(absPath, text); err != nil {
+						c.app.logger.Printf("lyrics: failed to save .lrc for %s: %v", absPath, err)
+					} else {
+						c.app.logger.Printf("lyrics: saved .lrc for %s", absPath)
+					}
+				}
+				if c.app.cfg.Library.EmbedLyrics {
+					if err := embedLyrics(absPath, text, lyricsType); err != nil {
+						c.app.logger.Printf("lyrics: failed to embed in %s: %v", absPath, err)
+					} else {
+						c.app.logger.Printf("lyrics: embedded in %s", absPath)
+					}
+				}
+			}
+		}
+	}
+
+	if text == "" {
+		return mpdErr(errNoExist, "readlyrics", "no lyrics found")
+	}
+
+	// Escape for line-based protocol: \ → \\, newlines → \n literal
+	escaped := strings.ReplaceAll(text, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, "\r\n", `\n`)
+	escaped = strings.ReplaceAll(escaped, "\n", `\n`)
+
+	c.writeKV("X-Lyrics-Type", lyricsType)
+	c.writeKV("X-Lyrics", escaped)
+	return nil
 }
 
 // getCoverArt returns cover art for a track path: tries embedded first, then folder.

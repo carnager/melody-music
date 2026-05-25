@@ -677,6 +677,12 @@ func (a *app) serveMPD() error {
 			a.logger.Printf("mpd: accept error: %v", err)
 			continue
 		}
+		// Enable TCP keep-alive so the OS detects silently-dropped clients
+		// (e.g. mobile network switches) instead of leaking goroutines.
+		if tc, ok := conn.(*net.TCPConn); ok {
+			tc.SetKeepAlive(true)
+			tc.SetKeepAlivePeriod(30 * time.Second)
+		}
 		c := &mpdConn{
 			conn:   conn,
 			reader: bufio.NewReader(conn),
