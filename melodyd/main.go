@@ -25,7 +25,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/carnager/melody/internal/shared"
-	"golang.org/x/net/websocket"
+	"github.com/coder/websocket"
 )
 
 // ---------------------------------------------------------------------------
@@ -511,10 +511,7 @@ func (a *app) routes() http.Handler {
 	mux.Handle("GET /api/v1/cover/{id}", a.authMiddleware(http.HandlerFunc(a.handleCoverArt)))
 
 	// WebSocket MPD transport
-	mux.Handle("GET /mpd", a.authMiddleware(websocket.Server{
-		Handler:   a.serveMPDWebSocket,
-		Handshake: func(*websocket.Config, *http.Request) error { return nil },
-	}))
+	mux.Handle("GET /mpd", a.authMiddleware(http.HandlerFunc(a.handleMPDWebSocket)))
 
 	// Web UI auth (no middleware — this IS the login endpoint)
 	mux.HandleFunc("POST /web/auth", a.handleWebAuth)
@@ -530,13 +527,28 @@ func (a *app) routes() http.Handler {
 	return mux
 }
 
-// serveMPDWebSocket handles a WebSocket connection using the MPD protocol.
-// Same protocol as TCP, just over WebSocket for HTTP reverse proxy compatibility.
-func (a *app) serveMPDWebSocket(ws *websocket.Conn) {
+// handleMPDWebSocket upgrades to WebSocket and handles the MPD protocol.
+// Uses github.com/coder/websocket which properly handles ping/pong frames,
+// keeping connections alive through NAT and mobile network proxies.
+func (a *app) handleMPDWebSocket(w http.ResponseWriter, r *http.Request) {
+	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		InsecureSkipVerify: true, // allow any origin
+	})
+	if err != nil {
+		a.logger.Printf("websocket accept: %v", err)
+		return
+	}
+	defer ws.CloseNow()
+
+	// NetConn gives us a net.Conn that handles ping/pong automatically
+	// in the background. This lets mpdConn use it like any TCP connection.
+	ctx := r.Context()
+	conn := websocket.NetConn(ctx, ws, websocket.MessageText)
+
 	c := &mpdConn{
-		conn:   ws,
-		reader: bufio.NewReader(ws),
-		writer: bufio.NewWriter(ws),
+		conn:   conn,
+		reader: bufio.NewReader(conn),
+		writer: bufio.NewWriter(conn),
 		app:    a,
 		logger: a.logger,
 	}
