@@ -99,12 +99,16 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
                 android.util.Log.e("MpdClient", "WebSocket error: ${t.message}")
                 connected = false
                 ws = null
+                // Close lines channel so any blocked cmd() call fails immediately
+                // instead of waiting for the full command timeout.
+                lines.close()
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 android.util.Log.d("MpdClient", "WebSocket closed: $reason")
                 connected = false
                 ws = null
+                lines.close()
             }
         })
 
@@ -207,10 +211,21 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 latch.complete(false)
                 idleWs = null
+                idleLines.close()
+                // If idle dies, the command connection is likely dead too
+                // (same network event). Proactively tear it down so the
+                // reconnect loop kicks in immediately.
+                if (connected) {
+                    android.util.Log.d("MpdClient", "Idle died, closing command WS too")
+                    connected = false
+                    ws?.close(1000, "idle failed")
+                    ws = null
+                }
             }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 latch.complete(false)
                 idleWs = null
+                idleLines.close()
             }
         })
 

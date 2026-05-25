@@ -263,6 +263,13 @@ func (c *mpdConn) handleIdle(subs []string) {
 		c.idleMu.Unlock()
 	}()
 
+	// Set a generous read deadline so that silently-dropped clients
+	// (especially WebSocket, where TCP keep-alive doesn't apply) don't
+	// block this goroutine forever. The client is expected to send
+	// noidle or reconnect well within this window.
+	c.conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
+	defer c.conn.SetReadDeadline(time.Time{})
+
 	// Read next line in a goroutine so we can select between notification and noidle
 	lineCh := make(chan string, 1)
 	go func() {
