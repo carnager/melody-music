@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.13.0 (2026-05-25)
+
+### Features
+
+- Lyrics support: server fetches lyrics from lrclib.net on demand, serves via `readlyrics` command
+- Synced lyrics display in TUI with auto-scroll following playback position
+- `melody-cli lyrics` command to show lyrics for the current track
+- `melody-lrcmatch` tool for offline bulk-matching lyrics against a local lrclib database dump
+- Lyrics saved as .lrc sidecar files for instant subsequent access
+
+### Bug Fixes
+
+- Fix Android app losing connection on idle (shared OkHttpClient with 10s readTimeout was killing the idle WebSocket)
+- Split into separate command/idle WebSocket clients with appropriate timeouts
+- Add 30s WebSocket ping interval to survive NAT/mobile carrier proxy timeouts
+- Idle connection failure now proactively tears down command connection for faster recovery
+
+### Improvements
+
+- Server: TCP keep-alive (30s) on MPD listener to detect silently-dropped clients
+- Server: 5-minute read deadline on idle connections prevents goroutine leaks from zombie WebSocket clients
+- Android: force reconnect and full refresh on app resume from background
+- Android: improved home WiFi detection when no SSID is configured
+
 ## 0.12.0 (2026-05-24)
 
 ### Features

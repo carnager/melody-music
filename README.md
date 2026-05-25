@@ -39,13 +39,15 @@ Pick a song on your phone, switch playback to your desktop speakers without miss
 
 **melody-tui** is a terminal interface for browsing your library, managing the queue, rating tracks and albums, and controlling playback.
 
-**melody-cli** is a command-line client for scripting — search, queue, rate, and control playback from shell scripts or the command line.
+**melody-cli** is a command-line client for scripting — search, queue, rate, view lyrics, and control playback from shell scripts or the command line.
 
 **The Android app** does everything the TUI does, plus streaming playback directly on your phone. Features multi-select search results with batch queue operations, structured rating filters, offline album downloads with library filtering, and automatic server selection based on network.
 
 **melody-rofi** gives you quick album and track selection from a rofi/dmenu launcher.
 
 **melody-musiclist** exports your library as a static HTML page.
+
+**melody-lrcmatch** bulk-matches your library against a local [lrclib](https://lrclib.net) database dump to generate .lrc sidecar files for synced lyrics display.
 
 ## Getting started
 
@@ -114,6 +116,18 @@ Enter your server address in the app settings.
 ```sh
 makepkg -si
 ```
+
+## Lyrics
+
+Melody supports synced and plain lyrics. When you view lyrics, the server checks for a `.lrc` file next to the audio file first, then falls back to fetching from [lrclib.net](https://lrclib.net) (and saves the result as a `.lrc` sidecar for next time).
+
+For bulk-matching your entire library offline, use `melody-lrcmatch` with a local lrclib SQLite dump:
+
+```sh
+melody-lrcmatch -db ~/.local/share/melody/melody.db -lrclib ~/lrclib.sqlite3
+```
+
+The TUI shows synced lyrics in a sidebar that auto-scrolls with playback. The CLI supports `melody-cli lyrics` to print lyrics for the current track.
 
 ## Scrobbling
 
