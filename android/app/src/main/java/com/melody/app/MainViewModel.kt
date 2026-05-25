@@ -124,17 +124,21 @@ class MainViewModel : ViewModel() {
 
     private suspend fun refresh(forceQueue: Boolean = false) {
         try {
-            status = mpd.getStatus()
-            if (status != null && (status!!.title.isNotBlank() || status!!.artist.isNotBlank())) {
-                lastPlayingStatus = status
+            val newStatus = mpd.getStatus() ?: return
+            status = newStatus
+            if (newStatus.title.isNotBlank() || newStatus.artist.isNotBlank()) {
+                lastPlayingStatus = newStatus
             }
-            val curPos = status?.currentSongPos ?: -1
-            val plVersion = status?.playlistVersion ?: 0
+            val curPos = newStatus.currentSongPos
+            val plVersion = newStatus.playlistVersion
             if (plVersion != lastPlaylistVersion || queue.isEmpty() || forceQueue) {
-                queue = mpd.getQueue().map { it.copy(current = it.position == curPos) }
-                lastPlaylistVersion = plVersion
+                val newQueue = mpd.getQueue()
+                // Don't replace a valid queue with empty on transient failure
+                if (newQueue.isNotEmpty() || forceQueue) {
+                    queue = newQueue.map { it.copy(current = it.position == curPos) }
+                    lastPlaylistVersion = plVersion
+                }
             } else {
-                // Just update current position markers
                 queue = queue.map { it.copy(current = it.position == curPos) }
             }
         } catch (_: Exception) {}
