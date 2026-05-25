@@ -546,7 +546,7 @@ class MainViewModel : ViewModel() {
                     val prefs = MelodyApp.instance.getSharedPreferences("melody", android.content.Context.MODE_PRIVATE)
                     val format = prefs.getString("audio_format", "")?.ifBlank { null }
                     val bitrate = prefs.getInt("audio_bitrate", 0)
-                    offline.downloadAlbum(album.id, albumTracks, mpd, format, bitrate) { progress ->
+                    offline.downloadAlbum(album.id, album.albumArtist, album.album, album.date, albumTracks, mpd, format, bitrate) { progress ->
                         downloadProgress = progress
                     }
                     downloadProgress = null
@@ -591,7 +591,8 @@ class MainViewModel : ViewModel() {
     fun loadCachedAlbums(artist: String) {
         curArtist = artist
         val cached = cachedAlbumsWithFiles().filter { it.albumArtist == artist }
-        albums = cached.map { Album(it.albumId, it.albumArtist, it.album, "") }
+        albums = cached.map { Album(it.albumId, it.albumArtist, it.album, it.date) }
+            .sortedBy { it.date + it.album }
         libView = LibView.Albums
     }
 

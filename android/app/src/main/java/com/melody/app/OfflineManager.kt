@@ -43,15 +43,9 @@ class OfflineManager(private val context: Context) {
     fun getDownloadedAlbums(): List<DownloadedAlbumInfo> {
         val albumIds = getDownloadedAlbumIds()
         return albumIds.mapNotNull { albumId ->
-            val tracks = loadAlbumMeta(albumId)
-            if (tracks.isEmpty()) return@mapNotNull null
-            val first = tracks.first()
-            DownloadedAlbumInfo(
-                albumId = albumId,
-                albumArtist = first.artist,
-                album = first.album,
-                tracks = tracks
-            )
+            val meta = loadAlbumMeta(albumId)
+            if (meta == null || meta.tracks.isEmpty()) return@mapNotNull null
+            meta
         }
     }
 
@@ -59,6 +53,7 @@ class OfflineManager(private val context: Context) {
         val albumId: String,
         val albumArtist: String,
         val album: String,
+        val date: String,
         val tracks: List<Track>
     )
 
@@ -68,6 +63,9 @@ class OfflineManager(private val context: Context) {
 
     suspend fun downloadAlbum(
         albumId: String,
+        albumArtist: String,
+        albumName: String,
+        date: String,
         tracks: List<Track>,
         mpd: MpdClient,
         format: String? = null,
@@ -105,7 +103,7 @@ class OfflineManager(private val context: Context) {
         }
 
         // Save track metadata for this album
-        saveAlbumMeta(albumId, tracks)
+        saveAlbumMeta(albumId, albumArtist, albumName, date, tracks)
         markAlbumDownloaded(albumId)
         success
     }
@@ -113,8 +111,8 @@ class OfflineManager(private val context: Context) {
     // --- Remove ---
 
     fun removeAlbum(albumId: String) {
-        val tracks = loadAlbumMeta(albumId)
-        tracks.forEach { audioFile(it.songId).delete() }
+        val meta = loadAlbumMeta(albumId)
+        meta?.tracks?.forEach { audioFile(it.songId).delete() }
         removeAlbumMeta(albumId)
         val albums = prefs.getStringSet("downloaded_albums", emptySet())?.toMutableSet() ?: mutableSetOf()
         albums.remove(albumId)
@@ -137,31 +135,85 @@ class OfflineManager(private val context: Context) {
         return File(offlineDir, "album_$albumId.json")
     }
 
-    private fun saveAlbumMeta(albumId: String, tracks: List<Track>) {
-        val arr = JSONArray()
-        tracks.forEach { t ->
-            arr.put(JSONObject().apply {
-                put("id", t.id)
-                put("song_id", t.songId)
-                put("title", t.title)
-                put("artist", t.artist)
-                put("album", t.album)
-                put("tracknumber", t.trackNumber)
-            })
+    private fun saveAlbumMeta(albumId: String, albumArtist: String, albumName: String, date: String, tracks: List<Track>) {
+        val obj = JSONObject().apply {
+            put("album_artist", albumArtist)
+            put("album", albumName)
+            put("date", date)
+            val arr = JSONArray()
+            tracks.forEach { t ->
+                arr.put(JSONObject().apply {
+                    put("id", t.id)
+                    put("song_id", t.songId)
+                    put("title", t.title)
+                    put("artist", t.artist)
+                    put("album", t.album)
+                    put("tracknumber", t.trackNumber)
+                    put("album_id", t.albumId)
+                    put("duration", t.duration)
+                    put("uri", t.uri)
+                    put("rating", t.rating)
+                })
+            }
+            put("tracks", arr)
         }
-        albumMetaFile(albumId).writeText(arr.toString())
+        albumMetaFile(albumId).writeText(obj.toString())
     }
 
-    private fun loadAlbumMeta(albumId: String): List<Track> {
+    private fun loadAlbumMeta(albumId: String): DownloadedAlbumInfo? {
         val file = albumMetaFile(albumId)
-        if (!file.exists()) return emptyList()
+        if (!file.exists()) return null
         return try {
-            val arr = JSONArray(file.readText())
-            (0 until arr.length()).map { i ->
-                val o = arr.getJSONObject(i)
-                Track(o.optString("id"), o.optString("song_id", o.optString("id")), o.optString("title"), o.optString("artist"), o.optString("album"), o.optInt("tracknumber", 0))
+            val raw = file.readText()
+            // Support both old format (JSONArray) and new format (JSONObject with album info)
+            if (raw.trimStart().startsWith("[")) {
+                // Legacy format: plain array of tracks
+                val arr = JSONArray(raw)
+                val tracks = (0 until arr.length()).map { i ->
+                    val o = arr.getJSONObject(i)
+                    Track(
+                        id = o.optString("id"),
+                        songId = o.optString("song_id", o.optString("id")),
+                        title = o.optString("title"),
+                        artist = o.optString("artist"),
+                        album = o.optString("album"),
+                        trackNumber = o.optInt("tracknumber", 0),
+                        albumId = o.optString("album_id", albumId),
+                        duration = o.optDouble("duration", 0.0),
+                        uri = o.optString("uri", o.optString("id")),
+                        rating = o.optInt("rating", 0)
+                    )
+                }
+                if (tracks.isEmpty()) return null
+                val first = tracks.first()
+                DownloadedAlbumInfo(albumId, first.artist, first.album, "", tracks)
+            } else {
+                val obj = JSONObject(raw)
+                val arr = obj.getJSONArray("tracks")
+                val tracks = (0 until arr.length()).map { i ->
+                    val o = arr.getJSONObject(i)
+                    Track(
+                        id = o.optString("id"),
+                        songId = o.optString("song_id", o.optString("id")),
+                        title = o.optString("title"),
+                        artist = o.optString("artist"),
+                        album = o.optString("album"),
+                        trackNumber = o.optInt("tracknumber", 0),
+                        albumId = o.optString("album_id", albumId),
+                        duration = o.optDouble("duration", 0.0),
+                        uri = o.optString("uri", o.optString("id")),
+                        rating = o.optInt("rating", 0)
+                    )
+                }
+                DownloadedAlbumInfo(
+                    albumId = albumId,
+                    albumArtist = obj.optString("album_artist", ""),
+                    album = obj.optString("album", ""),
+                    date = obj.optString("date", ""),
+                    tracks = tracks
+                )
             }
-        } catch (e: Exception) { emptyList() }
+        } catch (e: Exception) { null }
     }
 
     private fun removeAlbumMeta(albumId: String) {
