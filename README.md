@@ -47,7 +47,7 @@ Pick a song on your phone, switch playback to your desktop speakers without miss
 
 **melody-musiclist** exports your library as a static HTML page.
 
-**melody-lrcmatch** bulk-matches your library against a local [lrclib](https://lrclib.net) database dump to generate .lrc sidecar files for synced lyrics display.
+**melody-lrcmatch** bulk-matches your library against a local [lrclib](https://lrclib.net) database dump to write .lrc sidecar files, so lyrics are available instantly without network requests.
 
 ## Getting started
 
@@ -119,7 +119,7 @@ makepkg -si
 
 ## Lyrics
 
-Melody supports synced and plain lyrics. When you view lyrics, the server checks for a `.lrc` file next to the audio file first, then falls back to fetching from [lrclib.net](https://lrclib.net) (and saves the result as a `.lrc` sidecar for next time).
+Melody supports synced and plain lyrics. When you view lyrics, the server checks for a `.lrc` sidecar file next to the audio file first, then embedded tags, and falls back to fetching from [lrclib.net](https://lrclib.net) (saving the result as a `.lrc` sidecar for next time).
 
 For bulk-matching your entire library offline, use `melody-lrcmatch` with a local lrclib SQLite dump:
 

@@ -4,11 +4,10 @@
 
 ### Features
 
-- Lyrics support: server fetches lyrics from lrclib.net on demand, serves via `readlyrics` command
+- Lyrics support: `readlyrics` command reads from .lrc sidecar files or embedded tags, falls back to lrclib.net if not found locally (and saves as .lrc for next time)
 - Synced lyrics display in TUI with auto-scroll following playback position
 - `melody-cli lyrics` command to show lyrics for the current track
-- `melody-lrcmatch` tool for offline bulk-matching lyrics against a local lrclib database dump
-- Lyrics saved as .lrc sidecar files for instant subsequent access
+- `melody-lrcmatch` tool for offline bulk-matching your library against a local lrclib database dump to write .lrc sidecar files
 
 ### Bug Fixes
 
