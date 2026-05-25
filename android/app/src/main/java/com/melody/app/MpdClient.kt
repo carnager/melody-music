@@ -531,7 +531,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
                 }
             }
         }
-        return SearchResult(albums, tracks)
+        return SearchResult(albums.sortedBy { it.date + it.album }, tracks)
     }
 
     // ---- Status ----
