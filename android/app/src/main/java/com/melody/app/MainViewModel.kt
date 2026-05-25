@@ -645,7 +645,10 @@ class MainViewModel : ViewModel() {
     fun loadDevices() {
         viewModelScope.launch {
             try {
-                devices = mpd.getOutputs()
+                val newDevices = mpd.getOutputs()
+                if (newDevices.isNotEmpty()) {
+                    devices = newDevices
+                }
                 android.util.Log.d("MainViewModel", "loadDevices: ${devices.size} devices: ${devices.map { "${it.name}(${it.type})" }}")
             } catch (e: Exception) {
                 android.util.Log.e("MainViewModel", "loadDevices failed: ${e.message}")
