@@ -22,6 +22,8 @@ class MainViewModel : ViewModel() {
     var currentTrackOffline by mutableStateOf(false); private set
     var codecInfo by mutableStateOf(""); private set
     var isConnected by mutableStateOf(true); private set
+    var lyrics by mutableStateOf<MpdClient.LyricsResult?>(null); private set
+    private var lyricsForUri by mutableStateOf("")
 
     // Library
     var libView by mutableStateOf(LibView.Artists); private set
@@ -149,6 +151,15 @@ class MainViewModel : ViewModel() {
         } catch (_: Exception) {}
         currentTrackOffline = PlaybackService.instance?.isCurrentTrackOffline ?: false
         codecInfo = PlaybackService.instance?.codecInfo ?: ""
+        // Fetch lyrics when track changes
+        val curUri = queue.firstOrNull { it.current }?.uri ?: ""
+        if (curUri.isNotBlank() && curUri != lyricsForUri) {
+            lyricsForUri = curUri
+            lyrics = null
+            viewModelScope.launch {
+                lyrics = mpd.getLyrics(curUri)
+            }
+        }
         // Cancel existing poll so it restarts immediately with fresh status
         playbackPollJob?.cancel()
         updatePlaybackPolling()

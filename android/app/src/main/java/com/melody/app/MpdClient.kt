@@ -645,6 +645,27 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
         return AlbumRatingResult(rating, computed)
     }
 
+    // ---- Lyrics ----
+
+    data class LyricsResult(val text: String, val type: String) // type: "synced" or "plain"
+
+    suspend fun getLyrics(uri: String): LyricsResult? {
+        return try {
+            val lines = cmd("readlyrics ${mpdEscape(uri)}")
+            var text = ""
+            var type = "plain"
+            for (line in lines) {
+                if (line.startsWith("X-Lyrics-Type: ")) {
+                    type = line.removePrefix("X-Lyrics-Type: ")
+                } else if (line.startsWith("X-Lyrics: ")) {
+                    val escaped = line.removePrefix("X-Lyrics: ")
+                    text = escaped.replace("\\n", "\n").replace("\\\\", "\\")
+                }
+            }
+            if (text.isNotBlank()) LyricsResult(text, type) else null
+        } catch (_: Exception) { null }
+    }
+
     // ---- Add to queue ----
 
     suspend fun addAlbum(artist: String, album: String, mode: String) {
