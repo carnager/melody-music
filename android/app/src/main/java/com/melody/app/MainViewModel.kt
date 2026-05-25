@@ -599,7 +599,9 @@ class MainViewModel : ViewModel() {
     fun loadCachedTracks(album: Album) {
         curAlbum = album
         val cached = cachedAlbumsWithFiles().find { it.albumId == album.id }
-        tracks = cached?.tracks?.filter { offline.isSongDownloaded(it.songId) } ?: emptyList()
+        tracks = cached?.tracks?.filter { offline.isSongDownloaded(it.songId) }
+            ?.sortedWith(compareBy({ it.disc }, { it.trackNumber }))
+            ?: emptyList()
         libView = LibView.Tracks
     }
 

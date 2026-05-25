@@ -439,9 +439,10 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
                 albumId = g["X-AlbumId"] ?: "",
                 duration = g["duration"]?.toDoubleOrNull() ?: g["Time"]?.toDoubleOrNull() ?: 0.0,
                 uri = g["file"] ?: "",
-                rating = g["X-Rating"]?.toIntOrNull() ?: 0
+                rating = g["X-Rating"]?.toIntOrNull() ?: 0,
+                disc = g["Disc"]?.toIntOrNull() ?: 1
             )
-        }.sortedBy { it.trackNumber }
+        }.sortedWith(compareBy({ it.disc }, { it.trackNumber }))
     }
 
     // ---- Search ----

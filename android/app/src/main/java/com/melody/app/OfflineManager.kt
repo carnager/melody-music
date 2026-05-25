@@ -149,6 +149,7 @@ class OfflineManager(private val context: Context) {
                     put("artist", t.artist)
                     put("album", t.album)
                     put("tracknumber", t.trackNumber)
+                    put("disc", t.disc)
                     put("album_id", t.albumId)
                     put("duration", t.duration)
                     put("uri", t.uri)
@@ -181,7 +182,8 @@ class OfflineManager(private val context: Context) {
                         albumId = o.optString("album_id", albumId),
                         duration = o.optDouble("duration", 0.0),
                         uri = o.optString("uri", o.optString("id")),
-                        rating = o.optInt("rating", 0)
+                        rating = o.optInt("rating", 0),
+                        disc = o.optInt("disc", 1)
                     )
                 }
                 if (tracks.isEmpty()) return null
@@ -202,7 +204,8 @@ class OfflineManager(private val context: Context) {
                         albumId = o.optString("album_id", albumId),
                         duration = o.optDouble("duration", 0.0),
                         uri = o.optString("uri", o.optString("id")),
-                        rating = o.optInt("rating", 0)
+                        rating = o.optInt("rating", 0),
+                        disc = o.optInt("disc", 1)
                     )
                 }
                 DownloadedAlbumInfo(
