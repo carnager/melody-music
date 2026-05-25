@@ -9,6 +9,11 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -547,6 +552,22 @@ fun MiniPlayerBar(vm: MainViewModel, onClick: () -> Unit) {
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (!vm.isConnected) {
+                            val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+                            val alpha by infiniteTransition.animateFloat(
+                                initialValue = 1f,
+                                targetValue = 0.2f,
+                                animationSpec = infiniteRepeatable(
+                                    animation = tween(800),
+                                    repeatMode = RepeatMode.Reverse
+                                ),
+                                label = "pulseAlpha"
+                            )
+                            Canvas(modifier = Modifier.size(8.dp)) {
+                                drawCircle(color = Color(0xFFFF6B35), alpha = alpha)
+                            }
+                            Spacer(Modifier.width(6.dp))
+                        }
                         Text(
                             st.title.ifBlank { "\u2014" },
                             style = MaterialTheme.typography.bodyMedium,

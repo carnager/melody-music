@@ -21,6 +21,7 @@ class MainViewModel : ViewModel() {
     var queue by mutableStateOf<List<QueueItem>>(emptyList()); private set
     var currentTrackOffline by mutableStateOf(false); private set
     var codecInfo by mutableStateOf(""); private set
+    var isConnected by mutableStateOf(true); private set
 
     // Library
     var libView by mutableStateOf(LibView.Artists); private set
@@ -108,6 +109,7 @@ class MainViewModel : ViewModel() {
             }
         }
         mpd.onReconnected = {
+            isConnected = true
             viewModelScope.launch { refresh(forceQueue = true) }
         }
         mpd.startIdle()
@@ -124,7 +126,11 @@ class MainViewModel : ViewModel() {
 
     private suspend fun refresh(forceQueue: Boolean = false) {
         try {
-            val newStatus = mpd.getStatus() ?: return
+            val newStatus = mpd.getStatus() ?: run {
+                isConnected = mpd.connected
+                return
+            }
+            isConnected = true
             status = newStatus
             if (newStatus.title.isNotBlank() || newStatus.artist.isNotBlank()) {
                 lastPlayingStatus = newStatus
