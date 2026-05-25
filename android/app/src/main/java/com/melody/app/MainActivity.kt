@@ -882,6 +882,138 @@ fun NowPlayingScreen(vm: MainViewModel, onDismiss: () -> Unit) {
             Spacer(Modifier.weight(1f))
         }
     }
+
+    // Lyrics overlay
+    var showLyrics by remember { mutableStateOf(false) }
+
+    // Lyrics button — floating at bottom-right of now playing
+    if (vm.lyrics != null) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            IconButton(
+                onClick = { showLyrics = true },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 24.dp, bottom = 24.dp)
+                    .navigationBarsPadding()
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.QueueMusic,
+                    "Lyrics",
+                    modifier = Modifier.size(28.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
+    }
+
+    AnimatedVisibility(
+        visible = showLyrics,
+        enter = slideInVertically(initialOffsetY = { it }),
+        exit = slideOutVertically(targetOffsetY = { it })
+    ) {
+        LyricsScreen(vm) { showLyrics = false }
+    }
+}
+
+@Composable
+fun LyricsScreen(vm: MainViewModel, onDismiss: () -> Unit) {
+    val lyr = vm.lyrics ?: run { onDismiss(); return }
+    val st = vm.status
+
+    BackHandler { onDismiss() }
+
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+        ) {
+            // Top bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Default.KeyboardArrowDown, "Close", modifier = Modifier.size(32.dp))
+                }
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "Lyrics",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.size(48.dp))
+            }
+
+            // Lyrics content
+            val lines = remember(lyr.text) { parseLyricsLines(lyr.text, lyr.type) }
+            val listState = rememberLazyListState()
+            val elapsed = st?.timePos ?: 0.0
+
+            // Auto-scroll for synced lyrics
+            if (lyr.type == "synced" && lines.isNotEmpty()) {
+                val activeLine = lines.indexOfLast { it.time >= 0 && it.time <= elapsed }
+                LaunchedEffect(activeLine) {
+                    if (activeLine > 0) {
+                        listState.animateScrollToItem((activeLine - 2).coerceAtLeast(0))
+                    }
+                }
+            }
+
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(lines.size) { i ->
+                    val line = lines[i]
+                    val isActive = if (lyr.type == "synced") {
+                        val nextTime = lines.getOrNull(i + 1)?.time ?: Double.MAX_VALUE
+                        line.time >= 0 && elapsed >= line.time && elapsed < nextTime
+                    } else false
+
+                    Text(
+                        line.text,
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
+                        color = if (isActive) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+private data class LyricsLine(val time: Double, val text: String)
+
+private fun parseLyricsLines(text: String, type: String): List<LyricsLine> {
+    return text.lines().mapNotNull { line ->
+        if (line.isBlank()) return@mapNotNull null
+        if (type == "synced") {
+            // Parse [mm:ss.xx] prefix
+            val match = Regex("""\[(\d+):(\d+)\.(\d+)](.*)""").find(line)
+            if (match != null) {
+                val (min, sec, hundredths) = match.destructured
+                val time = min.toDouble() * 60 + sec.toDouble() + hundredths.toDouble() / 100.0
+                LyricsLine(time, match.groupValues[4].trim())
+            } else {
+                LyricsLine(-1.0, line)
+            }
+        } else {
+            LyricsLine(-1.0, line)
+        }
+    }.filter { it.text.isNotBlank() }
 }
 
 @Composable
