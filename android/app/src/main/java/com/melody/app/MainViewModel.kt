@@ -78,7 +78,6 @@ class MainViewModel : ViewModel() {
 
     private var pollJob: Job? = null
     private var playbackPollJob: Job? = null
-    private var downloadJob: Job? = null
     private var lastPlaylistVersion = 0
 
     init {
@@ -535,22 +534,30 @@ class MainViewModel : ViewModel() {
 
     // --- Offline downloads ---
 
-    fun downloadAlbum(album: Album) {
-        if (downloadJob?.isActive == true) return
-        downloadJob = viewModelScope.launch {
-            try {
-                val albumTracks = mpd.getTracks(album.albumArtist, album.album)
-                if (albumTracks.isEmpty()) return@launch
-                val prefs = MelodyApp.instance.getSharedPreferences("melody", android.content.Context.MODE_PRIVATE)
-                val format = prefs.getString("audio_format", "")?.ifBlank { null }
-                val bitrate = prefs.getInt("audio_bitrate", 0)
-                offline.downloadAlbum(album.id, albumTracks, mpd, format, bitrate) { progress ->
-                    downloadProgress = progress
-                }
-                downloadProgress = null
-                downloadedAlbums = offline.getDownloadedAlbumIds()
-            } catch (_: Exception) {}
+    private val downloadQueue = kotlinx.coroutines.channels.Channel<Album>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+
+    init {
+        // Process download queue sequentially
+        viewModelScope.launch {
+            for (album in downloadQueue) {
+                try {
+                    val albumTracks = mpd.getTracks(album.albumArtist, album.album)
+                    if (albumTracks.isEmpty()) continue
+                    val prefs = MelodyApp.instance.getSharedPreferences("melody", android.content.Context.MODE_PRIVATE)
+                    val format = prefs.getString("audio_format", "")?.ifBlank { null }
+                    val bitrate = prefs.getInt("audio_bitrate", 0)
+                    offline.downloadAlbum(album.id, albumTracks, mpd, format, bitrate) { progress ->
+                        downloadProgress = progress
+                    }
+                    downloadProgress = null
+                    downloadedAlbums = offline.getDownloadedAlbumIds()
+                } catch (_: Exception) {}
+            }
         }
+    }
+
+    fun downloadAlbum(album: Album) {
+        downloadQueue.trySend(album)
     }
 
     fun removeOfflineAlbum(albumId: String) {
