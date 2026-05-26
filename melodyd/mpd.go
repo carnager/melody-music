@@ -74,6 +74,14 @@ func (h *notifyHub) notify(subsystems ...string) {
 					// Channel full, merge — client will get the notification
 				}
 			}
+		} else {
+			// Not idle — buffer the events so the next idle returns immediately
+			if c.pendingSubs == nil {
+				c.pendingSubs = make(map[string]struct{})
+			}
+			for _, s := range subsystems {
+				c.pendingSubs[s] = struct{}{}
+			}
 		}
 		c.idleMu.Unlock()
 	}
@@ -121,10 +129,11 @@ type mpdConn struct {
 	app    *app
 	logger *log.Logger
 
-	idleMu   sync.Mutex
-	idling   bool
-	idleSubs map[string]struct{}
-	idleCh   chan []string
+	idleMu      sync.Mutex
+	idling      bool
+	idleSubs    map[string]struct{}
+	idleCh      chan []string
+	pendingSubs map[string]struct{} // events that arrived while not idle
 
 	// Window support for search/find commands
 	windowStart int
@@ -247,6 +256,37 @@ func (c *mpdConn) handleCommandList(withOK bool) {
 
 func (c *mpdConn) handleIdle(subs []string) {
 	c.idleMu.Lock()
+
+	// Check for pending events that arrived while we were not idle.
+	// This matches real MPD behavior: idle returns immediately if
+	// there are already-pending events for the requested subsystems.
+	if len(c.pendingSubs) > 0 {
+		watchAll := len(subs) == 0
+		var matched []string
+		for s := range c.pendingSubs {
+			if watchAll {
+				matched = append(matched, s)
+			} else {
+				for _, sub := range subs {
+					if s == sub {
+						matched = append(matched, s)
+						break
+					}
+				}
+			}
+		}
+		if len(matched) > 0 {
+			c.pendingSubs = nil
+			c.idleMu.Unlock()
+			for _, s := range matched {
+				c.writef("changed: %s\n", s)
+			}
+			c.writeLine("OK")
+			c.flush()
+			return
+		}
+	}
+
 	c.idling = true
 	c.idleSubs = make(map[string]struct{})
 	for _, s := range subs {
