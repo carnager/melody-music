@@ -2029,10 +2029,19 @@ func cmdReplayGainStatus(c *mpdConn, args []string) *mpdError {
 	return nil
 }
 
-// cmdTrackEnded is called by clients (web, Android) when a track finishes
-// naturally. The server applies playback modes and advances to the next track.
+// cmdTrackEnded is called by clients (web, Android, melody-agent) when a track
+// finishes naturally. Only honoured when the active device is non-local, since
+// local mpv track endings are handled by watchMPVEvents.
 func cmdTrackEnded(c *mpdConn, args []string) *mpdError {
-	c.app.advanceTrack()
+	a := c.app
+	a.devicesMu.RLock()
+	active := a.activeDevice
+	a.devicesMu.RUnlock()
+	if active == "" || active == "local" {
+		// Local mpv uses event-driven advancement; ignore stray trackended.
+		return nil
+	}
+	a.advanceTrack()
 	return nil
 }
 
