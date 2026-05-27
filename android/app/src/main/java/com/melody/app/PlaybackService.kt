@@ -67,11 +67,17 @@ class PlaybackService : Service() {
             p.addListener(object : Player.Listener {
                 override fun onPlaybackStateChanged(state: Int) {
                     if (state == Player.STATE_READY) updateCodecInfo()
+                    if (state == Player.STATE_ENDED) {
+                        // Last track in the 2-track window finished — notify server
+                        sendTrackEnded()
+                    }
                 }
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                     // Reset offset on natural track changes (end of track -> next)
                     if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
                         streamStartOffset = 0.0
+                        // Notify server that the track ended so it advances its queue
+                        sendTrackEnded()
                     }
                     updateCodecInfo()
                     fetchAndApplyReplayGain()
@@ -85,6 +91,16 @@ class PlaybackService : Service() {
         val prefs = getSharedPreferences("melody", MODE_PRIVATE)
         replaygainMode = prefs.getString("replaygain", "off") ?: "off"
         registerAgent()
+    }
+
+    private fun sendTrackEnded() {
+        scope.launch {
+            try {
+                MelodyApp.instance.mpd.cmd("trackended")
+            } catch (e: Exception) {
+                android.util.Log.e("PlaybackService", "trackended failed: ${e.message}")
+            }
+        }
     }
 
     private fun updateCodecInfo() {
