@@ -104,7 +104,6 @@ class MainViewModel : ViewModel() {
 
     private fun startIdle() {
         mpd.onIdleNotification = { changed ->
-            // Coalesce rapid idle notifications into a single refresh
             if (idleRefreshJob?.isActive != true) {
                 idleRefreshJob = viewModelScope.launch { refresh(forceQueue = "rating" in changed) }
             }
@@ -498,12 +497,13 @@ class MainViewModel : ViewModel() {
         viewModelScope.launch {
             try {
                 if (status?.state == "playing") mpd.pause() else mpd.resume()
+                refresh()
             } catch (_: Exception) {}
         }
     }
 
-    fun playNext() { viewModelScope.launch { try { mpd.next() } catch (e: Exception) { android.util.Log.e("VM", "next: ${e.message}") } } }
-    fun playPrev() { viewModelScope.launch { try { mpd.prev() } catch (e: Exception) { android.util.Log.e("VM", "prev: ${e.message}") } } }
+    fun playNext() { viewModelScope.launch { try { mpd.next(); refresh() } catch (e: Exception) { android.util.Log.e("VM", "next: ${e.message}") } } }
+    fun playPrev() { viewModelScope.launch { try { mpd.prev(); refresh() } catch (e: Exception) { android.util.Log.e("VM", "prev: ${e.message}") } } }
     fun stopPlayback() { viewModelScope.launch { try { mpd.stop() } catch (_: Exception) {} } }
     fun seek(pos: Double) { viewModelScope.launch { try { mpd.seek(pos) } catch (_: Exception) {} } }
 
