@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.14.0 (2026-05-27)
+
+### Features
+
+- Android: lyrics button and screen in now playing view
+- melody-lrcmatch: add NetEase Cloud Music as a lyrics source (`-netease` flag)
+- Server: async lrclib.net lyrics fetching with caching — no longer blocks MPD commands
+
+### Bug Fixes
+
+- Server: fix MPD idle notifications being lost between commands (register clients for entire connection lifetime)
+- Server: fix protocol desync with ncmpcpp when idle returns immediately from pending events
+- Server: ignore mpv end-file eof events when a remote device is active (prevents double-advancing)
+- Server: guard trackended command against stray signals from non-active devices
+- Android: send trackended when ExoPlayer finishes a track (fixes playback stalling)
+- melody-tui: fix nil pointer crash during reconnect when global client is nil
+
+### Improvements
+
+- Android: refresh UI immediately after play/pause/next/prev instead of waiting for idle round-trip
+- melody-tui: remove vim keybindings (j/k/g/G/h/l) — use arrow keys, home/end, pgup/pgdown
+- Server: add disc number to Track metadata, fix multi-disc album sorting
+- Android: store all track tags in offline metadata, sort cached albums by date
+
 ## 0.13.0 (2026-05-25)
 
 ### Features

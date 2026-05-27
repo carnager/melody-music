@@ -1,6 +1,6 @@
 # Maintainer: Rasmus Steinke <rasi at xssn dot at>
 pkgname=('melodyd' 'melody-agent' 'melody-tui' 'melody-cli' 'melody-rofi' 'melody-musiclist' 'melody-lrcmatch')
-pkgver=0.13.0
+pkgver=0.14.0
 pkgrel=1
 arch=('x86_64')
 url="https://github.com/carnager/melody-music"
@@ -64,7 +64,7 @@ package_melody-musiclist() {
 }
 
 package_melody-lrcmatch() {
-  pkgdesc="Offline lyrics matcher for Melody (uses lrclib database dump)"
+  pkgdesc="Offline lyrics matcher for Melody (lrclib database dump + NetEase)"
   depends=('melodyd')
   install -Dm755 "$srcdir/melody-music/bin/melody-lrcmatch" \
                   "$pkgdir/usr/bin/melody-lrcmatch"
