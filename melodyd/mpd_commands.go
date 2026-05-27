@@ -2537,7 +2537,7 @@ func cmdReadLyrics(c *mpdConn, args []string) *mpdError {
 		c.app.logger.Printf("lyrics: found %s lyrics from local source (%d bytes)", lyricsType, len(text))
 	}
 
-	// 2. Fall back to lrclib.net
+	// 2. Fall back to lrclib.net (async — don't block the command handler)
 	if text == "" {
 		track, err := c.app.db.trackByPath(absPath)
 		if err != nil {
@@ -2547,26 +2547,14 @@ func cmdReadLyrics(c *mpdConn, args []string) *mpdError {
 			title := stringify(track["title"])
 			album := stringify(track["album"])
 			dur, _ := track["duration"].(float64)
-			c.app.logger.Printf("lyrics: querying lrclib for %s - %s", artist, title)
-			text, lyricsType = fetchLrclib(artist, title, album, dur)
+
+			// Check if we already have a cached lrclib result
+			text, lyricsType = getCachedLrclib(artist, title)
+
 			if text == "" {
-				c.app.logger.Printf("lyrics: lrclib returned no results")
-			} else {
-				c.app.logger.Printf("lyrics: lrclib returned %s lyrics (%d bytes)", lyricsType, len(text))
-				if c.app.cfg.Library.SaveLRC {
-					if err := saveLRC(absPath, text); err != nil {
-						c.app.logger.Printf("lyrics: failed to save .lrc for %s: %v", absPath, err)
-					} else {
-						c.app.logger.Printf("lyrics: saved .lrc for %s", absPath)
-					}
-				}
-				if c.app.cfg.Library.EmbedLyrics {
-					if err := embedLyrics(absPath, text, lyricsType); err != nil {
-						c.app.logger.Printf("lyrics: failed to embed in %s: %v", absPath, err)
-					} else {
-						c.app.logger.Printf("lyrics: embedded in %s", absPath)
-					}
-				}
+				// Fire off async fetch — client will get a player idle
+				// notification when lyrics arrive and can re-request.
+				go c.app.fetchAndCacheLrclib(absPath, artist, title, album, dur)
 			}
 		}
 	}

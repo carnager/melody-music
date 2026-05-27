@@ -9,10 +9,80 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
-var lrclibClient = &http.Client{Timeout: 10 * time.Second}
+var lrclibClient = &http.Client{Timeout: 3 * time.Second}
+
+// lrclib result cache: stores both positive and negative results to avoid
+// repeated HTTP requests. Negative results expire after 24 hours.
+type lrclibCacheEntry struct {
+	text       string
+	lyricsType string
+	fetchedAt  time.Time
+}
+
+var (
+	lrclibCache   = make(map[string]lrclibCacheEntry)
+	lrclibCacheMu sync.Mutex
+)
+
+func lrclibCacheKey(artist, title string) string {
+	return strings.ToLower(artist) + "\x00" + strings.ToLower(title)
+}
+
+// getCachedLrclib returns cached lyrics if available.
+func getCachedLrclib(artist, title string) (string, string) {
+	key := lrclibCacheKey(artist, title)
+	lrclibCacheMu.Lock()
+	defer lrclibCacheMu.Unlock()
+	if e, ok := lrclibCache[key]; ok {
+		// Negative results expire after 24 hours
+		if e.text == "" && time.Since(e.fetchedAt) > 24*time.Hour {
+			delete(lrclibCache, key)
+			return "", ""
+		}
+		return e.text, e.lyricsType
+	}
+	return "", ""
+}
+
+// fetchAndCacheLrclib fetches lyrics from lrclib in the background, caches the
+// result, and notifies clients so they can re-request.
+func (a *app) fetchAndCacheLrclib(absPath, artist, title, album string, dur float64) {
+	a.logger.Printf("lyrics: querying lrclib for %s - %s", artist, title)
+	text, lyricsType := fetchLrclib(artist, title, album, dur)
+
+	key := lrclibCacheKey(artist, title)
+	lrclibCacheMu.Lock()
+	lrclibCache[key] = lrclibCacheEntry{text: text, lyricsType: lyricsType, fetchedAt: time.Now()}
+	lrclibCacheMu.Unlock()
+
+	if text == "" {
+		a.logger.Printf("lyrics: lrclib returned no results")
+		return
+	}
+
+	a.logger.Printf("lyrics: lrclib returned %s lyrics (%d bytes)", lyricsType, len(text))
+	if a.cfg.Library.SaveLRC {
+		if err := saveLRC(absPath, text); err != nil {
+			a.logger.Printf("lyrics: failed to save .lrc for %s: %v", absPath, err)
+		} else {
+			a.logger.Printf("lyrics: saved .lrc for %s", absPath)
+		}
+	}
+	if a.cfg.Library.EmbedLyrics {
+		if err := embedLyrics(absPath, text, lyricsType); err != nil {
+			a.logger.Printf("lyrics: failed to embed in %s: %v", absPath, err)
+		} else {
+			a.logger.Printf("lyrics: embedded in %s", absPath)
+		}
+	}
+
+	// Notify clients that lyrics are now available
+	a.mpdHub.notify(SubPlayer)
+}
 
 type lrclibResponse struct {
 	SyncedLyrics string `json:"syncedLyrics"`
@@ -62,6 +132,7 @@ func fetchLrclib(artist, title, album string, duration float64) (string, string)
 	if result.PlainLyrics != "" {
 		return result.PlainLyrics, "plain"
 	}
+
 	return "", ""
 }
 
