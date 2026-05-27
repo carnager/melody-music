@@ -2052,11 +2052,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.showNowPlaying {
 		switch key {
-		case "j", "down":
+		case "down":
 			if m.lyricsScroll < len(m.lyrics)-1 {
 				m.lyricsScroll++
 			}
-		case "k", "up":
+		case "up":
 			if m.lyricsScroll > 0 {
 				m.lyricsScroll--
 			}
@@ -2186,22 +2186,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, fetchTrackInfo(file)
 		}
 		return m, nil
-	case "l":
-		file := m.status.File
-		if file == "" {
-			return m, nil
-		}
-		if m.showLyrics {
-			m.showLyrics = false
-			return m, nil
-		}
-		m.showLyrics = true
-		m.lyricsScroll = 0
-		if m.lyricsFile != file {
-			m.lyrics = nil
-			m.lyricsFile = file
-			return m, fetchLyrics(file)
-		}
 		return m, nil
 	case "L":
 		file := m.status.File
@@ -2293,12 +2277,12 @@ func (m model) handleMenuKey(key string) (tea.Model, tea.Cmd) {
 	case "esc", "q":
 		m.showMenu = false
 		return m, nil
-	case "j", "down":
+	case "down":
 		if m.menuCursor < maxIdx {
 			m.menuCursor++
 		}
 		return m, nil
-	case "k", "up":
+	case "up":
 		if m.menuCursor > 0 {
 			m.menuCursor--
 		}
@@ -2340,20 +2324,20 @@ func (m model) handleLibKey(key string) (tea.Model, tea.Cmd) {
 	listLen := m.libListLen()
 
 	switch key {
-	case "j", "down":
+	case "down":
 		if m.libCursor < listLen-1 {
 			m.libCursor++
 		}
 		return m, nil
-	case "k", "up":
+	case "up":
 		if m.libCursor > 0 {
 			m.libCursor--
 		}
 		return m, nil
-	case "g", "home":
+	case "home":
 		m.libCursor = 0
 		return m, nil
-	case "G", "end":
+	case "end":
 		if listLen > 0 {
 			m.libCursor = listLen - 1
 		}
@@ -2386,9 +2370,9 @@ func (m model) handleLibKey(key string) (tea.Model, tea.Cmd) {
 		m.menuCursor = 0
 		m.menuSource = "library"
 		return m, nil
-	case "l", "right":
+	case "right":
 		return m.libDrillIn()
-	case "h", "left", "backspace":
+	case "left", "backspace":
 		return m.libBack()
 	case "a":
 		return m.libAction("add")
@@ -2761,17 +2745,17 @@ func (m model) handleQueueKey(key string) (tea.Model, tea.Cmd) {
 	}
 	qLen := len(m.queue)
 	switch key {
-	case "j", "down":
+	case "down":
 		if m.qCursor < qLen-1 {
 			m.qCursor++
 		}
-	case "k", "up":
+	case "up":
 		if m.qCursor > 0 {
 			m.qCursor--
 		}
-	case "g", "home":
+	case "home":
 		m.qCursor = 0
-	case "G", "end":
+	case "end":
 		if qLen > 0 {
 			m.qCursor = qLen - 1
 		}
@@ -2846,50 +2830,6 @@ func (m model) handleQueueKey(key string) (tea.Model, tea.Cmd) {
 		if m.qCursor < qLen {
 			return m, mpdCommand(fmt.Sprintf("delete %d", m.qCursor))
 		}
-	case "J":
-		if len(m.qSelected) > 0 {
-			positions := sortedSelected(m.qSelected)
-			if positions[len(positions)-1] >= qLen-1 {
-				return m, nil
-			}
-			cmds := make([]string, 0, len(positions))
-			for i := len(positions) - 1; i >= 0; i-- {
-				cmds = append(cmds, fmt.Sprintf("move %d %d", positions[i], positions[i]+1))
-			}
-			newSel := map[int]bool{}
-			for _, p := range positions {
-				newSel[p+1] = true
-			}
-			m.qSelected = newSel
-			m.qCursor++
-			return m, mpdCommand(cmds...)
-		}
-		if m.qCursor < qLen-1 {
-			m.qCursor++
-			return m, mpdCommand(fmt.Sprintf("move %d %d", m.qCursor-1, m.qCursor))
-		}
-	case "K":
-		if len(m.qSelected) > 0 {
-			positions := sortedSelected(m.qSelected)
-			if positions[0] <= 0 {
-				return m, nil
-			}
-			cmds := make([]string, 0, len(positions))
-			for _, p := range positions {
-				cmds = append(cmds, fmt.Sprintf("move %d %d", p, p-1))
-			}
-			newSel := map[int]bool{}
-			for _, p := range positions {
-				newSel[p-1] = true
-			}
-			m.qSelected = newSel
-			m.qCursor--
-			return m, mpdCommand(cmds...)
-		}
-		if m.qCursor > 0 {
-			m.qCursor--
-			return m, mpdCommand(fmt.Sprintf("move %d %d", m.qCursor+1, m.qCursor))
-		}
 	case "p":
 		if m.qCursor < qLen {
 			uri := m.queue[m.qCursor].File
@@ -2934,17 +2874,17 @@ func (m model) handlePlPickerKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd
 	case "esc", "q":
 		m.showPlPicker = false
 		return m, nil
-	case "j", "down":
+	case "down":
 		if m.plPickerCursor < plTotal-1 {
 			m.plPickerCursor++
 		}
-	case "k", "up":
+	case "up":
 		if m.plPickerCursor > 0 {
 			m.plPickerCursor--
 		}
-	case "g", "home":
+	case "home":
 		m.plPickerCursor = 0
-	case "G", "end":
+	case "end":
 		m.plPickerCursor = plTotal - 1
 	case "pgdown":
 		m.plPickerCursor += 20
@@ -2989,10 +2929,10 @@ func (m model) handleSearchKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd) 
 			m.srCursor++
 		}
 		return m, nil
-	case "g", "home":
+	case "home":
 		m.srCursor = 0
 		return m, nil
-	case "G", "end":
+	case "end":
 		if m.srTotal > 0 {
 			m.srCursor = m.srTotal - 1
 		}
@@ -3085,12 +3025,12 @@ func (m model) handleDeviceKey(key string) (tea.Model, tea.Cmd) {
 	case "esc", "q", "D":
 		m.showDevices = false
 		return m, nil
-	case "j", "down":
+	case "down":
 		if m.devCursor < len(m.devices)-1 {
 			m.devCursor++
 		}
 		return m, nil
-	case "k", "up":
+	case "up":
 		if m.devCursor > 0 {
 			m.devCursor--
 		}
@@ -3149,12 +3089,12 @@ func (m model) handlePrioKey(key string) (tea.Model, tea.Cmd) {
 	case "esc", "q":
 		m.showPrioMenu = false
 		return m, nil
-	case "j", "down":
+	case "down":
 		if m.prioCursor < 2 {
 			m.prioCursor++
 		}
 		return m, nil
-	case "k", "up":
+	case "up":
 		if m.prioCursor > 0 {
 			m.prioCursor--
 		}
@@ -3189,12 +3129,12 @@ func (m model) handleModesKey(key string) (tea.Model, tea.Cmd) {
 	case "esc", "q", "M":
 		m.showModes = false
 		return m, nil
-	case "j", "down":
+	case "down":
 		if m.modesCursor < 4 {
 			m.modesCursor++
 		}
 		return m, nil
-	case "k", "up":
+	case "up":
 		if m.modesCursor > 0 {
 			m.modesCursor--
 		}
@@ -3246,12 +3186,12 @@ func (m model) handleGotoKey(key string) (tea.Model, tea.Cmd) {
 	case "esc", "q", "o":
 		m.showGoto = false
 		return m, nil
-	case "j", "down":
+	case "down":
 		if m.gotoCursor < 2 {
 			m.gotoCursor++
 		}
 		return m, nil
-	case "k", "up":
+	case "up":
 		if m.gotoCursor > 0 {
 			m.gotoCursor--
 		}
@@ -3302,12 +3242,12 @@ func (m model) handleRatingKey(key string) (tea.Model, tea.Cmd) {
 	case "esc", "q", "*":
 		m.showRating = false
 		return m, nil
-	case "j", "down":
+	case "down":
 		if m.ratingCursor < 10 {
 			m.ratingCursor++
 		}
 		return m, nil
-	case "k", "up":
+	case "up":
 		if m.ratingCursor > 0 {
 			m.ratingCursor--
 		}
