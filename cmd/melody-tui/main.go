@@ -132,6 +132,9 @@ func (c *mpdClient) close() {
 
 // cmd sends a single MPD command and returns the response lines (without OK).
 func (c *mpdClient) cmd(command string) ([]string, error) {
+	if c == nil {
+		return nil, fmt.Errorf("not connected")
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
