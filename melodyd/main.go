@@ -1029,6 +1029,15 @@ func (a *app) watchMPVEvents() {
 			}
 			a.logger.Printf("mpv events: end-file reason=%s", evt.Reason)
 			if evt.Reason == "eof" {
+				// Only advance if local mpv is the active playback target.
+				// Other devices (Android, web) handle their own track endings.
+				a.devicesMu.RLock()
+				active := a.activeDevice
+				a.devicesMu.RUnlock()
+				if active != "" && active != "local" {
+					a.logger.Printf("mpv events: ignoring eof, active device is %s", active)
+					continue
+				}
 				a.advanceTrack()
 			}
 		}

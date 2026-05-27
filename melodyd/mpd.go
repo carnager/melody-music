@@ -164,6 +164,8 @@ func (c *mpdConn) writeACK(err *mpdError) {
 // serve handles one MPD client connection.
 func (c *mpdConn) serve() {
 	defer c.conn.Close()
+	c.app.mpdHub.register(c)
+	defer c.app.mpdHub.unregister(c)
 
 	c.writeLine("OK MPD 0.23.5")
 	c.flush()
@@ -258,32 +260,25 @@ func (c *mpdConn) handleIdle(subs []string) {
 	c.idleMu.Lock()
 
 	// Check for pending events that arrived while we were not idle.
-	// This matches real MPD behavior: idle returns immediately if
-	// there are already-pending events for the requested subsystems.
+	// If found, feed them through idleCh so the normal notification path
+	// runs (which waits for the reader goroutine to consume "noidle").
+	var pendingMatch []string
 	if len(c.pendingSubs) > 0 {
 		watchAll := len(subs) == 0
-		var matched []string
 		for s := range c.pendingSubs {
 			if watchAll {
-				matched = append(matched, s)
+				pendingMatch = append(pendingMatch, s)
 			} else {
 				for _, sub := range subs {
 					if s == sub {
-						matched = append(matched, s)
+						pendingMatch = append(pendingMatch, s)
 						break
 					}
 				}
 			}
 		}
-		if len(matched) > 0 {
+		if len(pendingMatch) > 0 {
 			c.pendingSubs = nil
-			c.idleMu.Unlock()
-			for _, s := range matched {
-				c.writef("changed: %s\n", s)
-			}
-			c.writeLine("OK")
-			c.flush()
-			return
 		}
 	}
 
@@ -295,9 +290,14 @@ func (c *mpdConn) handleIdle(subs []string) {
 	c.idleCh = make(chan []string, 1)
 	c.idleMu.Unlock()
 
-	c.app.mpdHub.register(c)
+	// Deliver pending events through the normal channel so the select
+	// below handles them like any other notification (waiting for the
+	// reader goroutine to consume "noidle" from the client).
+	if len(pendingMatch) > 0 {
+		c.idleCh <- pendingMatch
+	}
+
 	defer func() {
-		c.app.mpdHub.unregister(c)
 		c.idleMu.Lock()
 		c.idling = false
 		c.idleMu.Unlock()
@@ -323,6 +323,13 @@ func (c *mpdConn) handleIdle(subs []string) {
 
 	select {
 	case changed := <-c.idleCh:
+		// Immediately mark as non-idle so any notifications that arrive
+		// while we wait for the reader goroutine go to pendingSubs instead
+		// of being sent to idleCh (which nobody reads from here).
+		c.idleMu.Lock()
+		c.idling = false
+		c.idleMu.Unlock()
+
 		// Deduplicate subsystems
 		seen := map[string]bool{}
 		for _, s := range changed {
