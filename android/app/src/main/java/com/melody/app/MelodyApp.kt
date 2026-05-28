@@ -8,6 +8,8 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.wifi.WifiInfo
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 
 class MelodyApp : Application() {
     lateinit var mpd: MpdClient
@@ -16,6 +18,8 @@ class MelodyApp : Application() {
         private set
 
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private val handler = Handler(Looper.getMainLooper())
+    private var pendingNetworkApply: Runnable? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -114,6 +118,14 @@ class MelodyApp : Application() {
         return null
     }
 
+    /** Debounced network apply — waits for transitions to settle before switching servers. */
+    private fun scheduleNetworkApply() {
+        pendingNetworkApply?.let { handler.removeCallbacks(it) }
+        val r = Runnable { applyServerForCurrentNetwork() }
+        pendingNetworkApply = r
+        handler.postDelayed(r, 1500)
+    }
+
     private fun startNetworkMonitor() {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val request = NetworkRequest.Builder()
@@ -121,11 +133,8 @@ class MelodyApp : Application() {
             .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
             .build()
         val callback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) { applyServerForCurrentNetwork() }
-            override fun onLost(network: Network) { applyServerForCurrentNetwork() }
-            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-                applyServerForCurrentNetwork()
-            }
+            override fun onAvailable(network: Network) { scheduleNetworkApply() }
+            override fun onLost(network: Network) { scheduleNetworkApply() }
         }
         networkCallback = callback
         cm.registerNetworkCallback(request, callback)
