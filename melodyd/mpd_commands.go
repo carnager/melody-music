@@ -129,11 +129,46 @@ func init() {
 
 func cmdStatus(c *mpdConn, args []string) *mpdError {
 	a := c.app
-	t := a.target()
 
+	// Snapshot all queue state under one lock to prevent data races.
+	// Reading curQueuePos or calling nextQueuePos() without the lock caused
+	// shuffle corruption (concurrent generateShuffle) leading to permanent
+	// playback stalls.
+	a.playQueueMu.Lock()
+	songPos := a.curQueuePos
+	queueLen := len(a.playQueue)
+	queueVer := a.queueVersion
+	modeRepeat := a.modeRepeat
+	modeRandom := a.modeRandom
+	modeSingle := a.modeSingle
+	modeConsume := a.modeConsume
+
+	var songMPDID int
+	var songDBID string
+	if songPos >= 0 && songPos < queueLen {
+		if songPos < len(a.queueIDs) {
+			songMPDID = a.queueIDs[songPos]
+		}
+		songDBID = a.playQueue[songPos]
+	} else {
+		songPos = -1
+	}
+
+	nextPos := a.nextQueuePos()
+	var nextMPDID int
+	if nextPos >= 0 && nextPos < queueLen {
+		if nextPos < len(a.queueIDs) {
+			nextMPDID = a.queueIDs[nextPos]
+		}
+	} else {
+		nextPos = -1
+	}
+	a.playQueueMu.Unlock()
+
+	// Read target state via IPC — no queue lock needed.
+	t := a.target()
 	state := "stop"
 	var elapsed, duration float64
-	var songPos int = -1
 	var volume int = -1
 
 	if t.isRunning() {
@@ -146,7 +181,6 @@ func cmdStatus(c *mpdConn, args []string) *mpdError {
 				}
 			}
 		}
-		songPos = a.curQueuePos
 		if tpRaw, err := t.getProperty("time-pos"); err == nil {
 			if f, ok := tpRaw.(float64); ok {
 				elapsed = f
@@ -164,62 +198,43 @@ func cmdStatus(c *mpdConn, args []string) *mpdError {
 		}
 	}
 
-	a.playQueueMu.Lock()
-	queueLen := len(a.playQueue)
-	queueVer := a.queueVersion
-	a.playQueueMu.Unlock()
-
-	// Clamp songPos to valid queue range
-	if songPos >= queueLen {
-		songPos = -1
-	}
-
+	// Write response using snapshotted data.
 	if volume >= 0 {
 		c.writeKV("volume", volume)
 	} else {
 		c.writeKV("volume", -1)
 	}
-	c.writeKV("repeat", boolToInt(a.modeRepeat))
-	c.writeKV("random", boolToInt(a.modeRandom))
-	c.writeKV("single", boolToInt(a.modeSingle))
-	c.writeKV("consume", boolToInt(a.modeConsume))
+	c.writeKV("repeat", boolToInt(modeRepeat))
+	c.writeKV("random", boolToInt(modeRandom))
+	c.writeKV("single", boolToInt(modeSingle))
+	c.writeKV("consume", boolToInt(modeConsume))
 	c.writeKV("playlist", queueVer)
 	c.writeKV("playlistlength", queueLen)
 	c.writeKV("state", state)
 	if songPos >= 0 {
 		c.writeKV("song", songPos)
-		a.playQueueMu.Lock()
-		if songPos < len(a.queueIDs) {
-			c.writeKV("songid", a.queueIDs[songPos])
+		if songMPDID > 0 {
+			c.writeKV("songid", songMPDID)
 		}
-		// Use DB duration for agent targets (HLS reports segment duration, not track duration)
-		// and as fallback when mpv reports 0 during track transitions
-		if songPos < len(a.playQueue) {
-			dev := a.activeDeviceInfo()
-			isAgent := dev != nil && !dev.IsLocal
-			if trackID, err := strconv.ParseInt(a.playQueue[songPos], 10, 64); err == nil {
+		// Use DB duration as authoritative source
+		if songDBID != "" {
+			if trackID, err := strconv.ParseInt(songDBID, 10, 64); err == nil {
 				if track, err := a.db.trackByID(trackID); err == nil {
 					if d, ok := track["duration"].(float64); ok && d > 0 {
-						if duration == 0 || isAgent {
-							duration = d
-						}
+						duration = d
 					}
 				}
 			}
 		}
-		a.playQueueMu.Unlock()
 		c.writef("elapsed: %.3f\n", elapsed)
 		c.writef("duration: %.3f\n", duration)
 		c.writeKV("time", fmt.Sprintf("%d:%d", int(elapsed), int(duration)))
 	}
-	nextPos := a.nextQueuePos()
-	if nextPos >= 0 && nextPos < queueLen {
+	if nextPos >= 0 {
 		c.writeKV("nextsong", nextPos)
-		a.playQueueMu.Lock()
-		if nextPos < len(a.queueIDs) {
-			c.writeKV("nextsongid", a.queueIDs[nextPos])
+		if nextMPDID > 0 {
+			c.writeKV("nextsongid", nextMPDID)
 		}
-		a.playQueueMu.Unlock()
 	}
 	return nil
 }
@@ -277,6 +292,7 @@ func cmdStats(c *mpdConn, args []string) *mpdError {
 
 func cmdPlay(c *mpdConn, args []string) *mpdError {
 	a := c.app
+	var plan *syncPlan
 	a.playQueueMu.Lock()
 	if len(args) > 0 {
 		pos, err := strconv.Atoi(args[0])
@@ -292,9 +308,26 @@ func cmdPlay(c *mpdConn, args []string) *mpdError {
 		if a.modeRandom {
 			a.generateShuffle()
 		}
-		a.syncTarget()
+		p := a.planSyncTarget()
+		plan = &p
+	} else if len(a.playQueue) > 0 {
+		// No position arg — for agent targets, only send a full play
+		// command if the agent is stopped (nothing loaded). If it's
+		// already playing or paused, just let the resume below handle it.
+		if at, ok := a.target().(*agentTarget); ok {
+			at.stateMu.RLock()
+			stopped := at.agState == "stop"
+			at.stateMu.RUnlock()
+			if stopped {
+				p := a.planSyncTarget()
+				plan = &p
+			}
+		}
 	}
 	a.playQueueMu.Unlock()
+	if plan != nil {
+		a.execSyncPlan(*plan)
+	}
 	if err := a.target().setProperty("pause", false); err != nil {
 		return mpdErr(errSystem, "play", err.Error())
 	}
@@ -387,8 +420,9 @@ func cmdNext(c *mpdConn, args []string) *mpdError {
 	if a.modeRandom {
 		a.shufflePos++
 	}
-	a.syncTarget()
+	plan := a.planSyncTarget()
 	a.playQueueMu.Unlock()
+	a.execSyncPlan(plan)
 	if err := a.target().setProperty("pause", false); err != nil {
 		a.logger.Printf("cmdNext: unpause failed: %v", err)
 	}
@@ -422,8 +456,9 @@ func cmdPrevious(c *mpdConn, args []string) *mpdError {
 		}
 		a.curQueuePos = prev
 	}
-	a.syncTarget()
+	plan := a.planSyncTarget()
 	a.playQueueMu.Unlock()
+	a.execSyncPlan(plan)
 	_ = a.target().setProperty("pause", false)
 	a.mpdHub.notify(SubPlayer)
 	return nil
@@ -472,6 +507,7 @@ func cmdSeek(c *mpdConn, args []string) *mpdError {
 	if err != nil {
 		return mpdErr(errArg, "seek", "invalid time")
 	}
+	var plan *syncPlan
 	a.playQueueMu.Lock()
 	if pos != a.curQueuePos {
 		if pos < 0 || pos >= len(a.playQueue) {
@@ -479,9 +515,13 @@ func cmdSeek(c *mpdConn, args []string) *mpdError {
 			return mpdErr(errArg, "seek", "invalid position")
 		}
 		a.curQueuePos = pos
-		a.syncTarget()
+		p := a.planSyncTarget()
+		plan = &p
 	}
 	a.playQueueMu.Unlock()
+	if plan != nil {
+		a.execSyncPlan(*plan)
+	}
 	if err := a.target().setProperty("time-pos", timePos); err != nil {
 		return mpdErr(errSystem, "seek", err.Error())
 	}
@@ -652,6 +692,7 @@ func cmdAddID(c *mpdConn, args []string) *mpdError {
 	}
 
 	// If position was specified, move from end to requested position
+	var ntPlan *nextTrackPlan
 	if len(args) > 1 {
 		targetPos, parseErr := strconv.Atoi(args[1])
 		if parseErr == nil && targetPos < len(a.playQueue)-1 {
@@ -675,12 +716,16 @@ func cmdAddID(c *mpdConn, args []string) *mpdError {
 				a.queuePriority = append(a.queuePriority, 0)
 			}
 			a.savePlayQueue()
-			a.syncNextTrack()
+			p := a.planNextTrack()
+			ntPlan = &p
 			newMPDID = entryID
 		}
 	}
 	a.playQueueMu.Unlock()
 
+	if ntPlan != nil {
+		a.execNextTrackPlan(*ntPlan)
+	}
 	c.writeKV("Id", newMPDID)
 	a.mpdHub.notify(SubPlaylist)
 	return nil
@@ -692,10 +737,10 @@ func cmdDelete(c *mpdConn, args []string) *mpdError {
 	}
 	a := c.app
 	a.playQueueMu.Lock()
-	defer a.playQueueMu.Unlock()
 
 	start, end, err := parseRange(args[0], len(a.playQueue))
 	if err != nil {
+		a.playQueueMu.Unlock()
 		return mpdErr(errArg, "delete", err.Error())
 	}
 
@@ -722,9 +767,13 @@ func cmdDelete(c *mpdConn, args []string) *mpdError {
 
 	a.savePlayQueue()
 	if currentDeleted || len(a.playQueue) == 0 {
-		a.syncTarget()
+		plan := a.planSyncTarget()
+		a.playQueueMu.Unlock()
+		a.execSyncPlan(plan)
 	} else {
-		a.syncNextTrack()
+		ntPlan := a.planNextTrack()
+		a.playQueueMu.Unlock()
+		a.execNextTrackPlan(ntPlan)
 	}
 	a.mpdHub.notify(SubPlaylist)
 	return nil
@@ -748,9 +797,6 @@ func cmdDeleteID(c *mpdConn, args []string) *mpdError {
 func cmdClear(c *mpdConn, args []string) *mpdError {
 	a := c.app
 	a.playQueueMu.Lock()
-	t := a.target()
-	_ = t.setProperty("pause", true)
-	_ = t.playlistClear()
 	a.playQueue = nil
 	a.queueIDs = nil
 	a.queuePriority = nil
@@ -760,6 +806,9 @@ func cmdClear(c *mpdConn, args []string) *mpdError {
 	a.queueVersion++
 	a.savePlayQueue()
 	a.playQueueMu.Unlock()
+	t := a.target()
+	_ = t.setProperty("pause", true)
+	_ = t.playlistClear()
 	a.mpdHub.notify(SubPlaylist, SubPlayer)
 	return nil
 }
@@ -770,14 +819,15 @@ func cmdMove(c *mpdConn, args []string) *mpdError {
 	}
 	a := c.app
 	a.playQueueMu.Lock()
-	defer a.playQueueMu.Unlock()
 
 	from, err := strconv.Atoi(args[0])
 	if err != nil || from < 0 || from >= len(a.playQueue) {
+		a.playQueueMu.Unlock()
 		return mpdErr(errArg, "move", "invalid from position")
 	}
 	to, err := strconv.Atoi(args[1])
 	if err != nil || to < 0 || to >= len(a.playQueue) {
+		a.playQueueMu.Unlock()
 		return mpdErr(errArg, "move", "invalid to position")
 	}
 
@@ -822,7 +872,9 @@ func cmdMove(c *mpdConn, args []string) *mpdError {
 	}
 	a.queueVersion++
 	a.savePlayQueue()
-	a.syncNextTrack()
+	plan := a.planNextTrack()
+	a.playQueueMu.Unlock()
+	a.execNextTrackPlan(plan)
 	a.mpdHub.notify(SubPlaylist)
 	return nil
 }
@@ -845,10 +897,10 @@ func cmdMoveID(c *mpdConn, args []string) *mpdError {
 func cmdShuffle(c *mpdConn, args []string) *mpdError {
 	a := c.app
 	a.playQueueMu.Lock()
-	defer a.playQueueMu.Unlock()
 
 	qLen := len(a.playQueue)
 	if qLen < 2 {
+		a.playQueueMu.Unlock()
 		return nil
 	}
 
@@ -918,7 +970,9 @@ func cmdShuffle(c *mpdConn, args []string) *mpdError {
 
 	// Resync target with new queue order
 	_ = curID // suppress unused warning
-	a.syncTarget()
+	plan := a.planSyncTarget()
+	a.playQueueMu.Unlock()
+	a.execSyncPlan(plan)
 	a.mpdHub.notify(SubPlaylist)
 	return nil
 }
@@ -938,7 +992,6 @@ func cmdPrio(c *mpdConn, args []string) *mpdError {
 	}
 	a := c.app
 	a.playQueueMu.Lock()
-	defer a.playQueueMu.Unlock()
 
 	qLen := len(a.playQueue)
 	for len(a.queuePriority) < qLen {
@@ -948,6 +1001,7 @@ func cmdPrio(c *mpdConn, args []string) *mpdError {
 	for _, rangeArg := range args[1:] {
 		start, end, err := parseRange(rangeArg, qLen)
 		if err != nil {
+			a.playQueueMu.Unlock()
 			return mpdErr(errArg, "prio", err.Error())
 		}
 		for i := start; i < end; i++ {
@@ -956,7 +1010,9 @@ func cmdPrio(c *mpdConn, args []string) *mpdError {
 	}
 	a.queueVersion++
 	a.savePlayQueue()
-	a.syncNextTrack()
+	plan := a.planNextTrack()
+	a.playQueueMu.Unlock()
+	a.execNextTrackPlan(plan)
 	a.mpdHub.notify(SubPlaylist)
 	return nil
 }
@@ -972,7 +1028,6 @@ func cmdPrioID(c *mpdConn, args []string) *mpdError {
 	}
 	a := c.app
 	a.playQueueMu.Lock()
-	defer a.playQueueMu.Unlock()
 
 	qLen := len(a.playQueue)
 	for len(a.queuePriority) < qLen {
@@ -982,17 +1037,29 @@ func cmdPrioID(c *mpdConn, args []string) *mpdError {
 	for _, idStr := range args[1:] {
 		mpdID, err := strconv.Atoi(idStr)
 		if err != nil {
+			a.playQueueMu.Unlock()
 			return mpdErr(errArg, "prioid", "invalid id")
 		}
-		pos := a.queuePosByMPDID(mpdID)
+		// Inline search instead of calling queuePosByMPDID which would
+		// deadlock by trying to re-lock playQueueMu.
+		pos := -1
+		for i, id := range a.queueIDs {
+			if id == mpdID {
+				pos = i
+				break
+			}
+		}
 		if pos < 0 {
+			a.playQueueMu.Unlock()
 			return mpdErr(errNoExist, "prioid", "song not found")
 		}
 		a.queuePriority[pos] = prio
 	}
 	a.queueVersion++
 	a.savePlayQueue()
-	a.syncNextTrack()
+	plan := a.planNextTrack()
+	a.playQueueMu.Unlock()
+	a.execNextTrackPlan(plan)
 	a.mpdHub.notify(SubPlaylist)
 	return nil
 }
@@ -1919,15 +1986,10 @@ func cmdWebRegister(c *mpdConn, args []string) *mpdError {
 	if wasActive {
 		// Re-registering the already-active web device: load 2-track window
 		a.playQueueMu.Lock()
-		a.syncTarget()
+		plan := a.planSyncTarget()
 		a.playQueueMu.Unlock()
+		a.execSyncPlan(plan)
 		_ = wt.setProperty("pause", false)
-	} else if a.activeDevice == "" || a.activeDevice == "local" {
-		// Only auto-switch to web if no other device is active.
-		// Don't steal playback from a running agent.
-		if err := a.switchDevice(devID); err != nil {
-			a.logger.Printf("web client auto-switch failed: %v", err)
-		}
 	}
 
 	a.mpdHub.notify(SubOutput)
@@ -2012,7 +2074,7 @@ func cmdReplayGainMode(c *mpdConn, args []string) *mpdError {
 		return mpdErr(errArg, "replay_gain_mode", "need mode argument")
 	}
 	mode := args[0]
-	c.app.cfg.MPV.ReplayGain = mode
+	c.app.cfg.Player.ReplayGain = mode
 	// Push to the currently active target
 	t := c.app.target()
 	_ = t.setProperty("replaygain", mode)
@@ -2021,7 +2083,7 @@ func cmdReplayGainMode(c *mpdConn, args []string) *mpdError {
 }
 
 func cmdReplayGainStatus(c *mpdConn, args []string) *mpdError {
-	mode := c.app.cfg.MPV.ReplayGain
+	mode := c.app.cfg.Player.ReplayGain
 	if mode == "" {
 		mode = "off"
 	}
@@ -2030,18 +2092,10 @@ func cmdReplayGainStatus(c *mpdConn, args []string) *mpdError {
 }
 
 // cmdTrackEnded is called by clients (web, Android, melody-agent) when a track
-// finishes naturally. Only honoured when the active device is non-local, since
-// local mpv track endings are handled by watchMPVEvents.
+// cmdTrackEnded is sent by web clients when a track finishes naturally.
+// Agent targets use agent_advance instead.
 func cmdTrackEnded(c *mpdConn, args []string) *mpdError {
-	a := c.app
-	a.devicesMu.RLock()
-	active := a.activeDevice
-	a.devicesMu.RUnlock()
-	if active == "" || active == "local" {
-		// Local mpv uses event-driven advancement; ignore stray trackended.
-		return nil
-	}
-	a.advanceTrack()
+	c.app.advanceTrack()
 	return nil
 }
 
@@ -2053,8 +2107,9 @@ func cmdRepeat(c *mpdConn, args []string) *mpdError {
 	a.modeRepeat = args[0] == "1"
 	// Resync preloaded next track since mode affects nextQueuePos
 	a.playQueueMu.Lock()
-	a.syncNextTrack()
+	plan := a.planNextTrack()
 	a.playQueueMu.Unlock()
+	a.execNextTrackPlan(plan)
 	a.mpdHub.notify(SubOptions)
 	return nil
 }
@@ -2069,8 +2124,9 @@ func cmdRandom(c *mpdConn, args []string) *mpdError {
 	if a.modeRandom {
 		a.generateShuffle()
 	}
-	a.syncNextTrack()
+	plan := a.planNextTrack()
 	a.playQueueMu.Unlock()
+	a.execNextTrackPlan(plan)
 	a.mpdHub.notify(SubOptions)
 	return nil
 }
@@ -2082,8 +2138,9 @@ func cmdSingle(c *mpdConn, args []string) *mpdError {
 	a := c.app
 	a.modeSingle = args[0] == "1"
 	a.playQueueMu.Lock()
-	a.syncNextTrack()
+	plan := a.planNextTrack()
 	a.playQueueMu.Unlock()
+	a.execNextTrackPlan(plan)
 	a.mpdHub.notify(SubOptions)
 	return nil
 }
@@ -2554,7 +2611,7 @@ func cmdReadLyrics(c *mpdConn, args []string) *mpdError {
 			if text == "" {
 				// Fire off async fetch — client will get a player idle
 				// notification when lyrics arrive and can re-request.
-				go c.app.fetchAndCacheLrclib(absPath, artist, title, album, dur)
+				go c.app.fetchAndCacheLyrics(absPath, artist, title, album, dur)
 			}
 		}
 	}

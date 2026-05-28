@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -48,11 +49,20 @@ func getCachedLrclib(artist, title string) (string, string) {
 	return "", ""
 }
 
-// fetchAndCacheLrclib fetches lyrics from lrclib in the background, caches the
-// result, and notifies clients so they can re-request.
-func (a *app) fetchAndCacheLrclib(absPath, artist, title, album string, dur float64) {
-	a.logger.Printf("lyrics: querying lrclib for %s - %s", artist, title)
-	text, lyricsType := fetchLrclib(artist, title, album, dur)
+// fetchAndCacheLyrics fetches lyrics from NetEase first (synced), then lrclib
+// as fallback, caches the result, and notifies clients so they can re-request.
+func (a *app) fetchAndCacheLyrics(absPath, artist, title, album string, dur float64) {
+	// Try NetEase first (better synced lyrics)
+	a.logger.Printf("lyrics: querying netease for %s - %s", artist, title)
+	text, lyricsType := fetchNetease(artist, title, dur)
+	source := "netease"
+
+	// Fall back to lrclib
+	if text == "" {
+		a.logger.Printf("lyrics: querying lrclib for %s - %s", artist, title)
+		text, lyricsType = fetchLrclib(artist, title, album, dur)
+		source = "lrclib"
+	}
 
 	key := lrclibCacheKey(artist, title)
 	lrclibCacheMu.Lock()
@@ -60,11 +70,11 @@ func (a *app) fetchAndCacheLrclib(absPath, artist, title, album string, dur floa
 	lrclibCacheMu.Unlock()
 
 	if text == "" {
-		a.logger.Printf("lyrics: lrclib returned no results")
+		a.logger.Printf("lyrics: no results from netease or lrclib")
 		return
 	}
 
-	a.logger.Printf("lyrics: lrclib returned %s lyrics (%d bytes)", lyricsType, len(text))
+	a.logger.Printf("lyrics: %s returned %s lyrics (%d bytes)", source, lyricsType, len(text))
 	if a.cfg.Library.SaveLRC {
 		if err := saveLRC(absPath, text); err != nil {
 			a.logger.Printf("lyrics: failed to save .lrc for %s: %v", absPath, err)
@@ -176,4 +186,183 @@ func embedLyrics(trackPath, lyrics, lyricsType string) error {
 	default:
 		return fmt.Errorf("unsupported format: %s", ext)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// NetEase Cloud Music API
+// ---------------------------------------------------------------------------
+
+type neteaseSearchResult struct {
+	Result struct {
+		Songs []struct {
+			ID      int    `json:"id"`
+			Name    string `json:"name"`
+			Artists []struct {
+				Name string `json:"name"`
+			} `json:"artists"`
+			Duration int `json:"duration"` // milliseconds
+		} `json:"songs"`
+	} `json:"result"`
+}
+
+type neteaseLyricResult struct {
+	LRC struct {
+		Lyric string `json:"lyric"`
+	} `json:"lrc"`
+}
+
+func fetchNetease(artist, title string, durationSecs float64) (string, string) {
+	if artist == "" || title == "" {
+		return "", ""
+	}
+
+	query := artist + " " + title
+	resp, err := lrclibClient.PostForm("https://music.163.com/api/search/get", url.Values{
+		"s":      {query},
+		"type":   {"1"},
+		"limit":  {"5"},
+		"offset": {"0"},
+	})
+	if err != nil {
+		return "", ""
+	}
+	defer resp.Body.Close()
+
+	var search neteaseSearchResult
+	if err := json.NewDecoder(resp.Body).Decode(&search); err != nil {
+		return "", ""
+	}
+
+	titleLower := strings.ToLower(title)
+	titleBase := titleLower
+	if idx := strings.Index(titleBase, " ("); idx > 0 {
+		titleBase = titleBase[:idx]
+	}
+	artistLower := strings.ToLower(artist)
+
+	type candidate struct {
+		id    int
+		score int
+	}
+	var best candidate
+	for _, s := range search.Result.Songs {
+		nameLower := strings.ToLower(s.Name)
+		nameBase := nameLower
+		if idx := strings.Index(nameBase, " ("); idx > 0 {
+			nameBase = nameBase[:idx]
+		}
+		titleMatch := nameLower == titleLower ||
+			nameBase == titleLower ||
+			nameLower == titleBase ||
+			nameBase == titleBase
+		if !titleMatch {
+			continue
+		}
+
+		sDur := float64(s.Duration) / 1000.0
+		durDiff := math.Abs(sDur - durationSecs)
+
+		artistMatch := false
+		for _, a := range s.Artists {
+			aLower := strings.ToLower(a.Name)
+			if aLower == artistLower || strings.Contains(artistLower, aLower) || strings.Contains(aLower, artistLower) {
+				artistMatch = true
+				break
+			}
+		}
+
+		score := 0
+		if artistMatch {
+			score += 1000
+		}
+		if durDiff < 5 {
+			score += 100
+		} else if durDiff < 15 {
+			score += 50
+		} else if durDiff < 30 {
+			score += 20
+		}
+		if !artistMatch {
+			continue
+		}
+		if durDiff > 30 {
+			continue
+		}
+		if score > best.score {
+			best = candidate{id: s.ID, score: score}
+		}
+	}
+	if best.id == 0 {
+		return "", ""
+	}
+
+	lyrResp, err := lrclibClient.Get(fmt.Sprintf("https://music.163.com/api/song/lyric?os=osx&id=%d&lv=-1&kv=-1&tv=-1", best.id))
+	if err != nil {
+		return "", ""
+	}
+	defer lyrResp.Body.Close()
+
+	var lyric neteaseLyricResult
+	if err := json.NewDecoder(lyrResp.Body).Decode(&lyric); err != nil {
+		return "", ""
+	}
+
+	lrc := strings.TrimSpace(lyric.LRC.Lyric)
+	if lrc == "" {
+		return "", ""
+	}
+
+	// Strip metadata lines and check we have real lyrics
+	var cleaned []string
+	lyricLineCount := 0
+	for _, line := range strings.Split(lrc, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			cleaned = append(cleaned, line)
+			continue
+		}
+		if !strings.HasPrefix(trimmed, "[") {
+			cleaned = append(cleaned, line)
+			continue
+		}
+		if len(trimmed) > 1 {
+			inner := trimmed[1:]
+			if idx := strings.Index(inner, "]"); idx > 0 {
+				tag := inner[:idx]
+				if strings.Contains(tag, ":") && !strings.ContainsAny(tag[:strings.Index(tag, ":")], "0123456789") {
+					continue
+				}
+				content := strings.TrimSpace(inner[idx+1:])
+				if neteaseIsMetadata(content) {
+					continue
+				}
+			}
+		}
+		cleaned = append(cleaned, line)
+		lyricLineCount++
+	}
+	if lyricLineCount < 3 {
+		return "", ""
+	}
+
+	return strings.TrimSpace(strings.Join(cleaned, "\n")), "synced"
+}
+
+func neteaseIsMetadata(s string) bool {
+	lower := strings.ToLower(s)
+	if strings.Contains(s, " : ") || strings.Contains(s, "：") {
+		return true
+	}
+	prefixes := []string{
+		"作曲", "作词", "编曲", "制作", "混音", "录音", "母带", "出品", "监制",
+		"composed by", "arranged by", "written by", "lyrics by", "music by",
+		"produced by", "mixed by", "recorded by", "mastered by",
+		"edited", "siwon",
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) || strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return false
 }

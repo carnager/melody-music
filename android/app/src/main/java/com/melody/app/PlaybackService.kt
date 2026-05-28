@@ -13,7 +13,21 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import okhttp3.*
+import java.util.concurrent.TimeUnit
+
+/**
+ * Queue item synced from server via playlistinfo.
+ */
+private data class QueueEntry(
+    val position: Int,
+    val file: String,       // relative path (e.g. "Artist/Album/Track.flac")
+    val songId: String,     // X-SongId from DB
+    val duration: Double,
+    val rgTrack: Double,
+    val rgAlbum: Double
+)
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class PlaybackService : Service() {
@@ -22,18 +36,25 @@ class PlaybackService : Service() {
     private var agentJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
+    // Queue state (synced from server)
+    @Volatile private var queue: List<QueueEntry> = emptyList()
+    @Volatile private var curPos: Int = -1
+    @Volatile private var pendingNextPos: Int = -1
+
     // Track which playlist indices are playing from offline cache
     private val offlineIndexes = mutableSetOf<Int>()
-    // Offset in seconds from start= parameter (ffmpeg -ss). ExoPlayer's position 0
-    // corresponds to this offset in the actual track.
-    @Volatile var streamStartOffset: Double = 0.0
+    // Offset for transcoded streams where ExoPlayer position 0 = this offset in the real track
+    @Volatile private var streamStartOffset: Double = 0.0
 
     @Volatile var codecInfo: String = ""
         private set
     @Volatile private var replaygainMode: String = "off"
     @Volatile private var rgTrackGain: Double = 0.0
     @Volatile private var rgAlbumGain: Double = 0.0
-    @Volatile private var userVolume: Float = 1.0f  // volume set by server (0..1)
+    @Volatile private var userVolume: Float = 1.0f
+
+    // State reporter job
+    private var stateReporterJob: Job? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -67,40 +88,52 @@ class PlaybackService : Service() {
             p.addListener(object : Player.Listener {
                 override fun onPlaybackStateChanged(state: Int) {
                     if (state == Player.STATE_READY) updateCodecInfo()
-                    if (state == Player.STATE_ENDED) {
-                        // Last track in the 2-track window finished — notify server
-                        sendTrackEnded()
+                    if (state == Player.STATE_ENDED && p.mediaItemCount <= 1) {
+                        // Only advance on STATE_ENDED when there's no next item to
+                        // auto-transition to. With a preloaded next track,
+                        // onMediaItemTransition(REASON_AUTO) handles it instead.
+                        sendAgentAdvance()
                     }
                 }
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                    // Reset offset on natural track changes (end of track -> next)
                     if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
+                        val oldPos = curPos
                         streamStartOffset = 0.0
-                        // Notify server that the track ended so it advances its queue
-                        sendTrackEnded()
+                        // The preloaded next track is now playing — advance curPos.
+                        // Server will send the definitive position via the next play command.
+                        curPos = pendingNextPos
+                        // Update replay gain for the new track
+                        val q = queue
+                        if (curPos in 0 until q.size) {
+                            val entry = q.firstOrNull { it.position == curPos }
+                            if (entry != null) {
+                                rgTrackGain = entry.rgTrack
+                                rgAlbumGain = entry.rgAlbum
+                                applyReplayGain(p)
+                            }
+                        }
+                        sendToServer("agent_advance $oldPos")
                     }
                     updateCodecInfo()
-                    fetchAndApplyReplayGain()
                 }
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                     android.util.Log.e("PlaybackService", "ExoPlayer error: ${error.errorCodeName} — ${error.message}")
                 }
             })
         }
-        android.util.Log.d("PlaybackService", "ExoPlayer initialized")
         val prefs = getSharedPreferences("melody", MODE_PRIVATE)
         replaygainMode = prefs.getString("replaygain", "off") ?: "off"
         registerAgent()
     }
 
-    private fun sendTrackEnded() {
-        scope.launch {
-            try {
-                MelodyApp.instance.mpd.cmd("trackended")
-            } catch (e: Exception) {
-                android.util.Log.e("PlaybackService", "trackended failed: ${e.message}")
-            }
-        }
+    private fun sendAgentAdvance() {
+        val pos = curPos
+        sendToServer("agent_advance $pos")
+    }
+
+    private fun sendToServer(msg: String) {
+        val ws = agentWs ?: return
+        ws.send("$msg\n")
     }
 
     private fun updateCodecInfo() {
@@ -122,6 +155,7 @@ class PlaybackService : Service() {
 
         agentWs?.close(1000, "reconnecting")
         agentJob?.cancel()
+        stateReporterJob?.cancel()
 
         agentJob = scope.launch {
             val prefs = getSharedPreferences("melody", MODE_PRIVATE)
@@ -145,13 +179,12 @@ class PlaybackService : Service() {
             } catch (e: Exception) {
                 android.util.Log.e("PlaybackService", "Agent connection error: ${e.message}")
             } finally {
-                // Server disconnected — stop streamed playback but keep offline tracks.
+                stateReporterJob?.cancel()
                 withContext(Dispatchers.Main) {
                     val p = player
                     if (p != null && !isCurrentTrackOffline) {
                         p.stop()
                         p.clearMediaItems()
-                        streamStartOffset = 0.0
                         offlineIndexes.clear()
                     }
                 }
@@ -167,19 +200,17 @@ class PlaybackService : Service() {
         val wsScheme = if (app.mpd.useSSL) "wss" else "ws"
         val wsUrl = "$wsScheme://$host:$port/mpd"
 
-        val lineChannel = kotlinx.coroutines.channels.Channel<String>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        val lineChannel = Channel<String>(Channel.UNLIMITED)
         val connected = CompletableDeferred<Boolean>()
 
         val client = OkHttpClient.Builder()
-            .readTimeout(0, java.util.concurrent.TimeUnit.SECONDS)
-            .pingInterval(30, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(0, TimeUnit.SECONDS)
+            .pingInterval(30, TimeUnit.SECONDS)
             .build()
         val request = Request.Builder().url(wsUrl).build()
 
         val ws = client.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) {
-                android.util.Log.d("PlaybackService", "Agent WebSocket connected")
-            }
+            override fun onOpen(webSocket: WebSocket, response: Response) {}
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 text.lines().filter { it.isNotEmpty() }.forEach { line ->
@@ -194,7 +225,6 @@ class PlaybackService : Service() {
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                android.util.Log.d("PlaybackService", "Agent WebSocket closed: $reason")
                 lineChannel.close()
             }
         })
@@ -207,8 +237,9 @@ class PlaybackService : Service() {
             return
         }
 
+        // Register as v2 autonomous agent
         val regCmd = buildString {
-            append("agent_register ${mpdQuote(name)}")
+            append("agent_register ${mpdQuote(name)} v2")
             if (format.isNotBlank()) append(" format=${mpdQuote(format)}")
             if (bitrate > 0) append(" max_bitrate=$bitrate")
         }
@@ -220,43 +251,412 @@ class PlaybackService : Service() {
             ws.close(1000, "register failed")
             return
         }
-        android.util.Log.d("PlaybackService", "Agent registered as $name")
+
+        // Start periodic state reporter
+        stateReporterJob = scope.launch {
+            while (true) {
+                delay(2000)
+                reportState()
+            }
+        }
 
         // If resume-on-connect is enabled, tell server to unpause via the MpdClient
         val prefs = getSharedPreferences("melody", MODE_PRIVATE)
         if (prefs.getBoolean("resume_on_connect", false)) {
-            try {
-                MelodyApp.instance.mpd.resume()
-            } catch (e: Exception) {
-                android.util.Log.e("PlaybackService", "Resume-on-connect failed: ${e.message}")
+            scope.launch {
+                try {
+                    MelodyApp.instance.mpd.resume()
+                } catch (_: Exception) {}
             }
         }
 
+        // Command loop
         for (line in lineChannel) {
             if (line.isBlank()) continue
             val response = handleAgentCommand(line)
             ws.send("$response\n")
         }
-
-        android.util.Log.d("PlaybackService", "Agent connection ended")
     }
 
-    /** Check if a URL has transcoding parameters (format/max_bitrate). */
+    // ---- v2 command handling ----
+
+    private suspend fun handleAgentCommand(line: String): String {
+        val parts = parseCommand(line)
+        val cmd = parts.first
+        val args = parts.second
+
+        if (cmd == "ping") return "OK"
+
+        return when (cmd) {
+            "play" -> handlePlay(args)
+            "preload" -> handlePreload(args)
+            "pause" -> {
+                withContext(Dispatchers.Main) { player?.pause() }
+                "OK"
+            }
+            "resume" -> {
+                withContext(Dispatchers.Main) {
+                    val p = player ?: return@withContext
+                    if (p.playbackState == Player.STATE_IDLE && p.mediaItemCount > 0) p.prepare()
+                    p.play()
+                }
+                "OK"
+            }
+            "stop" -> {
+                withContext(Dispatchers.Main) {
+                    player?.stop()
+                    player?.clearMediaItems()
+                }
+                curPos = -1
+                "OK"
+            }
+            "seek" -> {
+                if (args.isEmpty()) return "ACK [2@0] {seek} missing seconds"
+                val secs = args[0].toDoubleOrNull() ?: 0.0
+                withContext(Dispatchers.Main) {
+                    val p = player ?: return@withContext
+                    val currentUri = p.currentMediaItem?.localConfiguration?.uri?.toString() ?: ""
+                    if (isTranscodedUrl(currentUri)) {
+                        streamStartOffset = secs
+                        reloadWithOffset(p, currentUri, secs)
+                    } else {
+                        streamStartOffset = 0.0
+                        p.seekTo((secs * 1000).toLong())
+                    }
+                }
+                "OK"
+            }
+            "volume" -> {
+                if (args.isEmpty()) return "ACK [2@0] {volume} missing level"
+                val vol = args[0].toDoubleOrNull() ?: 100.0
+                userVolume = (vol / 100.0).toFloat().coerceIn(0f, 1f)
+                withContext(Dispatchers.Main) { player?.let { applyReplayGain(it) } }
+                "OK"
+            }
+            "replaygain" -> {
+                if (args.isEmpty()) return "ACK [2@0] {replaygain} missing mode"
+                replaygainMode = args[0]
+                withContext(Dispatchers.Main) { player?.let { applyReplayGain(it) } }
+                "OK"
+            }
+            "queue_changed" -> {
+                try {
+                    syncQueue()
+                } catch (e: Exception) {
+                    return "ACK [56@0] {queue_changed} ${e.message}"
+                }
+                "OK"
+            }
+            "get_property" -> {
+                if (args.isEmpty()) return "ACK [2@0] {get_property} missing name"
+                handleGetProperty(args[0])
+            }
+            "set_property" -> {
+                if (args.size < 2) return "ACK [2@0] {set_property} missing arguments"
+                handleSetProperty(args[0], args[1])
+            }
+            else -> "ACK [5@0] {$cmd} unknown command"
+        }
+    }
+
+    private suspend fun handlePlay(args: List<String>): String {
+        if (args.isEmpty()) return "ACK [2@0] {play} missing queue position"
+
+        val pos = args[0].toIntOrNull() ?: return "ACK [2@0] {play} invalid position"
+
+        var nextPos = -1
+        var seekPos = -1.0
+        for (arg in args.drop(1)) {
+            when {
+                arg.startsWith("next=") -> nextPos = arg.removePrefix("next=").toIntOrNull() ?: -1
+                arg.startsWith("seek=") -> seekPos = arg.removePrefix("seek=").toDoubleOrNull() ?: -1.0
+            }
+        }
+
+        val q = queue
+        if (pos < 0 || pos >= q.size) return "ACK [50@0] {play} position $pos out of range"
+
+        val item = q[pos]
+        val url = resolveStreamUrl(item) ?: return "ACK [50@0] {play} cannot resolve URL for position $pos"
+
+        return withContext(Dispatchers.Main) {
+            val p = player ?: return@withContext "ACK [56@0] {play} player not initialized"
+
+            offlineIndexes.clear()
+            val songId = item.songId
+            val localPath = if (songId.isNotBlank()) MelodyApp.instance.offlineManager.getLocalPath(songId) else null
+            val resolvedUrl = localPath ?: url
+            val isOffline = localPath != null
+
+            streamStartOffset = 0.0
+            p.stop()
+            p.clearMediaItems()
+
+            // Build media items list: current + optional next
+            val mediaItems = mutableListOf<MediaItem>()
+            val startPositionMs: Long
+
+            if (seekPos > 0 && isTranscodedUrl(resolvedUrl)) {
+                // Transcoded streams: seek via URL parameter
+                streamStartOffset = seekPos
+                mediaItems.add(MediaItem.fromUri(urlWithStart(resolvedUrl, seekPos)))
+                startPositionMs = C.TIME_UNSET
+            } else {
+                mediaItems.add(MediaItem.fromUri(resolvedUrl))
+                startPositionMs = if (seekPos > 0) (seekPos * 1000).toLong() else C.TIME_UNSET
+            }
+            if (isOffline) offlineIndexes.add(0)
+
+            // Preload next track
+            if (nextPos in 0 until q.size) {
+                val nextItem = q[nextPos]
+                val nextLocalPath = if (nextItem.songId.isNotBlank()) MelodyApp.instance.offlineManager.getLocalPath(nextItem.songId) else null
+                val nextUrl = nextLocalPath ?: resolveStreamUrl(nextItem)
+                if (nextUrl != null) {
+                    if (nextLocalPath != null) offlineIndexes.add(1)
+                    mediaItems.add(MediaItem.fromUri(nextUrl))
+                }
+            }
+
+            // Apply replay gain for this track
+            rgTrackGain = item.rgTrack
+            rgAlbumGain = item.rgAlbum
+            applyReplayGain(p)
+
+            // Use setMediaItems with start position — ExoPlayer respects this
+            // before prepare, unlike seekTo which can be ignored
+            p.setMediaItems(mediaItems, 0, startPositionMs)
+            p.prepare()
+            p.play()
+
+            curPos = pos
+            pendingNextPos = nextPos
+
+            "OK"
+        }
+    }
+
+    private suspend fun handlePreload(args: List<String>): String {
+        if (args.isEmpty()) return "ACK [2@0] {preload} missing queue position"
+
+        val pos = args[0].toIntOrNull() ?: return "ACK [2@0] {preload} invalid position"
+        val q = queue
+        if (pos < 0 || pos >= q.size) return "ACK [50@0] {preload} position $pos out of range"
+
+        val item = q[pos]
+        val localPath = if (item.songId.isNotBlank()) MelodyApp.instance.offlineManager.getLocalPath(item.songId) else null
+        val url = localPath ?: resolveStreamUrl(item) ?: return "ACK [50@0] {preload} cannot resolve URL for position $pos"
+
+        return withContext(Dispatchers.Main) {
+            val p = player ?: return@withContext "ACK [56@0] {preload} player not initialized"
+
+            // Remove finished items before current and preloaded items after current
+            val cur = p.currentMediaItemIndex
+            // Remove items after current first
+            while (p.mediaItemCount > cur + 1) {
+                p.removeMediaItem(p.mediaItemCount - 1)
+            }
+            // Remove finished items before current
+            if (cur > 0) {
+                for (i in 0 until cur) {
+                    p.removeMediaItem(0)
+                }
+                offlineIndexes.clear()
+            }
+
+            p.addMediaItem(MediaItem.fromUri(url))
+
+            "OK"
+        }
+    }
+
+    private suspend fun handleGetProperty(name: String): String {
+        return withContext(Dispatchers.Main) {
+            val p = player ?: return@withContext "ACK [56@0] {get_property} player not initialized"
+            val value = when (name) {
+                "pause" -> (!p.playWhenReady || p.playbackState == Player.STATE_IDLE).toString()
+                "time-pos" -> (p.currentPosition / 1000.0 + streamStartOffset).toString()
+                "duration" -> {
+                    val d = p.duration
+                    if (d != C.TIME_UNSET) (d / 1000.0 + streamStartOffset).toString() else "0.0"
+                }
+                "volume" -> (userVolume * 100).toInt().toString()
+                else -> return@withContext "ACK [56@0] {get_property} unknown property: $name"
+            }
+            "value: $value\nOK"
+        }
+    }
+
+    private suspend fun handleSetProperty(name: String, value: String): String {
+        return withContext(Dispatchers.Main) {
+            val p = player ?: return@withContext "ACK [56@0] {set_property} player not initialized"
+            when (name) {
+                "pause" -> {
+                    if (value == "true" || value == "1" || value == "yes") {
+                        p.pause()
+                    } else {
+                        if (p.playbackState == Player.STATE_IDLE && p.mediaItemCount > 0) p.prepare()
+                        p.play()
+                    }
+                }
+                "time-pos" -> {
+                    val secs = value.toDoubleOrNull() ?: 0.0
+                    val currentUri = p.currentMediaItem?.localConfiguration?.uri?.toString() ?: ""
+                    if (isTranscodedUrl(currentUri)) {
+                        streamStartOffset = secs
+                        reloadWithOffset(p, currentUri, secs)
+                    } else {
+                        streamStartOffset = 0.0
+                        p.seekTo((secs * 1000).toLong())
+                    }
+                }
+                "volume" -> {
+                    val vol = value.toDoubleOrNull() ?: 100.0
+                    userVolume = (vol / 100.0).toFloat().coerceIn(0f, 1f)
+                    applyReplayGain(p)
+                }
+                "replaygain" -> {
+                    replaygainMode = value
+                    applyReplayGain(p)
+                }
+            }
+            "OK"
+        }
+    }
+
+    // ---- State reporting ----
+
+    private suspend fun reportState() {
+        val msg = withContext(Dispatchers.Main) {
+            val p = player ?: return@withContext null
+            val st = when {
+                p.playbackState == Player.STATE_IDLE || p.mediaItemCount == 0 -> "stop"
+                !p.playWhenReady -> "pause"
+                else -> "play"
+            }
+            val e = p.currentPosition / 1000.0 + streamStartOffset
+            val d = if (p.duration != C.TIME_UNSET) p.duration / 1000.0 + streamStartOffset else 0.0
+            val v = userVolume * 100.0
+            String.format(java.util.Locale.US, "agent_state %s %d %.3f %.3f %.0f", st, curPos, e, d, v)
+        }
+        if (msg != null) sendToServer(msg)
+    }
+
+    // ---- Queue sync ----
+
+    /**
+     * Sync queue by opening a dedicated short-lived WebSocket connection.
+     * This avoids deadlocks: the agent command loop can't use MpdClient
+     * because MpdClient may be blocked waiting for a server response that
+     * itself is blocked waiting for this agent to respond.
+     */
+    private suspend fun syncQueue() {
+        val app = MelodyApp.instance
+        val host = app.mpd.serverHost
+        val port = app.mpd.serverPort
+        val wsScheme = if (app.mpd.useSSL) "wss" else "ws"
+        val wsUrl = "$wsScheme://$host:$port/mpd"
+
+        val linesCh = Channel<String>(Channel.UNLIMITED)
+        val client = OkHttpClient.Builder()
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .build()
+        val request = Request.Builder().url(wsUrl).build()
+
+        val ws = client.newWebSocket(request, object : WebSocketListener() {
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                text.split('\n').filter { it.isNotEmpty() }.forEach { linesCh.trySend(it) }
+            }
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                linesCh.close()
+            }
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                linesCh.close()
+            }
+        })
+
+        try {
+            withTimeout(10000) {
+                // Read greeting
+                val greeting = linesCh.receive()
+                if (!greeting.startsWith("OK MPD")) {
+                    throw Exception("bad greeting: $greeting")
+                }
+
+                // Send playlistinfo
+                ws.send("playlistinfo\n")
+
+                // Read response
+                val items = mutableListOf<QueueEntry>()
+                var current = mutableMapOf<String, String>()
+
+                while (true) {
+                    val line = linesCh.receive()
+                    if (line == "OK") break
+                    if (line.startsWith("ACK")) throw Exception(line)
+
+                    val idx = line.indexOf(": ")
+                    if (idx < 0) continue
+                    val k = line.substring(0, idx)
+                    val v = line.substring(idx + 2)
+
+                    if (k == "file" && current.isNotEmpty()) {
+                        items.add(parseQueueEntry(current))
+                        current = mutableMapOf()
+                    }
+                    current[k] = v
+                }
+                if (current.containsKey("file")) {
+                    items.add(parseQueueEntry(current))
+                }
+
+                queue = items
+            }
+        } finally {
+            ws.close(1000, "done")
+            client.dispatcher.executorService.shutdown()
+        }
+    }
+
+    private fun parseQueueEntry(kv: Map<String, String>): QueueEntry {
+        return QueueEntry(
+            position = kv["Pos"]?.toIntOrNull() ?: 0,
+            file = kv["file"] ?: "",
+            songId = kv["X-SongId"] ?: "",
+            duration = kv["duration"]?.toDoubleOrNull() ?: kv["Time"]?.toDoubleOrNull() ?: 0.0,
+            rgTrack = kv["X-ReplayGainTrack"]?.toDoubleOrNull() ?: 0.0,
+            rgAlbum = kv["X-ReplayGainAlbum"]?.toDoubleOrNull() ?: 0.0
+        )
+    }
+
+    // ---- URL resolution ----
+
+    private fun resolveStreamUrl(item: QueueEntry): String? {
+        if (item.songId.isBlank()) return null
+
+        // Check offline cache first
+        val localPath = MelodyApp.instance.offlineManager.getLocalPath(item.songId)
+        if (localPath != null) return localPath
+
+        // Build HTTP stream URL
+        val mpd = MelodyApp.instance.mpd
+        return "${mpd.httpBaseUrl}/stream/${item.songId}"
+    }
+
+    // ---- Transcoding helpers ----
+
     private fun isTranscodedUrl(url: String): Boolean {
         val uri = android.net.Uri.parse(url)
         return !uri.getQueryParameter("format").isNullOrBlank() ||
                (uri.getQueryParameter("max_bitrate")?.toIntOrNull() ?: 0) > 0
     }
 
-    /** Reload the current transcoded stream at a new offset (Subsonic-style seek). */
     private fun reloadWithOffset(p: ExoPlayer, currentUri: String, seekSecs: Double) {
         val newUrl = urlWithStart(currentUri, seekSecs)
         val idx = p.currentMediaItemIndex
         val wasPlaying = p.playWhenReady
-        streamStartOffset = seekSecs
 
-        // Rebuild entire playlist with new URL at current index.
-        // This guarantees ExoPlayer creates a fresh media source and HTTP request.
         val items = mutableListOf<MediaItem>()
         for (i in 0 until p.mediaItemCount) {
             if (i == idx) {
@@ -272,11 +672,9 @@ class PlaybackService : Service() {
         if (wasPlaying) p.play()
     }
 
-    /** Build a new URL with start= offset, replacing any existing start= param. */
     private fun urlWithStart(url: String, startSecs: Double): String {
         val uri = android.net.Uri.parse(url)
         val builder = uri.buildUpon().clearQuery()
-        // Copy all params except start=
         uri.queryParameterNames.forEach { key ->
             if (key != "start") builder.appendQueryParameter(key, uri.getQueryParameter(key))
         }
@@ -284,242 +682,6 @@ class PlaybackService : Service() {
             builder.appendQueryParameter("start", String.format(java.util.Locale.US, "%.3f", startSecs))
         }
         return builder.build().toString()
-    }
-
-    private suspend fun handleAgentCommand(line: String): String {
-        val parts = parseCommand(line)
-        val cmd = parts.first
-        val args = parts.second
-
-        if (cmd == "ping") return "OK"
-
-        return withContext(Dispatchers.Main) {
-            val p = player ?: return@withContext "ACK [56@0] {$cmd} player not initialized"
-
-            when (cmd) {
-                "loadfile" -> {
-                    if (args.size < 2) return@withContext "ACK [2@0] {loadfile} missing arguments"
-                    val url = args[0]
-                    val mode = args[1]
-                    val songId = extractSongIdFromUrl(url)
-                    val localPath = if (songId.isNotBlank()) MelodyApp.instance.offlineManager.getLocalPath(songId) else null
-                    val isOffline = localPath != null
-                    val resolvedUrl = localPath ?: resolveUrl(url, songId)
-
-                    // Parse start= offset from URL (baked in by server for transcoded handoff)
-                    val startParam = android.net.Uri.parse(url).getQueryParameter("start")
-                    val startOffset = startParam?.toDoubleOrNull() ?: 0.0
-
-                    when (mode) {
-                        "replace" -> {
-                            offlineIndexes.clear()
-                            // Offline files: ExoPlayer can seek natively, no offset hack needed
-                            streamStartOffset = if (isOffline) 0.0 else startOffset
-                            if (isOffline) offlineIndexes.add(0)
-                            p.pause()
-                            p.clearMediaItems()
-                            p.addMediaItem(MediaItem.fromUri(resolvedUrl))
-                            p.prepare()
-                        }
-                        "append", "append-play" -> {
-                            val idx = p.mediaItemCount
-                            if (isOffline) offlineIndexes.add(idx)
-                            p.addMediaItem(MediaItem.fromUri(resolvedUrl))
-                            if (p.playbackState == Player.STATE_IDLE) p.prepare()
-                        }
-                    }
-                    "OK"
-                }
-
-                "playlist_clear" -> {
-                    offlineIndexes.clear()
-                    streamStartOffset = 0.0
-                    p.stop()
-                    p.clearMediaItems()
-                    "OK"
-                }
-
-                "playlist_remove" -> {
-                    if (args.isEmpty()) return@withContext "ACK [2@0] {playlist_remove} missing index"
-                    p.removeMediaItem(args[0].toIntOrNull() ?: 0)
-                    "OK"
-                }
-
-                "playlist_move" -> {
-                    if (args.size < 2) return@withContext "ACK [2@0] {playlist_move} missing arguments"
-                    p.moveMediaItem(args[0].toIntOrNull() ?: 0, args[1].toIntOrNull() ?: 0)
-                    "OK"
-                }
-
-                "get_property" -> {
-                    if (args.isEmpty()) return@withContext "ACK [2@0] {get_property} missing name"
-                    val name = args[0]
-                    val value = when (name) {
-                        "pause" -> (!p.playWhenReady).toString()
-                        "time-pos" -> {
-                            val pos = p.currentPosition / 1000.0
-                            (pos + streamStartOffset).toString()
-                        }
-                        "duration" -> {
-                            val d = p.duration
-                            if (d != C.TIME_UNSET) (d / 1000.0 + streamStartOffset).toString() else "0.0"
-                        }
-                        "playlist-pos" -> p.currentMediaItemIndex.toString()
-                        "playlist-count" -> p.mediaItemCount.toString()
-                        "volume" -> (userVolume * 100).toInt().toString()
-                        else -> ""
-                    }
-                    "value: $value\nOK"
-                }
-
-                "set_property" -> {
-                    if (args.size < 2) return@withContext "ACK [2@0] {set_property} missing arguments"
-                    val name = args[0]
-                    val value = args[1]
-                    when (name) {
-                        "pause" -> {
-                            if (value == "true") {
-                                p.pause()
-                            } else {
-                                if (p.playbackState == Player.STATE_IDLE && p.mediaItemCount > 0) {
-                                    p.prepare()
-                                }
-                                p.play()
-                            }
-                        }
-                        "playlist-pos" -> {
-                            streamStartOffset = 0.0
-                            p.seekToDefaultPosition(value.toIntOrNull() ?: 0)
-                        }
-                        "time-pos" -> {
-                            val seekSecs = value.toDoubleOrNull() ?: 0.0
-                            val currentUri = p.currentMediaItem?.localConfiguration?.uri?.toString() ?: ""
-                            if (isTranscodedUrl(currentUri)) {
-                                reloadWithOffset(p, currentUri, seekSecs)
-                            } else {
-                                p.seekTo((seekSecs * 1000).toLong())
-                            }
-                        }
-                        "volume" -> {
-                            val vol = value.toDoubleOrNull() ?: 100.0
-                            userVolume = (vol / 100.0).toFloat().coerceIn(0f, 1f)
-                            applyReplayGain(p)
-                        }
-                        "replaygain" -> {
-                            replaygainMode = value
-                            applyReplayGain(p)
-                            fetchAndApplyReplayGain()
-                        }
-                    }
-                    "OK"
-                }
-
-                "mpv_command" -> {
-                    if (args.isEmpty()) return@withContext "ACK [2@0] {mpv_command} missing command"
-                    when (args[0]) {
-                        "playlist-next" -> {
-                            if (p.currentMediaItemIndex + 1 < p.mediaItemCount) {
-                                streamStartOffset = 0.0
-                                p.seekToDefaultPosition(p.currentMediaItemIndex + 1)
-                            }
-                        }
-                        "playlist-prev" -> {
-                            if (p.currentMediaItemIndex > 0) {
-                                streamStartOffset = 0.0
-                                p.seekToDefaultPosition(p.currentMediaItemIndex - 1)
-                            }
-                        }
-                        "seek" -> {
-                            if (args.size >= 2) {
-                                val seekSecs = args[1].toDoubleOrNull() ?: 0.0
-                                val currentUri = p.currentMediaItem?.localConfiguration?.uri?.toString() ?: ""
-                                if (isTranscodedUrl(currentUri)) {
-                                    reloadWithOffset(p, currentUri, seekSecs)
-                                } else {
-                                    p.seekTo((seekSecs * 1000).toLong())
-                                }
-                            }
-                        }
-                    }
-                    "OK"
-                }
-
-                "handoff" -> {
-                    if (args.size < 3) return@withContext "ACK [2@0] {handoff} missing arguments"
-                    val playlistPos = args[0].toIntOrNull() ?: 0
-                    val timePos = args[1].toDoubleOrNull() ?: 0.0
-                    val paused = args[2] == "true" || args[2] == "1"
-
-                    android.util.Log.d("PlaybackService", "handoff: pos=$playlistPos timePos=$timePos paused=$paused")
-
-                    p.pause()
-                    p.seekToDefaultPosition(playlistPos)
-
-                    // Wait for media to load
-                    for (i in 1..200) {
-                        if (p.playbackState == Player.STATE_READY) break
-                        delay(50)
-                    }
-
-                    if (timePos > 0) {
-                        val currentUri = p.currentMediaItem?.localConfiguration?.uri?.toString() ?: ""
-                        if (isTranscodedUrl(currentUri)) {
-                            // The start= offset is baked into the URL for transcoded streams.
-                            // Ensure streamStartOffset reflects the actual position so the
-                            // seekbar and get_property time-pos report correctly.
-                            val startParam = android.net.Uri.parse(currentUri).getQueryParameter("start")
-                            streamStartOffset = startParam?.toDoubleOrNull() ?: 0.0
-                        } else {
-                            p.seekTo((timePos * 1000).toLong())
-                        }
-                    }
-
-                    if (!paused) {
-                        p.play()
-                        // Wait for playback to actually start
-                        for (i in 1..100) {
-                            if (p.playbackState == Player.STATE_READY && p.playWhenReady) break
-                            if (p.playbackState == Player.STATE_IDLE) break // error occurred
-                            delay(50)
-                        }
-                        if (p.playbackState == Player.STATE_IDLE) {
-                            android.util.Log.e("PlaybackService", "handoff: playback failed to start")
-                        }
-                    } else {
-                        p.pause()
-                    }
-                    android.util.Log.d("PlaybackService", "handoff: done, state=${p.playbackState} offset=$streamStartOffset paused=$paused")
-                    "OK"
-                }
-
-                else -> "ACK [5@0] {$cmd} unknown command"
-            }
-        }
-    }
-
-    private fun extractSongIdFromUrl(url: String): String {
-        val prefix = "/api/v1/stream/"
-        val idx = url.indexOf(prefix)
-        if (idx < 0) return ""
-        val rest = url.substring(idx + prefix.length)
-        return rest.substringBefore("?").substringBefore("/")
-    }
-
-    private fun resolveUrl(url: String, songId: String): String {
-        if (songId.isNotBlank()) {
-            val localPath = MelodyApp.instance.offlineManager.getLocalPath(songId)
-            if (localPath != null) return localPath
-        }
-        // Rewrite stream URL to use the same host/scheme the app is connected to,
-        // so it works over external HTTPS as well as local HTTP.
-        val mpd = MelodyApp.instance.mpd
-        val prefix = "/api/v1/stream/"
-        val idx = url.indexOf(prefix)
-        if (idx >= 0) {
-            val pathAndQuery = url.substring(idx)
-            return "${mpd.httpBaseUrl.removeSuffix("/api/v1")}$pathAndQuery"
-        }
-        return url
     }
 
     val isCurrentTrackOffline: Boolean
@@ -538,31 +700,6 @@ class PlaybackService : Service() {
         p.volume = (userVolume * rgFactor).coerceIn(0f, 1f)
     }
 
-    private fun fetchAndApplyReplayGain() {
-        scope.launch {
-            try {
-                val lines = MelodyApp.instance.mpd.cmd("currentsong")
-                var trackGain = 0.0
-                var albumGain = 0.0
-                for (line in lines) {
-                    when {
-                        line.startsWith("X-ReplayGainTrack: ") ->
-                            trackGain = line.substringAfter(": ").toDoubleOrNull() ?: 0.0
-                        line.startsWith("X-ReplayGainAlbum: ") ->
-                            albumGain = line.substringAfter(": ").toDoubleOrNull() ?: 0.0
-                    }
-                }
-                rgTrackGain = trackGain
-                rgAlbumGain = albumGain
-                withContext(Dispatchers.Main) {
-                    player?.let { applyReplayGain(it) }
-                }
-            } catch (e: Exception) {
-                android.util.Log.e("PlaybackService", "Failed to fetch RG data: ${e.message}")
-            }
-        }
-    }
-
     companion object {
         var instance: PlaybackService? = null
             private set
@@ -573,6 +710,7 @@ class PlaybackService : Service() {
     }
 
     override fun onDestroy() {
+        stateReporterJob?.cancel()
         agentWs?.close(1000, "service destroyed")
         agentJob?.cancel()
         scope.cancel()

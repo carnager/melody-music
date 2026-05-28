@@ -496,7 +496,7 @@ class MainViewModel : ViewModel() {
     fun togglePlay() {
         viewModelScope.launch {
             try {
-                if (status?.state == "playing") mpd.pause() else mpd.resume()
+                if (status?.state == "playing") mpd.pause() else mpd.cmd("play")
                 refresh()
             } catch (_: Exception) {}
         }

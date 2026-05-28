@@ -488,6 +488,44 @@ func (m *musicDB) trackPathByID(id int64) (string, error) {
 	return path, err
 }
 
+// trackPlayInfoByIDs fetches path, duration, and replay gain for multiple
+// track IDs in a single query. Returns a map keyed by track ID.
+type trackPlayInfo struct {
+	Path    string
+	Duration float64
+	RGTrack  float64
+	RGAlbum  float64
+}
+
+func (m *musicDB) trackPlayInfoByIDs(ids []int64) (map[int64]trackPlayInfo, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := `SELECT id, path, duration, replay_gain_track, replay_gain_album
+		FROM tracks WHERE id IN (` + strings.Join(placeholders, ",") + `)`
+	rows, err := m.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[int64]trackPlayInfo, len(ids))
+	for rows.Next() {
+		var id int64
+		var info trackPlayInfo
+		if err := rows.Scan(&id, &info.Path, &info.Duration, &info.RGTrack, &info.RGAlbum); err != nil {
+			continue
+		}
+		result[id] = info
+	}
+	return result, nil
+}
+
 func (m *musicDB) trackByPath(path string) (map[string]any, error) {
 	return m.scanTrackRow(m.db.QueryRow(`SELECT t.id, t.album_id, t.artist, t.title,
 		t.track_number, t.disc_number, t.duration, t.path,

@@ -5,7 +5,6 @@ import (
 	"crypto/subtle"
 	"embed"
 	"encoding/hex"
-	"fmt"
 	"io/fs"
 	"net/http"
 	"sync"
@@ -146,52 +145,6 @@ func (wt *webTarget) setProperty(name string, value any) error {
 		}
 	}
 	return nil
-}
-
-func (wt *webTarget) command(args ...any) (*mpvResponse, error) {
-	if len(args) == 0 {
-		return nil, fmt.Errorf("empty command")
-	}
-	cmd := fmt.Sprintf("%v", args[0])
-	switch cmd {
-	case "playlist-next":
-		wt.mu.Lock()
-		if wt.playlistPos+1 < len(wt.playlist) {
-			wt.playlistPos++
-			wt.timePos = 0
-		}
-		wt.mu.Unlock()
-		return &mpvResponse{}, nil
-	case "playlist-prev":
-		wt.mu.Lock()
-		if wt.playlistPos > 0 {
-			wt.playlistPos--
-			wt.timePos = 0
-		}
-		wt.mu.Unlock()
-		return &mpvResponse{}, nil
-	case "playlist-clear":
-		return &mpvResponse{}, wt.playlistClear()
-	case "playlist-move":
-		if len(args) >= 3 {
-			return &mpvResponse{}, wt.playlistMove(intFromAny(args[1], 0), intFromAny(args[2], 0))
-		}
-		return &mpvResponse{}, nil
-	default:
-		return &mpvResponse{}, nil
-	}
-}
-
-func (wt *webTarget) commandBatch(cmds [][]any) ([]*mpvResponse, error) {
-	var results []*mpvResponse
-	for _, cmd := range cmds {
-		resp, err := wt.command(cmd...)
-		if err != nil {
-			return results, err
-		}
-		results = append(results, resp)
-	}
-	return results, nil
 }
 
 func (wt *webTarget) isRunning() bool {

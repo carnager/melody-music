@@ -56,22 +56,28 @@ func (h *notifyHub) notify(subsystems ...string) {
 		c.idleMu.Lock()
 		if c.idling {
 			// Check if this client is watching any of the changed subsystems
-			matched := false
+			var matched []string
 			if len(c.idleSubs) == 0 {
-				matched = true // watching all
+				matched = subsystems // watching all
 			} else {
 				for _, s := range subsystems {
 					if _, ok := c.idleSubs[s]; ok {
-						matched = true
-						break
+						matched = append(matched, s)
 					}
 				}
 			}
-			if matched {
+			if len(matched) > 0 {
 				select {
-				case c.idleCh <- subsystems:
+				case c.idleCh <- matched:
 				default:
-					// Channel full, merge — client will get the notification
+					// Channel full — merge new subsystems into pending so
+					// the next idle picks them up immediately.
+					if c.pendingSubs == nil {
+						c.pendingSubs = make(map[string]struct{})
+					}
+					for _, s := range matched {
+						c.pendingSubs[s] = struct{}{}
+					}
 				}
 			}
 		} else {
@@ -257,124 +263,130 @@ func (c *mpdConn) handleCommandList(withOK bool) {
 }
 
 func (c *mpdConn) handleIdle(subs []string) {
-	c.idleMu.Lock()
+	// Loop instead of recursing to prevent unbounded stack growth when
+	// clients rapidly re-enter idle (e.g. on rapid track changes).
+	for {
+		c.idleMu.Lock()
 
-	// Check for pending events that arrived while we were not idle.
-	// If found, feed them through idleCh so the normal notification path
-	// runs (which waits for the reader goroutine to consume "noidle").
-	var pendingMatch []string
-	if len(c.pendingSubs) > 0 {
-		watchAll := len(subs) == 0
-		for s := range c.pendingSubs {
-			if watchAll {
-				pendingMatch = append(pendingMatch, s)
-			} else {
-				for _, sub := range subs {
-					if s == sub {
-						pendingMatch = append(pendingMatch, s)
-						break
+		// Check for pending events that arrived while we were not idle.
+		var pendingMatch []string
+		if len(c.pendingSubs) > 0 {
+			watchAll := len(subs) == 0
+			for s := range c.pendingSubs {
+				if watchAll {
+					pendingMatch = append(pendingMatch, s)
+				} else {
+					for _, sub := range subs {
+						if s == sub {
+							pendingMatch = append(pendingMatch, s)
+							break
+						}
 					}
 				}
 			}
+			if len(pendingMatch) > 0 {
+				c.pendingSubs = nil
+			}
 		}
+
+		c.idling = true
+		c.idleSubs = make(map[string]struct{})
+		for _, s := range subs {
+			c.idleSubs[s] = struct{}{}
+		}
+		c.idleCh = make(chan []string, 1)
+		c.idleMu.Unlock()
+
+		// Deliver pending events through the normal channel so the select
+		// below handles them like any other notification.
 		if len(pendingMatch) > 0 {
-			c.pendingSubs = nil
+			c.idleCh <- pendingMatch
 		}
-	}
 
-	c.idling = true
-	c.idleSubs = make(map[string]struct{})
-	for _, s := range subs {
-		c.idleSubs[s] = struct{}{}
-	}
-	c.idleCh = make(chan []string, 1)
-	c.idleMu.Unlock()
+		// Set a generous read deadline so that silently-dropped clients
+		// don't block this goroutine forever.
+		c.conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
 
-	// Deliver pending events through the normal channel so the select
-	// below handles them like any other notification (waiting for the
-	// reader goroutine to consume "noidle" from the client).
-	if len(pendingMatch) > 0 {
-		c.idleCh <- pendingMatch
-	}
-
-	defer func() {
-		c.idleMu.Lock()
-		c.idling = false
-		c.idleMu.Unlock()
-	}()
-
-	// Set a generous read deadline so that silently-dropped clients
-	// (especially WebSocket, where TCP keep-alive doesn't apply) don't
-	// block this goroutine forever. The client is expected to send
-	// noidle or reconnect well within this window.
-	c.conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
-	defer c.conn.SetReadDeadline(time.Time{})
-
-	// Read next line in a goroutine so we can select between notification and noidle
-	lineCh := make(chan string, 1)
-	go func() {
-		line, err := c.reader.ReadString('\n')
-		if err != nil {
-			lineCh <- ""
-			return
-		}
-		lineCh <- strings.TrimRight(line, "\r\n")
-	}()
-
-	select {
-	case changed := <-c.idleCh:
-		// Immediately mark as non-idle so any notifications that arrive
-		// while we wait for the reader goroutine go to pendingSubs instead
-		// of being sent to idleCh (which nobody reads from here).
-		c.idleMu.Lock()
-		c.idling = false
-		c.idleMu.Unlock()
-
-		// Deduplicate subsystems
-		seen := map[string]bool{}
-		for _, s := range changed {
-			if !seen[s] {
-				seen[s] = true
-				c.writef("changed: %s\n", s)
+		// Read next line in a goroutine so we can select between notification and noidle
+		lineCh := make(chan string, 1)
+		go func() {
+			line, err := c.reader.ReadString('\n')
+			if err != nil {
+				lineCh <- ""
+				return
 			}
-		}
-		c.writeLine("OK")
-		c.flush()
-		// Wait for the reader goroutine to finish — it may have already
-		// consumed the next line from the connection. We must handle it
-		// here to avoid a data race on c.reader in serve().
-		nextLine := <-lineCh
-		if nextLine != "" && nextLine != "noidle" {
-			cmd, args := parseCommand(nextLine)
-			if cmd == "idle" {
-				c.handleIdle(args)
-			} else if err := c.dispatch(cmd, args); err != nil {
-				c.writeACK(err)
-				c.flush()
-			} else {
-				c.writeLine("OK")
-				c.flush()
-			}
-		}
+			lineCh <- strings.TrimRight(line, "\r\n")
+		}()
 
-	case line := <-lineCh:
-		if line == "" {
-			return // connection closed
-		}
-		if line == "noidle" {
+		continueIdle := false
+
+		select {
+		case changed := <-c.idleCh:
+			// Immediately mark as non-idle so any notifications that arrive
+			// while we wait for the reader goroutine go to pendingSubs instead
+			// of being sent to idleCh (which nobody reads from here).
+			c.idleMu.Lock()
+			c.idling = false
+			c.idleMu.Unlock()
+
+			// Deduplicate subsystems
+			seen := map[string]bool{}
+			for _, s := range changed {
+				if !seen[s] {
+					seen[s] = true
+					c.writef("changed: %s\n", s)
+				}
+			}
 			c.writeLine("OK")
 			c.flush()
+			// Wait for the reader goroutine to finish — it may have already
+			// consumed the next line from the connection.
+			nextLine := <-lineCh
+			if nextLine != "" && nextLine != "noidle" {
+				cmd, args := parseCommand(nextLine)
+				if cmd == "idle" {
+					// Instead of recursing, loop with new subs
+					subs = args
+					continueIdle = true
+				} else if err := c.dispatch(cmd, args); err != nil {
+					c.writeACK(err)
+					c.flush()
+				} else {
+					c.writeLine("OK")
+					c.flush()
+				}
+			}
+
+		case line := <-lineCh:
+			c.idleMu.Lock()
+			c.idling = false
+			c.idleMu.Unlock()
+
+			if line == "" {
+				c.conn.SetReadDeadline(time.Time{})
+				return // connection closed
+			}
+			if line == "noidle" {
+				c.writeLine("OK")
+				c.flush()
+				c.conn.SetReadDeadline(time.Time{})
+				return
+			}
+			// Client sent a real command instead of noidle — handle it
+			c.writeLine("OK") // end idle with no changes
+			cmd, args := parseCommand(line)
+			if err := c.dispatch(cmd, args); err != nil {
+				c.writeACK(err)
+			} else {
+				c.writeLine("OK")
+			}
+			c.flush()
+		}
+
+		c.conn.SetReadDeadline(time.Time{})
+		if !continueIdle {
 			return
 		}
-		// Client sent a real command instead of noidle — handle it
-		c.writeLine("OK") // end idle with no changes
-		cmd, args := parseCommand(line)
-		if err := c.dispatch(cmd, args); err != nil {
-			c.writeACK(err)
-		} else {
-			c.writeLine("OK")
-		}
-		c.flush()
 	}
 }
 
@@ -453,20 +465,30 @@ func (c *mpdConn) handleAgentRegister(args []string) {
 		}
 	}
 
+	// If this agent has the same name as the server, it's the embedded local agent.
+	// Use "local" as its device ID so it replaces the local mpv target.
+	isLocal := name == c.app.cfg.Server.Name
 	devID := "agent-" + name
+	if isLocal {
+		devID = "local"
+	}
+
 	at := &agentTarget{
-		reader: c.reader,
-		writer: c.writer,
-		conn:   c.conn,
-		alive:  true,
-		done:   make(chan struct{}),
+		writer:  c.writer,
+		conn:    c.conn,
+		alive:   true,
+		done:    make(chan struct{}),
+		app:     c.app,
+		devID:   devID,
+		respCh:  make(chan agentResp, 1),
+		agState: "stop",
 	}
 
 	dev := &device{
 		ID:         devID,
 		Name:       name,
 		Address:    safeRemoteAddr(c.conn),
-		IsLocal:    false,
+		IsLocal:    isLocal,
 		Type:       "agent",
 		Format:     format,
 		MaxBitRate: maxBitRate,
@@ -482,14 +504,22 @@ func (c *mpdConn) handleAgentRegister(args []string) {
 	}
 	c.app.devices[devID] = dev
 	c.app.agentTargets[devID] = at
+	// Auto-activate the local embedded agent if no device is active
+	if isLocal && c.app.activeDevice == "" {
+		c.app.activeDevice = devID
+		wasActive = true
+	}
 	c.app.devicesMu.Unlock()
 
 	c.app.logger.Printf("agent registered: %s (id=%s, addr=%s)", name, devID, dev.Address)
 	c.writeLine("OK")
 	c.flush()
 
-	// If this agent was the active device, reload the play queue into it
-	// so playback commands work immediately without a manual device switch.
+	// Start reader goroutine — processes all incoming messages from agent
+	go at.readLoop(c.reader)
+
+	// If this agent was the active device before reconnecting, reload the
+	// play queue into it so playback continues seamlessly.
 	if wasActive {
 		c.app.reloadQueueIntoAgent(at, dev)
 	}
@@ -517,169 +547,326 @@ func (c *mpdConn) handleAgentRegister(args []string) {
 		delete(c.app.devices, devID)
 		delete(c.app.agentTargets, devID)
 		if c.app.activeDevice == devID {
-			c.app.activeDevice = "local"
+			// Fall back to another connected device, preferring "local"
+			c.app.activeDevice = ""
+			if _, ok := c.app.agentTargets["local"]; ok {
+				c.app.activeDevice = "local"
+			} else {
+				for id, a := range c.app.agentTargets {
+					if a.isRunning() {
+						c.app.activeDevice = id
+						break
+					}
+				}
+			}
 		}
 		c.app.logger.Printf("agent disconnected: %s", name)
 	} else {
 		c.app.logger.Printf("agent replaced (stale cleanup skipped): %s", name)
 	}
 	c.app.devicesMu.Unlock()
-	c.app.mpdHub.notify(SubOutput)
+	c.app.mpdHub.notify(SubOutput, SubPlayer)
 }
 
 // ---------------------------------------------------------------------------
-// agentTarget — controls a remote agent over a persistent MPD-style connection
+// agentTarget — controls a remote autonomous agent over a persistent connection.
+//
+// The agent handles its own audio playback (decoding, gapless, ReplayGain).
+// Communication is bidirectional on a single TCP connection:
+//   Server → Agent: play, preload, pause, resume, stop, seek, volume, replaygain, queue_changed, ping
+//   Agent → Server: agent_state (periodic), agent_advance (track end)
+//
+// A reader goroutine processes all incoming messages. Async messages
+// (agent_state, agent_advance) are handled inline or in goroutines.
+// Command responses (OK/ACK) are routed to a channel for sendCommand.
 // ---------------------------------------------------------------------------
 
 type agentTarget struct {
-	mu        sync.Mutex
-	reader    *bufio.Reader
+	cmdMu     sync.Mutex // serializes sendCommand (write + wait for response)
 	writer    *bufio.Writer
 	conn      net.Conn
 	alive     bool
 	done      chan struct{}
 	closeOnce sync.Once
+	app       *app
+	devID     string
+
+	// Response channel — reader goroutine sends command responses here
+	respCh chan agentResp
+
+	// Cached state from periodic agent_state messages
+	stateMu     sync.RWMutex
+	agState     string  // "play", "pause", "stop"
+	agPos       int
+	agElapsed   float64
+	agDuration  float64
+	agVolume    float64
+	agStateTime time.Time // when state was last received (for interpolation)
+
+	// Queue sync tracking — avoids redundant syncs
+	lastSyncVersion int
+}
+
+type agentResp struct {
+	lines []string
+	err   error
 }
 
 func (at *agentTarget) close() {
 	at.closeOnce.Do(func() {
-		at.mu.Lock()
 		at.alive = false
-		at.mu.Unlock()
 		at.conn.Close()
 		close(at.done)
 	})
 }
 
+// readLoop processes all incoming messages from the agent.
+// Must be run as a goroutine. Calls close() on error.
+func (at *agentTarget) readLoop(reader *bufio.Reader) {
+	defer at.close()
+	var pendingLines []string
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		line = strings.TrimRight(line, "\r\n")
+
+		// Handle async agent messages
+		if strings.HasPrefix(line, "agent_state ") {
+			at.handleAgentState(line)
+			continue
+		}
+		if strings.HasPrefix(line, "agent_advance ") {
+			go at.handleAgentAdvance(line)
+			continue
+		}
+
+		// Command response
+		if line == "OK" {
+			select {
+			case at.respCh <- agentResp{lines: pendingLines}:
+			default:
+				// No pending command — discard stale response
+			}
+			pendingLines = nil
+			continue
+		}
+		if strings.HasPrefix(line, "ACK") {
+			select {
+			case at.respCh <- agentResp{err: fmt.Errorf("%s", line)}:
+			default:
+			}
+			pendingLines = nil
+			continue
+		}
+		pendingLines = append(pendingLines, line)
+	}
+}
+
+// handleAgentState parses and caches the agent's periodic state report.
+// Format: agent_state <state> <pos> <elapsed> <duration> <volume>
+func (at *agentTarget) handleAgentState(line string) {
+	parts := strings.Fields(line)
+	if len(parts) < 6 {
+		return
+	}
+	at.stateMu.Lock()
+	at.agState = parts[1]
+	at.agPos, _ = strconv.Atoi(parts[2])
+	at.agElapsed, _ = strconv.ParseFloat(parts[3], 64)
+	at.agDuration, _ = strconv.ParseFloat(parts[4], 64)
+	at.agVolume, _ = strconv.ParseFloat(parts[5], 64)
+	at.agStateTime = time.Now()
+	at.stateMu.Unlock()
+	at.app.mpdHub.notify(SubPlayer)
+}
+
+// handleAgentAdvance is called when the agent reports a natural track end.
+// It triggers the server's track advance logic (queue state, consume, preload next).
+func (at *agentTarget) handleAgentAdvance(line string) {
+	parts := strings.Fields(line)
+	if len(parts) < 2 {
+		return
+	}
+	oldPos, _ := strconv.Atoi(parts[1])
+	at.app.logger.Printf("agent advance: track ended at pos %d", oldPos)
+	at.app.advanceTrack()
+}
+
+// sendCommand sends a command to the agent and waits for the response.
+// Serialized by cmdMu so only one command is in flight at a time.
 func (at *agentTarget) sendCommand(cmdLine string) ([]string, error) {
-	at.mu.Lock()
-	defer at.mu.Unlock()
+	at.cmdMu.Lock()
+	defer at.cmdMu.Unlock()
 	if !at.alive {
 		return nil, fmt.Errorf("agent disconnected")
 	}
-	at.conn.SetDeadline(time.Now().Add(10 * time.Second))
-	defer at.conn.SetDeadline(time.Time{})
-
 	fmt.Fprintf(at.writer, "%s\n", cmdLine)
 	if err := at.writer.Flush(); err != nil {
 		at.alive = false
 		return nil, err
 	}
-	var lines []string
-	for {
-		line, err := at.reader.ReadString('\n')
-		if err != nil {
-			at.alive = false
-			return nil, err
-		}
-		line = strings.TrimRight(line, "\r\n")
-		if line == "OK" {
-			return lines, nil
-		}
-		if strings.HasPrefix(line, "ACK") {
-			return nil, fmt.Errorf("%s", line)
-		}
-		lines = append(lines, line)
+	select {
+	case resp := <-at.respCh:
+		return resp.lines, resp.err
+	case <-at.done:
+		return nil, fmt.Errorf("agent disconnected")
+	case <-time.After(10 * time.Second):
+		at.alive = false
+		return nil, fmt.Errorf("agent response timeout")
 	}
 }
 
-func (at *agentTarget) loadFile(url, mode string, meta map[string]any) error {
-	_, err := at.sendCommand(fmt.Sprintf("loadfile %s %s", mpdQuoteArg(url), mpdQuoteArg(mode)))
+// ensureQueueSync sends queue_changed to the agent if the server's queue
+// version has changed since the last sync. Retries if the version changed
+// during the sync to prevent TOCTOU races.
+func (at *agentTarget) ensureQueueSync() {
+	for {
+		at.app.playQueueMu.Lock()
+		ver := at.app.queueVersion
+		at.app.playQueueMu.Unlock()
+
+		if ver == at.lastSyncVersion {
+			return
+		}
+
+		if _, err := at.sendCommand("queue_changed"); err != nil {
+			at.app.logger.Printf("agent queue sync failed: %v", err)
+			return
+		}
+
+		// Check if version changed during sync — if so, sync again
+		at.app.playQueueMu.Lock()
+		currentVer := at.app.queueVersion
+		at.app.playQueueMu.Unlock()
+
+		at.lastSyncVersion = currentVer
+		if currentVer == ver {
+			return // no changes during sync, we're good
+		}
+		// Version changed during sync — loop to re-sync
+	}
+}
+
+// agentPlay tells the agent to play a queue position with optional next track preload.
+func (at *agentTarget) agentPlay(curPos, nextPos int) error {
+	return at.agentPlayAt(curPos, nextPos, -1)
+}
+
+// agentPlayAt tells the agent to play a queue position, optionally seeking to
+// a position before audio output starts.
+func (at *agentTarget) agentPlayAt(curPos, nextPos int, seekPos float64) error {
+	at.ensureQueueSync()
+	cmd := fmt.Sprintf("play %d", curPos)
+	if nextPos >= 0 {
+		cmd += fmt.Sprintf(" next=%d", nextPos)
+	}
+	if seekPos > 0 {
+		cmd += fmt.Sprintf(" seek=%.3f", seekPos)
+	}
+	_, err := at.sendCommand(cmd)
 	return err
 }
 
+// agentPreload tells the agent to preload a queue position for gapless playback.
+func (at *agentTarget) agentPreload(nextPos int) error {
+	at.ensureQueueSync()
+	_, err := at.sendCommand(fmt.Sprintf("preload %d", nextPos))
+	return err
+}
+
+// ---------------------------------------------------------------------------
+// playbackTarget interface implementation
+// ---------------------------------------------------------------------------
+
+func (at *agentTarget) loadFile(url, mode string, meta map[string]any) error {
+	// Not used for autonomous agents — use agentPlay/agentPreload instead.
+	return nil
+}
+
+func (at *agentTarget) loadFileBatch(urls []string, mode string) error {
+	return nil
+}
+
 func (at *agentTarget) playlistClear() error {
-	_, err := at.sendCommand("playlist_clear")
+	_, err := at.sendCommand("stop")
 	return err
 }
 
 func (at *agentTarget) playlistRemove(index int) error {
-	_, err := at.sendCommand(fmt.Sprintf("playlist_remove %d", index))
-	return err
+	// Agent manages its own playlist — no-op.
+	return nil
 }
 
 func (at *agentTarget) playlistMove(from, to int) error {
-	_, err := at.sendCommand(fmt.Sprintf("playlist_move %d %d", from, to))
-	return err
+	return nil
 }
 
 func (at *agentTarget) getProperty(name string) (any, error) {
-	lines, err := at.sendCommand(fmt.Sprintf("get_property %s", mpdQuoteArg(name)))
-	if err != nil {
-		return nil, err
-	}
-	for _, l := range lines {
-		if strings.HasPrefix(l, "value: ") {
-			return parseAgentValue(strings.TrimPrefix(l, "value: ")), nil
+	at.stateMu.RLock()
+	defer at.stateMu.RUnlock()
+	switch name {
+	case "pause":
+		return at.agState != "play", nil
+	case "time-pos":
+		elapsed := at.agElapsed
+		// Interpolate position if playing
+		if at.agState == "play" && !at.agStateTime.IsZero() {
+			elapsed += time.Since(at.agStateTime).Seconds()
+			if at.agDuration > 0 && elapsed > at.agDuration {
+				elapsed = at.agDuration
+			}
 		}
+		return elapsed, nil
+	case "duration":
+		return at.agDuration, nil
+	case "volume":
+		return at.agVolume, nil
+	default:
+		return nil, nil
 	}
-	return nil, nil
 }
 
 func (at *agentTarget) setProperty(name string, value any) error {
-	_, err := at.sendCommand(fmt.Sprintf("set_property %s %s", mpdQuoteArg(name), mpdQuoteArg(fmt.Sprint(value))))
-	return err
-}
-
-func (at *agentTarget) command(args ...any) (*mpvResponse, error) {
-	if len(args) == 0 {
-		return nil, fmt.Errorf("empty command")
-	}
-	cmd := fmt.Sprintf("%v", args[0])
-	switch cmd {
-	case "playlist-next":
-		_, err := at.sendCommand("mpv_command playlist-next")
-		return &mpvResponse{}, err
-	case "playlist-prev":
-		_, err := at.sendCommand("mpv_command playlist-prev")
-		return &mpvResponse{}, err
-	case "playlist-clear":
-		return &mpvResponse{}, at.playlistClear()
-	case "playlist-move":
-		if len(args) >= 3 {
-			return &mpvResponse{}, at.playlistMove(intFromAny(args[1], 0), intFromAny(args[2], 0))
-		}
-		return &mpvResponse{}, nil
-	default:
-		return nil, fmt.Errorf("unsupported remote command: %s", cmd)
-	}
-}
-
-func (at *agentTarget) loadFileBatch(urls []string, mode string) error {
-	for i, url := range urls {
-		m := mode
-		if i > 0 && mode == "replace" {
-			m = "append"
-		}
-		if err := at.loadFile(url, m, nil); err != nil {
+	switch name {
+	case "pause":
+		if b, ok := value.(bool); ok {
+			if b {
+				_, err := at.sendCommand("pause")
+				return err
+			}
+			_, err := at.sendCommand("resume")
 			return err
 		}
+	case "time-pos":
+		if f, ok := value.(float64); ok {
+			_, err := at.sendCommand(fmt.Sprintf("seek %f", f))
+			if err == nil {
+				// Update cached state immediately so interpolation
+				// starts from the new position without waiting for
+				// the next periodic agent_state report.
+				at.stateMu.Lock()
+				at.agElapsed = f
+				at.agStateTime = time.Now()
+				at.stateMu.Unlock()
+			}
+			return err
+		}
+	case "volume":
+		if f, ok := value.(float64); ok {
+			_, err := at.sendCommand(fmt.Sprintf("volume %f", f))
+			return err
+		}
+	case "replaygain":
+		_, err := at.sendCommand(fmt.Sprintf("replaygain %s", fmt.Sprint(value)))
+		return err
 	}
 	return nil
 }
 
-func (at *agentTarget) commandBatch(cmds [][]any) ([]*mpvResponse, error) {
-	var results []*mpvResponse
-	for _, cmd := range cmds {
-		resp, err := at.command(cmd...)
-		if err != nil {
-			return results, err
-		}
-		results = append(results, resp)
-	}
-	return results, nil
-}
-
-func (at *agentTarget) handoff(playlistPos int, timePos float64, paused bool) error {
-	_, err := at.sendCommand(fmt.Sprintf("handoff %d %f %t", playlistPos, timePos, paused))
-	return err
-}
-
 func (at *agentTarget) isRunning() bool {
-	at.mu.Lock()
-	alive := at.alive
-	at.mu.Unlock()
-	return alive
+	return at.alive
 }
 
 // mpdQuoteArg quotes a string for the agent protocol if it contains special characters.

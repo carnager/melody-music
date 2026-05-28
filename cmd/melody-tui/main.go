@@ -343,6 +343,7 @@ func mpdFilterEq(tag, value string) string {
 }
 
 var mpd *mpdClient
+var fetchConn *mpdClient // dedicated connection for album art, lyrics, etc.
 var idleConn *mpdClient  // dedicated connection for MPD idle
 var lastQueueVersion int // tracks MPD playlist version to skip redundant queue fetches
 var forceQueueRefresh bool // set when ratings change to bypass version check
@@ -357,11 +358,20 @@ func reconnectMPD() {
 		mpd.close()
 		mpd = nil
 	}
+	if fetchConn != nil {
+		fetchConn.close()
+		fetchConn = nil
+	}
 	c, err := newMPDClient(cfg.MPDHost, cfg.MPDPort)
 	if err != nil {
 		return
 	}
 	mpd = c
+	fc, err := newMPDClient(cfg.MPDHost, cfg.MPDPort)
+	if err != nil {
+		return
+	}
+	fetchConn = fc
 }
 
 // ---------------------------------------------------------------------------
@@ -907,10 +917,10 @@ func fetchTrackInfo(file string) tea.Cmd {
 
 func fetchLyrics(file string) tea.Cmd {
 	return func() tea.Msg {
-		if mpd == nil || file == "" {
+		if fetchConn == nil || file == "" {
 			return lyricsMsg{}
 		}
-		resp, err := mpd.cmd(fmt.Sprintf("readlyrics %s", mpdEscape(file)))
+		resp, err := fetchConn.cmd(fmt.Sprintf("readlyrics %s", mpdEscape(file)))
 		if err != nil || len(resp) == 0 {
 			return lyricsMsg{}
 		}
@@ -1022,10 +1032,10 @@ func fetchGotoMeta(file string) tea.Cmd {
 
 func fetchAlbumArt(file string) tea.Cmd {
 	return func() tea.Msg {
-		if mpd == nil || file == "" {
+		if fetchConn == nil || file == "" {
 			return albumArtMsg{}
 		}
-		data, err := mpd.cmdBinary(fmt.Sprintf(`albumart "%s"`, file))
+		data, err := fetchConn.cmdBinary(fmt.Sprintf(`albumart "%s"`, file))
 		if err != nil || len(data) == 0 {
 			return albumArtMsg{}
 		}
@@ -1192,10 +1202,10 @@ func fetchAlbumRating(albumArtist, album, date string) tea.Cmd {
 
 func fetchNPAlbumRating(albumArtist, album, date string) tea.Cmd {
 	return func() tea.Msg {
-		if mpd == nil || albumArtist == "" || album == "" {
+		if fetchConn == nil || albumArtist == "" || album == "" {
 			return npAlbumRatingMsg{}
 		}
-		lines, err := mpd.cmd("getalbumrating " + mpdEscape(albumArtist) + " " + mpdEscape(album) + " " + mpdEscape(date))
+		lines, err := fetchConn.cmd("getalbumrating " + mpdEscape(albumArtist) + " " + mpdEscape(album) + " " + mpdEscape(date))
 		if err != nil {
 			return npAlbumRatingMsg{}
 		}
@@ -2186,6 +2196,18 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, fetchTrackInfo(file)
 		}
 		return m, nil
+		return m, nil
+	case "l":
+		m.showLyrics = !m.showLyrics
+		if m.showLyrics {
+			file := m.status.File
+			if file != "" && m.lyricsFile != file {
+				m.lyrics = nil
+				m.lyricsFile = file
+				m.lyricsScroll = 0
+				return m, fetchLyrics(file)
+			}
+		}
 		return m, nil
 	case "L":
 		file := m.status.File

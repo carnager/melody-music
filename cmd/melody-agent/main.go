@@ -2,13 +2,12 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
+	"bytes"
 	"errors"
 	"fmt"
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/carnager/melody/internal/player"
 )
 
 // ---------------------------------------------------------------------------
@@ -24,154 +24,29 @@ import (
 
 type agentConfig struct {
 	Agent struct {
-		Name             string `toml:"name"`
-		Master           string `toml:"master"` // host:port of master's MPD server
-		Format           string `toml:"format"`
-		MaxBitRate       int    `toml:"max_bitrate"`
-		ResumeOnConnect  bool   `toml:"resume_on_connect"`
+		Name       string `toml:"name"`
+		Master     string `toml:"master"`    // host:port of melodyd MPD server
+		MusicDir   string `toml:"music_dir"` // local path to music library (satellite mode)
+		Format     string `toml:"format"`
+		MaxBitRate int    `toml:"max_bitrate"`
 	} `toml:"agent"`
-	MPV struct {
-		Socket     string `toml:"socket"`
-		Executable string `toml:"executable"`
-		ReplayGain string `toml:"replaygain"`
-	} `toml:"mpv"`
+	Player struct {
+		ReplayGain string  `toml:"replaygain"` // "track", "album", "off"
+		Volume     float64 `toml:"volume"`      // 0-100, default 100
+	} `toml:"player"`
 }
 
 // ---------------------------------------------------------------------------
-// mpv IPC
+// Queue item — mirrors playlistinfo response
 // ---------------------------------------------------------------------------
 
-type mpvRequest struct {
-	Command   []any `json:"command"`
-	RequestID int   `json:"request_id"`
-}
-
-type mpvResponse struct {
-	Data      any    `json:"data"`
-	Error     string `json:"error"`
-	RequestID int    `json:"request_id"`
-}
-
-type mpvClient struct {
-	socketPath string
-	executable string
-	replaygain string
-	mu         sync.Mutex
-	process    *exec.Cmd
-	reqID      int
-}
-
-func (m *mpvClient) isRunning() bool {
-	conn, err := net.DialTimeout("unix", m.socketPath, 1*time.Second)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
-}
-
-func (m *mpvClient) start() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if err := os.MkdirAll(filepath.Dir(m.socketPath), 0o755); err != nil {
-		return err
-	}
-	_ = os.Remove(m.socketPath)
-
-	args := []string{"--idle", "--no-video", "--no-terminal", "--input-ipc-server=" + m.socketPath}
-	if m.replaygain != "" && m.replaygain != "off" {
-		args = append(args, "--replaygain="+m.replaygain)
-	}
-	cmd := exec.Command(m.executable, args...)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	m.process = cmd
-
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(m.socketPath); err == nil {
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return fmt.Errorf("mpv socket did not appear at %s", m.socketPath)
-}
-
-func (m *mpvClient) command(args ...any) (*mpvResponse, error) {
-	m.mu.Lock()
-	m.reqID++
-	reqID := m.reqID
-	m.mu.Unlock()
-
-	conn, err := net.DialTimeout("unix", m.socketPath, 2*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("mpv connect: %w", err)
-	}
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
-
-	req := mpvRequest{Command: args, RequestID: reqID}
-	data, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
-	data = append(data, '\n')
-	if _, err := conn.Write(data); err != nil {
-		return nil, fmt.Errorf("mpv write: %w", err)
-	}
-
-	scanner := bufio.NewScanner(conn)
-	for scanner.Scan() {
-		var resp mpvResponse
-		if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
-			continue
-		}
-		if resp.RequestID == reqID {
-			if resp.Error != "" && resp.Error != "success" {
-				return nil, fmt.Errorf("mpv: %s", resp.Error)
-			}
-			return &resp, nil
-		}
-	}
-	return nil, fmt.Errorf("mpv: no response")
-}
-
-func (m *mpvClient) getProperty(name string) (any, error) {
-	resp, err := m.command("get_property", name)
-	if err != nil {
-		return nil, err
-	}
-	return resp.Data, nil
-}
-
-func (m *mpvClient) setProperty(name string, value any) error {
-	// mpv uses "no" instead of "off" for its replaygain property
-	if name == "replaygain" {
-		if s, ok := value.(string); ok && s == "off" {
-			value = "no"
-		}
-	}
-	_, err := m.command("set_property", name, value)
-	return err
-}
-
-func (m *mpvClient) loadFile(url string, mode string) error {
-	_, err := m.command("loadfile", url, mode)
-	return err
-}
-
-func (m *mpvClient) playlistClear() error {
-	_, err := m.command("playlist-clear")
-	return err
-}
-
-func (m *mpvClient) playlistRemove(index int) error {
-	_, err := m.command("playlist-remove", index)
-	return err
+type queueItem struct {
+	Position int
+	File     string  // relative path (e.g., "Artist/Album/Track.flac")
+	SongID   string  // X-SongId from melodyd DB
+	Duration float64 // track duration in seconds
+	RGTrack  float64 // X-ReplayGainTrack
+	RGAlbum  float64 // X-ReplayGainAlbum
 }
 
 // ---------------------------------------------------------------------------
@@ -179,10 +54,19 @@ func (m *mpvClient) playlistRemove(index int) error {
 // ---------------------------------------------------------------------------
 
 type agent struct {
-	cfg       agentConfig
-	logger    *log.Logger
-	mpv       *mpvClient
-	trackEnd  chan struct{} // signals natural track end (mpv end-file eof)
+	cfg    agentConfig
+	logger *log.Logger
+	player *player.Player
+
+	// Queue state (synced from server)
+	queueMu sync.Mutex
+	queue   []queueItem
+	curPos  int // current queue position being played
+
+	// Control connection to server
+	ctrlMu   sync.Mutex
+	ctrlConn net.Conn
+	ctrlW    *bufio.Writer
 }
 
 func main() {
@@ -193,21 +77,36 @@ func main() {
 		logger.Fatalf("load config: %v", err)
 	}
 
+	p := player.New()
+
 	a := &agent{
 		cfg:    cfg,
 		logger: logger,
-		mpv: &mpvClient{
-			socketPath: cfg.MPV.Socket,
-			executable: cfg.MPV.Executable,
-			replaygain: cfg.MPV.ReplayGain,
-		},
-		trackEnd: make(chan struct{}, 1),
+		player: p,
+		curPos: -1,
 	}
 
-	go a.ensureMPV()
-	go a.watchMPVEvents()
+	// Set initial player state from config
+	if cfg.Player.ReplayGain != "" {
+		p.SetReplayGain(cfg.Player.ReplayGain)
+	}
+	if cfg.Player.Volume > 0 {
+		p.SetVolume(cfg.Player.Volume)
+	}
+
+	// Wire up track-end callback
+	p.OnTrackEnd = a.handleTrackEnd
+
+	// Start position reporter
+	p.StartPositionReporter(2*time.Second, a.reportState)
 
 	logger.Printf("agent %q connecting to master at %s", cfg.Agent.Name, cfg.Agent.Master)
+	if cfg.Agent.MusicDir != "" {
+		logger.Printf("music_dir: %s (direct file access)", cfg.Agent.MusicDir)
+	} else {
+		logger.Printf("no music_dir configured, will stream via HTTP")
+	}
+
 	a.connectLoop()
 }
 
@@ -241,12 +140,8 @@ func loadAgentConfig() (agentConfig, error) {
 	if cfg.Agent.Master == "" {
 		cfg.Agent.Master = "localhost:6600"
 	}
-	if cfg.MPV.Socket == "" {
-		runtimeDir := getenvDefault("XDG_RUNTIME_DIR", filepath.Join(os.TempDir(), fmt.Sprintf("melody-%d", os.Getuid())))
-		cfg.MPV.Socket = filepath.Join(runtimeDir, "melody", "agent-mpv.sock")
-	}
-	if cfg.MPV.Executable == "" {
-		cfg.MPV.Executable = "mpv"
+	if cfg.Player.Volume == 0 {
+		cfg.Player.Volume = 100
 	}
 
 	return cfg, nil
@@ -257,74 +152,18 @@ func defaultAgentConfig() string {
 	return `[agent]
 name = "` + hostname + `"
 master = "localhost:6600"
+music_dir = ""
 format = ""
 max_bitrate = 0
-resume_on_connect = false
 
-[mpv]
-socket = ""
-executable = "mpv"
-replaygain = ""
+[player]
+replaygain = "track"
+volume = 100
 `
 }
 
-func (a *agent) ensureMPV() {
-	for {
-		if a.mpv.isRunning() {
-			time.Sleep(5 * time.Second)
-			continue
-		}
-		a.logger.Printf("mpv: starting idle instance")
-		if err := a.mpv.start(); err != nil {
-			a.logger.Printf("mpv: start failed: %v", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-		a.logger.Printf("mpv: started, ipc at %s", a.mpv.socketPath)
-		time.Sleep(5 * time.Second)
-	}
-}
-
-// watchMPVEvents listens for mpv end-file events on a dedicated IPC connection.
-// When a track ends naturally (reason=eof), it signals the agent to send
-// trackended to the server.
-func (a *agent) watchMPVEvents() {
-	for {
-		for !a.mpv.isRunning() {
-			time.Sleep(1 * time.Second)
-		}
-
-		conn, err := net.DialTimeout("unix", a.mpv.socketPath, 2*time.Second)
-		if err != nil {
-			time.Sleep(2 * time.Second)
-			continue
-		}
-
-		a.logger.Printf("mpv events: listening")
-		scanner := bufio.NewScanner(conn)
-		for scanner.Scan() {
-			var evt struct {
-				Event  string `json:"event"`
-				Reason string `json:"reason"`
-			}
-			if err := json.Unmarshal(scanner.Bytes(), &evt); err != nil {
-				continue
-			}
-			if evt.Event == "end-file" && evt.Reason == "eof" {
-				a.logger.Printf("mpv events: track ended naturally")
-				select {
-				case a.trackEnd <- struct{}{}:
-				default:
-				}
-			}
-		}
-		conn.Close()
-		time.Sleep(1 * time.Second)
-	}
-}
-
 // ---------------------------------------------------------------------------
-// MPD protocol connection to master
+// Connection management
 // ---------------------------------------------------------------------------
 
 func (a *agent) connectLoop() {
@@ -332,15 +171,14 @@ func (a *agent) connectLoop() {
 		if err := a.runSession(); err != nil {
 			a.logger.Printf("session error: %v, reconnecting in 5s", err)
 		}
-		// Server disconnected — stop mpv playback immediately.
-		// The agent must not play anything without a live server connection.
-		_ = a.mpv.playlistClear()
-		_ = a.mpv.setProperty("pause", true)
+		a.player.Stop()
+		a.curPos = -1
 		time.Sleep(5 * time.Second)
 	}
 }
 
 func (a *agent) runSession() error {
+	// Connect control connection
 	conn, err := net.DialTimeout("tcp", a.cfg.Agent.Master, 5*time.Second)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
@@ -360,8 +198,8 @@ func (a *agent) runSession() error {
 	}
 	a.logger.Printf("connected to master at %s", a.cfg.Agent.Master)
 
-	// Send agent_register
-	regCmd := fmt.Sprintf("agent_register %s", mpdQuote(a.cfg.Agent.Name))
+	// Send agent_register with v2 flag
+	regCmd := fmt.Sprintf("agent_register %s v2", mpdQuote(a.cfg.Agent.Name))
 	if a.cfg.Agent.Format != "" {
 		regCmd += fmt.Sprintf(" format=%s", mpdQuote(a.cfg.Agent.Format))
 	}
@@ -384,26 +222,30 @@ func (a *agent) runSession() error {
 	}
 	a.logger.Printf("registered as %q", a.cfg.Agent.Name)
 
-	// Resume playback if configured
-	if a.cfg.Agent.ResumeOnConnect {
-		go a.sendResume()
-	}
+	// Store control connection for state reporting
+	a.ctrlMu.Lock()
+	a.ctrlConn = conn
+	a.ctrlW = writer
+	a.ctrlMu.Unlock()
 
-	// Watch for natural track ends and send trackended to server via separate connection
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		for {
-			select {
-			case <-done:
-				return
-			case <-a.trackEnd:
-				a.sendTrackEnded()
-			}
-		}
+	defer func() {
+		a.ctrlMu.Lock()
+		a.ctrlConn = nil
+		a.ctrlW = nil
+		a.ctrlMu.Unlock()
 	}()
 
-	// Command loop — master sends commands, we execute and respond
+	// Fetch initial queue
+	if err := a.syncQueue(); err != nil {
+		a.logger.Printf("initial queue sync failed: %v", err)
+	}
+
+	// Command loop — server sends commands, we execute.
+	// Responses are written to a local buffer, then flushed to the
+	// control connection under ctrlMu to prevent interleaving with
+	// async messages (agent_state, agent_advance).
+	var respBuf bytes.Buffer
+	respW := bufio.NewWriter(&respBuf)
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -414,191 +256,402 @@ func (a *agent) runSession() error {
 			continue
 		}
 
-		a.handleCommand(writer, line)
-		if err := writer.Flush(); err != nil {
-			return fmt.Errorf("write response: %w", err)
-		}
+		respBuf.Reset()
+		respW.Reset(&respBuf)
+		a.handleCommand(respW, line)
+		respW.Flush()
+
+		a.ctrlMu.Lock()
+		writer.Write(respBuf.Bytes())
+		writer.Flush()
+		a.ctrlMu.Unlock()
 	}
 }
 
-func (a *agent) sendTrackEnded() {
-	conn, err := net.DialTimeout("tcp", a.cfg.Agent.Master, 5*time.Second)
-	if err != nil {
-		a.logger.Printf("trackended: dial failed: %v", err)
-		return
-	}
-	defer conn.Close()
-
-	r := bufio.NewReader(conn)
-	// Read greeting
-	if _, err := r.ReadString('\n'); err != nil {
-		return
-	}
-	fmt.Fprintf(conn, "trackended\n")
-	if _, err := r.ReadString('\n'); err != nil {
-		return
-	}
-	fmt.Fprintf(conn, "close\n")
-	a.logger.Printf("trackended: sent to server")
-}
-
-func (a *agent) sendResume() {
-	conn, err := net.DialTimeout("tcp", a.cfg.Agent.Master, 5*time.Second)
-	if err != nil {
-		a.logger.Printf("resume-on-connect: dial failed: %v", err)
-		return
-	}
-	defer conn.Close()
-
-	r := bufio.NewReader(conn)
-	// Read greeting
-	if _, err := r.ReadString('\n'); err != nil {
-		return
-	}
-	fmt.Fprintf(conn, "pause 0\n")
-	if _, err := r.ReadString('\n'); err != nil {
-		return
-	}
-	fmt.Fprintf(conn, "close\n")
-	a.logger.Printf("resume-on-connect: sent unpause")
-}
+// ---------------------------------------------------------------------------
+// Command handling (from server)
+// ---------------------------------------------------------------------------
 
 func (a *agent) handleCommand(w *bufio.Writer, line string) {
 	cmd, args := parseCommand(line)
-
 	switch cmd {
 	case "ping":
 		fmt.Fprintln(w, "OK")
 
-	case "loadfile":
-		if len(args) < 2 {
-			fmt.Fprintln(w, "ACK [2@0] {loadfile} missing arguments")
-			return
-		}
-		if err := a.mpv.loadFile(args[0], args[1]); err != nil {
-			fmt.Fprintf(w, "ACK [56@0] {loadfile} %s\n", err)
-			return
-		}
+	case "play":
+		a.handlePlay(w, args)
+
+	case "preload":
+		a.handlePreload(w, args)
+
+	case "pause":
+		a.player.Pause()
 		fmt.Fprintln(w, "OK")
 
-	case "playlist_clear":
-		if err := a.mpv.playlistClear(); err != nil {
-			fmt.Fprintf(w, "ACK [56@0] {playlist_clear} %s\n", err)
-			return
-		}
+	case "resume":
+		a.player.Resume()
 		fmt.Fprintln(w, "OK")
 
-	case "playlist_remove":
+	case "stop":
+		a.player.Stop()
+		a.curPos = -1
+		fmt.Fprintln(w, "OK")
+
+	case "seek":
 		if len(args) < 1 {
-			fmt.Fprintln(w, "ACK [2@0] {playlist_remove} missing index")
+			fmt.Fprintln(w, "ACK [2@0] {seek} missing seconds")
 			return
 		}
-		idx, _ := strconv.Atoi(args[0])
-		if err := a.mpv.playlistRemove(idx); err != nil {
-			fmt.Fprintf(w, "ACK [56@0] {playlist_remove} %s\n", err)
+		secs, _ := strconv.ParseFloat(args[0], 64)
+		if err := a.player.Seek(secs); err != nil {
+			fmt.Fprintf(w, "ACK [56@0] {seek} %s\n", err)
 			return
 		}
 		fmt.Fprintln(w, "OK")
 
-	case "playlist_move":
-		if len(args) < 2 {
-			fmt.Fprintln(w, "ACK [2@0] {playlist_move} missing arguments")
+	case "volume":
+		if len(args) < 1 {
+			fmt.Fprintln(w, "ACK [2@0] {volume} missing level")
 			return
 		}
-		from, _ := strconv.Atoi(args[0])
-		to, _ := strconv.Atoi(args[1])
-		if _, err := a.mpv.command("playlist-move", from, to); err != nil {
-			fmt.Fprintf(w, "ACK [56@0] {playlist_move} %s\n", err)
+		level, _ := strconv.ParseFloat(args[0], 64)
+		a.player.SetVolume(level)
+		fmt.Fprintln(w, "OK")
+
+	case "replaygain":
+		if len(args) < 1 {
+			fmt.Fprintln(w, "ACK [2@0] {replaygain} missing mode")
+			return
+		}
+		a.player.SetReplayGain(args[0])
+		fmt.Fprintln(w, "OK")
+
+	case "queue_changed":
+		if err := a.syncQueue(); err != nil {
+			a.logger.Printf("queue sync failed: %v", err)
+			fmt.Fprintf(w, "ACK [56@0] {queue_changed} %s\n", err)
 			return
 		}
 		fmt.Fprintln(w, "OK")
 
 	case "get_property":
+		// Compatibility: return cached state for status queries
 		if len(args) < 1 {
 			fmt.Fprintln(w, "ACK [2@0] {get_property} missing name")
 			return
 		}
-		val, err := a.mpv.getProperty(args[0])
-		if err != nil {
-			fmt.Fprintf(w, "ACK [56@0] {get_property} %s\n", err)
-			return
-		}
-		fmt.Fprintf(w, "value: %v\n", val)
-		fmt.Fprintln(w, "OK")
+		a.handleGetProperty(w, args[0])
 
 	case "set_property":
+		// Compatibility: handle property sets
 		if len(args) < 2 {
 			fmt.Fprintln(w, "ACK [2@0] {set_property} missing arguments")
 			return
 		}
-		name := args[0]
-		value := parsePropertyValue(args[1])
-		if err := a.mpv.setProperty(name, value); err != nil {
-			fmt.Fprintf(w, "ACK [56@0] {set_property} %s\n", err)
-			return
-		}
-		fmt.Fprintln(w, "OK")
-
-	case "mpv_command":
-		if len(args) < 1 {
-			fmt.Fprintln(w, "ACK [2@0] {mpv_command} missing command")
-			return
-		}
-		mpvArgs := make([]any, len(args))
-		for i, a := range args {
-			mpvArgs[i] = a
-		}
-		if _, err := a.mpv.command(mpvArgs...); err != nil {
-			fmt.Fprintf(w, "ACK [56@0] {mpv_command} %s\n", err)
-			return
-		}
-		fmt.Fprintln(w, "OK")
-
-	case "handoff":
-		if len(args) < 3 {
-			fmt.Fprintln(w, "ACK [2@0] {handoff} missing arguments")
-			return
-		}
-		playlistPos, _ := strconv.Atoi(args[0])
-		timePos, _ := strconv.ParseFloat(args[1], 64)
-		paused := args[2] == "true" || args[2] == "1"
-		a.doHandoff(playlistPos, timePos, paused)
-		fmt.Fprintln(w, "OK")
+		a.handleSetProperty(w, args[0], args[1])
 
 	default:
 		fmt.Fprintf(w, "ACK [5@0] {%s} unknown command\n", cmd)
 	}
 }
 
-func (a *agent) doHandoff(playlistPos int, timePos float64, paused bool) {
-	if err := a.mpv.setProperty("playlist-pos", playlistPos); err != nil {
-		a.logger.Printf("handoff: set playlist-pos failed: %v", err)
+func (a *agent) handlePlay(w *bufio.Writer, args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(w, "ACK [2@0] {play} missing queue position")
+		return
 	}
 
-	// Wait for mpv to load the file
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(50 * time.Millisecond)
-		if v, err := a.mpv.getProperty("duration"); err == nil {
-			if d, ok := v.(float64); ok && d > 0 {
-				break
+	pos, err := strconv.Atoi(args[0])
+	if err != nil {
+		fmt.Fprintln(w, "ACK [2@0] {play} invalid position")
+		return
+	}
+
+	// Parse optional next=N and seek=<seconds>
+	nextPos := -1
+	var seekPos float64 = -1
+	for _, arg := range args[1:] {
+		if strings.HasPrefix(arg, "next=") {
+			nextPos, _ = strconv.Atoi(strings.TrimPrefix(arg, "next="))
+		} else if strings.HasPrefix(arg, "seek=") {
+			seekPos, _ = strconv.ParseFloat(strings.TrimPrefix(arg, "seek="), 64)
+		}
+	}
+
+	a.queueMu.Lock()
+	if pos < 0 || pos >= len(a.queue) {
+		a.queueMu.Unlock()
+		fmt.Fprintf(w, "ACK [50@0] {play} position %d out of range\n", pos)
+		return
+	}
+	item := a.queue[pos]
+	var nextItem *queueItem
+	if nextPos >= 0 && nextPos < len(a.queue) {
+		ni := a.queue[nextPos]
+		nextItem = &ni
+	}
+	a.queueMu.Unlock()
+
+	path := a.resolveTrackPath(item)
+	if path == "" {
+		fmt.Fprintf(w, "ACK [50@0] {play} cannot resolve path for position %d\n", pos)
+		return
+	}
+
+	if err := a.player.Play(path, item.File, item.RGTrack, item.RGAlbum); err != nil {
+		fmt.Fprintf(w, "ACK [56@0] {play} %s\n", err)
+		return
+	}
+	a.curPos = pos
+
+	// Seek before any audio reaches the speaker (within the speaker buffer window)
+	if seekPos > 0 {
+		a.player.Seek(seekPos)
+	}
+
+	// Preload next track
+	if nextItem != nil {
+		nextPath := a.resolveTrackPath(*nextItem)
+		if nextPath != "" {
+			if err := a.player.Preload(nextPath, nextItem.File, nextItem.RGTrack, nextItem.RGAlbum); err != nil {
+				a.logger.Printf("preload failed: %v", err)
 			}
 		}
 	}
 
-	if timePos > 0 {
-		if err := a.mpv.setProperty("time-pos", timePos); err != nil {
-			a.logger.Printf("handoff: seek failed: %v", err)
-		}
+	fmt.Fprintln(w, "OK")
+}
+
+func (a *agent) handlePreload(w *bufio.Writer, args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(w, "ACK [2@0] {preload} missing queue position")
+		return
 	}
 
-	if err := a.mpv.setProperty("pause", paused); err != nil {
-		a.logger.Printf("handoff: set pause failed: %v", err)
+	pos, err := strconv.Atoi(args[0])
+	if err != nil || pos < 0 {
+		fmt.Fprintln(w, "ACK [2@0] {preload} invalid position")
+		return
+	}
+
+	a.queueMu.Lock()
+	if pos >= len(a.queue) {
+		a.queueMu.Unlock()
+		fmt.Fprintf(w, "ACK [50@0] {preload} position %d out of range\n", pos)
+		return
+	}
+	item := a.queue[pos]
+	a.queueMu.Unlock()
+
+	path := a.resolveTrackPath(item)
+	if path == "" {
+		fmt.Fprintf(w, "ACK [50@0] {preload} cannot resolve path for position %d\n", pos)
+		return
+	}
+
+	if err := a.player.Preload(path, item.File, item.RGTrack, item.RGAlbum); err != nil {
+		fmt.Fprintf(w, "ACK [56@0] {preload} %s\n", err)
+		return
+	}
+	fmt.Fprintln(w, "OK")
+}
+
+// handleGetProperty returns cached player state (compatibility with v1 protocol)
+func (a *agent) handleGetProperty(w *bufio.Writer, name string) {
+	state, elapsed, duration, vol := a.player.State()
+	switch name {
+	case "pause":
+		fmt.Fprintf(w, "value: %v\n", state == "pause" || state == "stop")
+	case "time-pos":
+		fmt.Fprintf(w, "value: %f\n", elapsed)
+	case "duration":
+		fmt.Fprintf(w, "value: %f\n", duration)
+	case "volume":
+		fmt.Fprintf(w, "value: %f\n", vol)
+	default:
+		fmt.Fprintf(w, "ACK [56@0] {get_property} unknown property: %s\n", name)
+		return
+	}
+	fmt.Fprintln(w, "OK")
+}
+
+// handleSetProperty handles property changes (compatibility with v1 protocol)
+func (a *agent) handleSetProperty(w *bufio.Writer, name, rawValue string) {
+	switch name {
+	case "pause":
+		if rawValue == "true" || rawValue == "1" || rawValue == "yes" {
+			a.player.Pause()
+		} else {
+			a.player.Resume()
+		}
+	case "time-pos":
+		secs, _ := strconv.ParseFloat(rawValue, 64)
+		a.player.Seek(secs)
+	case "volume":
+		vol, _ := strconv.ParseFloat(rawValue, 64)
+		a.player.SetVolume(vol)
+	case "replaygain":
+		a.player.SetReplayGain(rawValue)
+	default:
+		fmt.Fprintf(w, "ACK [56@0] {set_property} unknown property: %s\n", name)
+		return
+	}
+	fmt.Fprintln(w, "OK")
+}
+
+// ---------------------------------------------------------------------------
+// Track end handling
+// ---------------------------------------------------------------------------
+
+func (a *agent) handleTrackEnd() {
+	a.queueMu.Lock()
+	qLen := len(a.queue)
+	a.queueMu.Unlock()
+
+	if qLen == 0 {
+		return
+	}
+
+	// The gapless mixer has already swapped to the next track.
+	// We need to figure out what position we're now at.
+	// The server told us the next position via the play/preload commands.
+	// We advance our position and tell the server.
+
+	// For now, increment curPos. The server will send the actual correct
+	// position in its response to agent_advance.
+	oldPos := a.curPos
+	a.sendToServer(fmt.Sprintf("agent_advance %d", oldPos))
+}
+
+// ---------------------------------------------------------------------------
+// State reporting
+// ---------------------------------------------------------------------------
+
+func (a *agent) reportState(state string, elapsed, duration, vol float64) {
+	if a.ctrlConn == nil {
+		return
+	}
+	a.sendToServer(fmt.Sprintf("agent_state %s %d %.3f %.3f %.0f",
+		state, a.curPos, elapsed, duration, vol))
+}
+
+func (a *agent) sendToServer(msg string) {
+	a.ctrlMu.Lock()
+	defer a.ctrlMu.Unlock()
+
+	if a.ctrlW == nil {
+		return
+	}
+	fmt.Fprintf(a.ctrlW, "%s\n", msg)
+	a.ctrlW.Flush()
+}
+
+// ---------------------------------------------------------------------------
+// Queue sync — fetch queue from server via separate MPD connection
+// ---------------------------------------------------------------------------
+
+func (a *agent) syncQueue() error {
+	conn, err := net.DialTimeout("tcp", a.cfg.Agent.Master, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+
+	r := bufio.NewReader(conn)
+
+	// Read greeting
+	if _, err := r.ReadString('\n'); err != nil {
+		return fmt.Errorf("greeting: %w", err)
+	}
+
+	// Send playlistinfo
+	fmt.Fprintf(conn, "playlistinfo\n")
+
+	var items []queueItem
+	current := make(map[string]string)
+
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("read playlistinfo: %w", err)
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "OK" {
+			// Flush last item
+			if _, ok := current["file"]; ok {
+				items = append(items, parseQueueItem(current))
+			}
+			break
+		}
+		if strings.HasPrefix(line, "ACK") {
+			return fmt.Errorf("playlistinfo: %s", line)
+		}
+
+		k, v, ok := strings.Cut(line, ": ")
+		if !ok {
+			continue
+		}
+
+		// New track group starts with "file:"
+		if k == "file" && len(current) > 0 {
+			items = append(items, parseQueueItem(current))
+			current = make(map[string]string)
+		}
+		current[k] = v
+	}
+
+	a.queueMu.Lock()
+	a.queue = items
+	a.queueMu.Unlock()
+
+	fmt.Fprintf(conn, "close\n")
+	return nil
+}
+
+func parseQueueItem(kv map[string]string) queueItem {
+	pos, _ := strconv.Atoi(kv["Pos"])
+	dur, _ := strconv.ParseFloat(kv["duration"], 64)
+	if dur == 0 {
+		dur, _ = strconv.ParseFloat(kv["Time"], 64)
+	}
+	rgt, _ := strconv.ParseFloat(kv["X-ReplayGainTrack"], 64)
+	rga, _ := strconv.ParseFloat(kv["X-ReplayGainAlbum"], 64)
+	return queueItem{
+		Position: pos,
+		File:     kv["file"],
+		SongID:   kv["X-SongId"],
+		Duration: dur,
+		RGTrack:  rgt,
+		RGAlbum:  rga,
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Command parsing (same as MPD server)
+// Track path resolution
+// ---------------------------------------------------------------------------
+
+func (a *agent) resolveTrackPath(item queueItem) string {
+	// If music_dir is configured, use direct file access (satellite mode)
+	if a.cfg.Agent.MusicDir != "" {
+		return filepath.Join(a.cfg.Agent.MusicDir, item.File)
+	}
+
+	// Otherwise, stream via HTTP from server
+	if item.SongID == "" {
+		return ""
+	}
+
+	// Derive from master address — server HTTP API runs on port 6701 on the same host
+	h, _, err := net.SplitHostPort(a.cfg.Agent.Master)
+	if err != nil {
+		h = a.cfg.Agent.Master
+	}
+	return fmt.Sprintf("http://%s:6701/api/v1/stream/%s", h, item.SongID)
+}
+
+// ---------------------------------------------------------------------------
+// Command parsing
 // ---------------------------------------------------------------------------
 
 func parseCommand(line string) (string, []string) {
@@ -655,22 +708,6 @@ func mpdQuote(s string) string {
 	escaped := strings.ReplaceAll(s, `\`, `\\`)
 	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
 	return `"` + escaped + `"`
-}
-
-func parsePropertyValue(s string) any {
-	if s == "true" {
-		return true
-	}
-	if s == "false" {
-		return false
-	}
-	if i, err := strconv.Atoi(s); err == nil {
-		return i
-	}
-	if f, err := strconv.ParseFloat(s, 64); err == nil {
-		return f
-	}
-	return s
 }
 
 func getenvDefault(key, fallback string) string {

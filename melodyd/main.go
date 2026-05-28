@@ -45,11 +45,9 @@ type config struct {
 		EmbedLyrics bool   `toml:"embed_lyrics"`
 		SaveLRC     bool   `toml:"save_lrc"`
 	} `toml:"library"`
-	MPV struct {
-		Socket     string `toml:"socket"`
-		Executable string `toml:"executable"`
+	Player struct {
 		ReplayGain string `toml:"replaygain"` // "off", "track", "album"
-	} `toml:"mpv"`
+	} `toml:"player"`
 	Random struct {
 		Tracks int `toml:"tracks"`
 	} `toml:"random"`
@@ -69,32 +67,6 @@ type paths struct {
 }
 
 // ---------------------------------------------------------------------------
-// mpv IPC
-// ---------------------------------------------------------------------------
-
-type mpvClient struct {
-	socketPath string
-	executable string
-	replaygain string
-	mu         sync.Mutex
-	process    *exec.Cmd
-	reqID      int
-	conn       net.Conn
-	scanner    *bufio.Scanner
-}
-
-type mpvRequest struct {
-	Command   []any `json:"command"`
-	RequestID int   `json:"request_id"`
-}
-
-type mpvResponse struct {
-	Data      any    `json:"data"`
-	Error     string `json:"error"`
-	RequestID int    `json:"request_id"`
-}
-
-// ---------------------------------------------------------------------------
 // Playback target interface
 // ---------------------------------------------------------------------------
 
@@ -106,12 +78,8 @@ type playbackTarget interface {
 	playlistMove(from, to int) error
 	getProperty(name string) (any, error)
 	setProperty(name string, value any) error
-	command(args ...any) (*mpvResponse, error)
-	commandBatch(cmds [][]any) ([]*mpvResponse, error)
 	isRunning() bool
 }
-
-// remoteTarget is now agentTarget in mpd.go — agents connect via MPD protocol.
 
 // ---------------------------------------------------------------------------
 // Device management
@@ -134,11 +102,10 @@ type device struct {
 // ---------------------------------------------------------------------------
 
 type app struct {
-	cfg     config
-	paths   paths
-	logger  *log.Logger
-	mpv     *mpvClient
-	db      *musicDB
+	cfg    config
+	paths  paths
+	logger *log.Logger
+	db     *musicDB
 	scanner *scanner
 	// playQueue tracks song IDs (SQLite track IDs as strings) in current mpv playlist order
 	playQueue      []string
@@ -186,29 +153,15 @@ func main() {
 	}
 
 	a := &app{
-		cfg:    cfg,
-		paths:  pathCfg,
-		logger: logger,
-		db:     db,
-		mpv: &mpvClient{
-			socketPath: cfg.MPV.Socket,
-			executable: cfg.MPV.Executable,
-			replaygain: cfg.MPV.ReplayGain,
-		},
-		scanner:   newScanner(cfg.Library.MusicDir, db, logger, pathCfg.TranscodeCacheDir),
-		playQueue: []string{},
-		devices: map[string]*device{
-			"local": {
-				ID:       "local",
-				Name:     cfg.Server.Name,
-				IsLocal:  true,
-				Type:     "local",
-				LastSeen: time.Now(),
-			},
-		},
-		agentTargets: make(map[string]*agentTarget),
-		webTargets:   make(map[string]*webTarget),
-		activeDevice:  "local",
+		cfg:           cfg,
+		paths:         pathCfg,
+		logger:        logger,
+		db:            db,
+		scanner:       newScanner(cfg.Library.MusicDir, db, logger, pathCfg.TranscodeCacheDir),
+		playQueue:     []string{},
+		devices:       make(map[string]*device),
+		agentTargets:  make(map[string]*agentTarget),
+		webTargets:    make(map[string]*webTarget),
 		prioReturnPos: -1,
 		mpdHub:        newNotifyHub(),
 	}
@@ -247,8 +200,7 @@ func main() {
 	}()
 	go a.scanner.watchForChanges()
 
-	go a.ensureMPV()
-	go a.watchMPVEvents()
+	go a.startLocalAgent()
 	go a.watchPlayState()
 	go a.deviceCleanup()
 	if a.cfg.MPD.Port > 0 {
@@ -323,7 +275,7 @@ func loadConfig() (config, paths, error) {
 	var cfg config
 	server, _ := raw["server"].(map[string]any)
 	library, _ := raw["library"].(map[string]any)
-	mpvSection, _ := raw["mpv"].(map[string]any)
+	playerSection, _ := raw["player"].(map[string]any)
 	random, _ := raw["random"].(map[string]any)
 	cfg.Server.Name = stringify(server["name"])
 	cfg.Server.BindToAddress = stringSlice(server["bind_to_address"])
@@ -333,9 +285,7 @@ func loadConfig() (config, paths, error) {
 	cfg.Library.MusicDir = stringify(library["music_dir"])
 	cfg.Library.EmbedLyrics = boolFromAny(library["embed_lyrics"], false)
 	cfg.Library.SaveLRC = boolFromAny(library["save_lrc"], false)
-	cfg.MPV.Socket = stringify(mpvSection["socket"])
-	cfg.MPV.Executable = stringify(mpvSection["executable"])
-	cfg.MPV.ReplayGain = stringify(mpvSection["replaygain"])
+	cfg.Player.ReplayGain = stringify(playerSection["replaygain"])
 	cfg.Random.Tracks = intFromAny(random["tracks"], 20)
 	mpdSection, _ := raw["mpd"].(map[string]any)
 	cfg.MPD.Port = intFromAny(mpdSection["port"], 6600)
@@ -350,20 +300,13 @@ bind_to_address = ["0.0.0.0:6701", "` + shared.DefaultSocketPath() + `"]
 [library]
 music_dir = ""
 
-[mpv]
-socket = "` + defaultMPVSocket() + `"
-executable = "mpv"
+[player]
 replaygain = ""
 
 [random]
 tracks = 20
 
 `
-}
-
-func defaultMPVSocket() string {
-	runtimeDir := shared.Getenv("XDG_RUNTIME_DIR", filepath.Join(os.TempDir(), fmt.Sprintf("melody-%d", os.Getuid())))
-	return filepath.Join(runtimeDir, "melody", "mpv.sock")
 }
 
 func applyDefaults(cfg *config) {
@@ -374,12 +317,6 @@ func applyDefaults(cfg *config) {
 		} else {
 			cfg.Server.Name = "Server"
 		}
-	}
-	if cfg.MPV.Socket == "" {
-		cfg.MPV.Socket = defaultMPVSocket()
-	}
-	if cfg.MPV.Executable == "" {
-		cfg.MPV.Executable = "mpv"
 	}
 	if cfg.Random.Tracks <= 0 {
 		cfg.Random.Tracks = 20
@@ -563,8 +500,8 @@ func (a *app) handleMPDWebSocket(w http.ResponseWriter, r *http.Request) {
 // Stream URL helpers
 // ---------------------------------------------------------------------------
 
-// streamURL returns a URL for streaming the given track.
-// For local mpv, returns the file path directly.
+// streamURL returns a URL or path for the given track.
+// For local agents, returns the file path. For remote, returns HTTP URL.
 func (a *app) streamURL(songID string) string {
 	id, err := strconv.ParseInt(songID, 10, 64)
 	if err != nil {
@@ -574,7 +511,6 @@ func (a *app) streamURL(songID string) string {
 	if err != nil {
 		return ""
 	}
-	// For local playback, use the file path directly
 	dev := a.activeDeviceInfo()
 	if dev == nil || dev.IsLocal {
 		return path
@@ -602,8 +538,20 @@ func (a *app) streamURLForDevice(songID, format string, maxBitRate int, _ string
 
 func (a *app) streamURLForActiveDevice(songID string) string {
 	dev := a.activeDeviceInfo()
-	if dev == nil || dev.IsLocal {
-		// Local mpv: use file path directly
+	if dev == nil {
+		// No active device — return file path as fallback
+		id, err := strconv.ParseInt(songID, 10, 64)
+		if err != nil {
+			return ""
+		}
+		path, err := a.db.trackPathByID(id)
+		if err != nil {
+			return ""
+		}
+		return path
+	}
+	if dev.IsLocal {
+		// Local agent: return file path
 		id, err := strconv.ParseInt(songID, 10, 64)
 		if err != nil {
 			return ""
@@ -664,27 +612,6 @@ func (a *app) restoreActiveDevice() {
 	}
 }
 
-
-// ---------------------------------------------------------------------------
-// mpv management
-// ---------------------------------------------------------------------------
-
-func (a *app) ensureMPV() {
-	for {
-		if a.mpv.isRunning() {
-			time.Sleep(5 * time.Second)
-			continue
-		}
-		a.logger.Printf("mpv: starting idle instance")
-		if err := a.mpv.start(); err != nil {
-			a.logger.Printf("mpv: start failed: %v", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-		a.logger.Printf("mpv: started, ipc at %s", a.mpv.socketPath)
-		time.Sleep(5 * time.Second)
-	}
-}
 
 // generateShuffle creates a shuffled order for the queue.
 // The current track is placed at shufflePos (position 0), and only the
@@ -798,57 +725,135 @@ func (a *app) nextQueuePos() int {
 	return next
 }
 
-// syncTarget loads the current track and the preloaded next track into the
-// target. The target always has at most 2 tracks: slot 0 = current, slot 1 = next.
+// ---------------------------------------------------------------------------
+// Sync plan types — separate state computation (under lock) from IPC execution
+// ---------------------------------------------------------------------------
+
+// syncPlan describes IPC operations to load tracks into the playback target.
+type syncPlan struct {
+	doClear    bool
+	currentURL string
+	nextURL    string
+	// for logging
+	curPos     int
+	curSongID  string
+	nextPos    int
+	nextSongID string
+}
+
+// nextTrackPlan describes IPC operations to update the preloaded next track.
+type nextTrackPlan struct {
+	removeOld bool
+	nextURL   string
+	nextPos   int // queue position for agent targets
+}
+
+// planSyncTarget computes what IPC calls are needed.
 // Must be called with playQueueMu held.
-func (a *app) syncTarget() {
-	t := a.target()
+func (a *app) planSyncTarget() syncPlan {
 	qLen := len(a.playQueue)
 
 	if qLen == 0 || a.curQueuePos < 0 || a.curQueuePos >= qLen {
-		_ = t.playlistClear()
 		a.pendingNextPos = -1
+		return syncPlan{doClear: true}
+	}
+
+	plan := syncPlan{
+		doClear:   true,
+		curPos:    a.curQueuePos,
+		curSongID: a.playQueue[a.curQueuePos],
+	}
+	plan.currentURL = a.streamURLForActiveDevice(plan.curSongID)
+
+	a.pendingNextPos = a.nextQueuePos()
+	if a.pendingNextPos >= 0 && a.pendingNextPos < qLen {
+		plan.nextPos = a.pendingNextPos
+		plan.nextSongID = a.playQueue[a.pendingNextPos]
+		plan.nextURL = a.streamURLForActiveDevice(plan.nextSongID)
+	}
+
+	return plan
+}
+
+// execSyncPlan executes the IPC calls described by the plan.
+// Must NOT be called with playQueueMu held.
+func (a *app) execSyncPlan(plan syncPlan) {
+	t := a.target()
+
+	// Agent targets use position-based commands
+	if at, ok := t.(*agentTarget); ok {
+		if plan.currentURL == "" {
+			_ = at.playlistClear()
+			return
+		}
+		a.logger.Printf("syncTarget(agent): play pos %d next=%d", plan.curPos, plan.nextPos)
+		if err := at.agentPlay(plan.curPos, plan.nextPos); err != nil {
+			a.logger.Printf("syncTarget(agent): play failed: %v", err)
+		}
 		return
 	}
 
-	// Load current track
-	_ = t.playlistClear()
-	url := a.streamURLForActiveDevice(a.playQueue[a.curQueuePos])
-	a.logger.Printf("syncTarget: loading pos %d (songID=%s)", a.curQueuePos, a.playQueue[a.curQueuePos])
-	if err := t.loadFile(url, "replace", a.replayGainMeta(a.playQueue[a.curQueuePos])); err != nil {
+	if plan.doClear {
+		_ = t.playlistClear()
+	}
+	if plan.currentURL == "" {
+		return
+	}
+
+	a.logger.Printf("syncTarget: loading pos %d (songID=%s)", plan.curPos, plan.curSongID)
+	if err := t.loadFile(plan.currentURL, "replace", nil); err != nil {
 		a.logger.Printf("syncTarget: loadFile replace failed: %v", err)
 	}
 
-	// Preload next track for gapless playback
-	a.pendingNextPos = a.nextQueuePos()
-	if a.pendingNextPos >= 0 && a.pendingNextPos < qLen {
-		nextURL := a.streamURLForActiveDevice(a.playQueue[a.pendingNextPos])
-		a.logger.Printf("syncTarget: preloading pos %d (songID=%s)", a.pendingNextPos, a.playQueue[a.pendingNextPos])
-		_ = t.loadFile(nextURL, "append", a.replayGainMeta(a.playQueue[a.pendingNextPos]))
+	if plan.nextURL != "" {
+		a.logger.Printf("syncTarget: preloading pos %d (songID=%s)", plan.nextPos, plan.nextSongID)
+		_ = t.loadFile(plan.nextURL, "append", nil)
 	}
-
 }
 
-// syncNextTrack updates only the preloaded next track (slot 1) without
-// restarting the current track. Used when playback modes change.
-func (a *app) syncNextTrack() {
-	t := a.target()
+// planNextTrack computes IPC operations to update the preloaded next track.
+// Must be called with playQueueMu held.
+func (a *app) planNextTrack() nextTrackPlan {
 	qLen := len(a.playQueue)
 
 	if qLen == 0 || a.curQueuePos < 0 || a.curQueuePos >= qLen {
+		return nextTrackPlan{nextPos: -1}
+	}
+
+	plan := nextTrackPlan{
+		removeOld: a.pendingNextPos >= 0,
+		nextPos:   -1,
+	}
+
+	a.pendingNextPos = a.nextQueuePos()
+	if a.pendingNextPos >= 0 && a.pendingNextPos < qLen {
+		plan.nextURL = a.streamURLForActiveDevice(a.playQueue[a.pendingNextPos])
+		plan.nextPos = a.pendingNextPos
+	}
+
+	return plan
+}
+
+// execNextTrackPlan executes the next-track preload IPC.
+// Must NOT be called with playQueueMu held.
+func (a *app) execNextTrackPlan(plan nextTrackPlan) {
+	t := a.target()
+
+	// Agent targets use position-based preload
+	if at, ok := t.(*agentTarget); ok {
+		if plan.nextPos >= 0 {
+			if err := at.agentPreload(plan.nextPos); err != nil {
+				a.logger.Printf("execNextTrackPlan(agent): preload %d failed: %v", plan.nextPos, err)
+			}
+		}
 		return
 	}
 
-	// Remove old preloaded track (slot 1) if present
-	if a.pendingNextPos >= 0 {
+	if plan.removeOld {
 		_ = t.playlistRemove(1)
 	}
-
-	// Preload new next track
-	a.pendingNextPos = a.nextQueuePos()
-	if a.pendingNextPos >= 0 && a.pendingNextPos < qLen {
-		nextURL := a.streamURLForActiveDevice(a.playQueue[a.pendingNextPos])
-		_ = t.loadFile(nextURL, "append", a.replayGainMeta(a.playQueue[a.pendingNextPos]))
+	if plan.nextURL != "" {
+		_ = t.loadFile(plan.nextURL, "append", nil)
 	}
 }
 
@@ -857,25 +862,25 @@ func (a *app) syncNextTrack() {
 // IMPORTANT: at this point the preloaded track at slot 1 is already playing in mpv.
 // We must NOT call syncTarget (which would clear+reload and restart the track).
 // Instead: remove finished slot 0, let playing track slide to slot 0, append new slot 1.
+//
+// The lock is released before IPC calls to avoid blocking clients querying status.
 func (a *app) advanceTrack() {
-	t := a.target()
 	a.playQueueMu.Lock()
-	defer a.playQueueMu.Unlock()
 
 	qLen := len(a.playQueue)
 	if qLen == 0 {
+		a.playQueueMu.Unlock()
 		return
 	}
 
 	// Single mode: stop or repeat the current track
 	if a.modeSingle {
-		if a.modeRepeat {
-			// Loop the same track — reload it at slot 0
-			a.syncTarget()
-		} else {
-			// Pause at end — go back to slot 0 (reload current track, paused)
-			a.syncTarget()
-			_ = t.setProperty("pause", true)
+		plan := a.planSyncTarget()
+		paused := !a.modeRepeat
+		a.playQueueMu.Unlock()
+		a.execSyncPlan(plan)
+		if paused {
+			_ = a.target().setProperty("pause", true)
 		}
 		a.mpdHub.notify(SubPlayer)
 		return
@@ -901,8 +906,9 @@ func (a *app) advanceTrack() {
 
 		if qLen == 0 {
 			a.curQueuePos = 0
-			_ = t.playlistClear()
 			a.pendingNextPos = -1
+			a.playQueueMu.Unlock()
+			_ = a.target().playlistClear()
 			a.mpdHub.notify(SubPlaylist, SubPlayer)
 			return
 		}
@@ -927,19 +933,34 @@ func (a *app) advanceTrack() {
 			}
 		} else {
 			a.curQueuePos = 0
-			_ = t.playlistClear()
 			a.pendingNextPos = -1
+			a.playQueueMu.Unlock()
+			_ = a.target().playlistClear()
 			a.mpdHub.notify(SubPlaylist, SubPlayer)
 			return
 		}
 
-		// Remove finished track from mpv (slot 0), playing track slides to slot 0
-		_ = t.playlistRemove(0)
-		// Preload new next track at slot 1
+		// Compute next preload under lock
 		a.pendingNextPos = a.nextQueuePos()
+		nextPreloadPos := a.pendingNextPos
+		var nextURL string
 		if a.pendingNextPos >= 0 && a.pendingNextPos < qLen {
-			nextURL := a.streamURLForActiveDevice(a.playQueue[a.pendingNextPos])
-			_ = t.loadFile(nextURL, "append", a.replayGainMeta(a.playQueue[a.pendingNextPos]))
+			nextURL = a.streamURLForActiveDevice(a.playQueue[a.pendingNextPos])
+		}
+		a.playQueueMu.Unlock()
+
+		// IPC calls outside lock
+		t := a.target()
+		if at, ok := t.(*agentTarget); ok {
+			// Agent: just tell it about the next track to preload
+			if nextPreloadPos >= 0 {
+				_ = at.agentPreload(nextPreloadPos)
+			}
+		} else {
+			_ = t.playlistRemove(0)
+			if nextURL != "" {
+				_ = t.loadFile(nextURL, "append", nil)
+			}
 		}
 		a.mpdHub.notify(SubPlaylist, SubPlayer)
 		return
@@ -961,20 +982,35 @@ func (a *app) advanceTrack() {
 		}
 	} else {
 		// No next track was preloaded — end of queue, stop playback
-		_ = t.setProperty("pause", true)
-		a.syncTarget() // reload current track at beginning, paused
+		plan := a.planSyncTarget()
+		a.playQueueMu.Unlock()
+		_ = a.target().setProperty("pause", true)
+		a.execSyncPlan(plan)
 		a.mpdHub.notify(SubPlayer)
 		return
 	}
 
-	// Remove finished track from mpv (slot 0), playing track slides to slot 0
-	_ = t.playlistRemove(0)
-
-	// Preload new next track at slot 1
+	// Compute next preload under lock
 	a.pendingNextPos = a.nextQueuePos()
+	nextPreloadPos := a.pendingNextPos
+	var nextURL string
 	if a.pendingNextPos >= 0 && a.pendingNextPos < qLen {
-		nextURL := a.streamURLForActiveDevice(a.playQueue[a.pendingNextPos])
-		_ = t.loadFile(nextURL, "append", a.replayGainMeta(a.playQueue[a.pendingNextPos]))
+		nextURL = a.streamURLForActiveDevice(a.playQueue[a.pendingNextPos])
+	}
+	a.playQueueMu.Unlock()
+
+	// IPC calls outside lock — clients can query status while these run
+	t := a.target()
+	if at, ok := t.(*agentTarget); ok {
+		// Agent: just tell it about the next track to preload
+		if nextPreloadPos >= 0 {
+			_ = at.agentPreload(nextPreloadPos)
+		}
+	} else {
+		_ = t.playlistRemove(0)
+		if nextURL != "" {
+			_ = t.loadFile(nextURL, "append", nil)
+		}
 	}
 
 	a.mpdHub.notify(SubPlayer)
@@ -996,289 +1032,6 @@ func (a *app) removeFromQueue(pos int) {
 	a.savePlayQueue()
 }
 
-// watchMPVEvents opens a dedicated connection to mpv's IPC socket and listens
-// for end-file events. When a track ends naturally (reason=eof), it calls
-// advanceTrack. This replaces polling — no races, no skipInProgress flag needed.
-// User-initiated actions (next, play, etc.) cause reason=stop which is ignored.
-func (a *app) watchMPVEvents() {
-	for {
-		// Wait for mpv to be ready
-		for !a.mpv.isRunning() {
-			time.Sleep(1 * time.Second)
-		}
-
-		conn, err := net.DialTimeout("unix", a.mpv.socketPath, 2*time.Second)
-		if err != nil {
-			a.logger.Printf("mpv events: connect failed: %v", err)
-			time.Sleep(2 * time.Second)
-			continue
-		}
-
-		a.logger.Printf("mpv events: listening for end-file events")
-		scanner := bufio.NewScanner(conn)
-		for scanner.Scan() {
-			var evt struct {
-				Event string `json:"event"`
-				Reason string `json:"reason"`
-			}
-			if err := json.Unmarshal(scanner.Bytes(), &evt); err != nil {
-				continue
-			}
-			if evt.Event != "end-file" {
-				continue
-			}
-			a.logger.Printf("mpv events: end-file reason=%s", evt.Reason)
-			if evt.Reason == "eof" {
-				// Only advance if local mpv is the active playback target.
-				// Other devices (Android, web) handle their own track endings.
-				a.devicesMu.RLock()
-				active := a.activeDevice
-				a.devicesMu.RUnlock()
-				if active != "" && active != "local" {
-					a.logger.Printf("mpv events: ignoring eof, active device is %s", active)
-					continue
-				}
-				a.advanceTrack()
-			}
-		}
-
-		conn.Close()
-		a.logger.Printf("mpv events: connection lost, reconnecting...")
-		time.Sleep(1 * time.Second)
-	}
-}
-
-func (m *mpvClient) isRunning() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.conn != nil {
-		// Try a lightweight property get to confirm mpv is alive
-		return true
-	}
-	conn, err := net.DialTimeout("unix", m.socketPath, 500*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	m.conn = conn
-	m.scanner = bufio.NewScanner(conn)
-	return true
-}
-
-func (m *mpvClient) start() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if err := os.MkdirAll(filepath.Dir(m.socketPath), 0o755); err != nil {
-		return err
-	}
-	_ = os.Remove(m.socketPath)
-
-	args := []string{"--idle", "--no-video", "--no-terminal", "--input-ipc-server=" + m.socketPath}
-	if m.replaygain != "" && m.replaygain != "off" {
-		args = append(args, "--replaygain="+m.replaygain)
-	}
-	cmd := exec.Command(m.executable, args...)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	m.process = cmd
-
-	// Wait for socket to appear
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(m.socketPath); err == nil {
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return fmt.Errorf("mpv socket did not appear at %s", m.socketPath)
-}
-
-func (m *mpvClient) connect() error {
-	if m.conn != nil {
-		m.conn.Close()
-		m.conn = nil
-		m.scanner = nil
-	}
-	conn, err := net.DialTimeout("unix", m.socketPath, 2*time.Second)
-	if err != nil {
-		return fmt.Errorf("mpv connect: %w", err)
-	}
-	m.conn = conn
-	m.scanner = bufio.NewScanner(conn)
-	return nil
-}
-
-func (m *mpvClient) command(args ...any) (*mpvResponse, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.reqID++
-	reqID := m.reqID
-
-	// Try on existing connection, reconnect once on failure
-	for attempt := 0; attempt < 2; attempt++ {
-		if m.conn == nil {
-			if err := m.connect(); err != nil {
-				return nil, err
-			}
-		}
-
-		m.conn.SetDeadline(time.Now().Add(5 * time.Second))
-
-		req := mpvRequest{Command: args, RequestID: reqID}
-		data, err := json.Marshal(req)
-		if err != nil {
-			return nil, err
-		}
-		data = append(data, '\n')
-		if _, err := m.conn.Write(data); err != nil {
-			// Connection broken, reconnect
-			m.conn.Close()
-			m.conn = nil
-			m.scanner = nil
-			continue
-		}
-
-		for m.scanner.Scan() {
-			var resp mpvResponse
-			if err := json.Unmarshal(m.scanner.Bytes(), &resp); err != nil {
-				continue
-			}
-			if resp.RequestID == reqID {
-				if resp.Error != "" && resp.Error != "success" {
-					return nil, fmt.Errorf("mpv: %s", resp.Error)
-				}
-				return &resp, nil
-			}
-		}
-		// Scanner exhausted — connection broken
-		m.conn.Close()
-		m.conn = nil
-		m.scanner = nil
-	}
-	return nil, fmt.Errorf("mpv: no response")
-}
-
-// commandBatch sends multiple commands in a single write and reads all responses.
-// Much faster than sequential command() calls due to reduced IPC round-trips.
-func (m *mpvClient) commandBatch(cmds [][]any) ([]*mpvResponse, error) {
-	if len(cmds) == 0 {
-		return nil, nil
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	startID := m.reqID + 1
-	var allData []byte
-	for _, args := range cmds {
-		m.reqID++
-		req := mpvRequest{Command: args, RequestID: m.reqID}
-		data, err := json.Marshal(req)
-		if err != nil {
-			return nil, err
-		}
-		allData = append(allData, data...)
-		allData = append(allData, '\n')
-	}
-	endID := m.reqID
-
-	for attempt := 0; attempt < 2; attempt++ {
-		if m.conn == nil {
-			if err := m.connect(); err != nil {
-				return nil, err
-			}
-		}
-
-		m.conn.SetDeadline(time.Now().Add(30 * time.Second))
-		if _, err := m.conn.Write(allData); err != nil {
-			m.conn.Close()
-			m.conn = nil
-			m.scanner = nil
-			continue
-		}
-
-		responses := make([]*mpvResponse, len(cmds))
-		got := 0
-		for m.scanner.Scan() && got < len(cmds) {
-			var resp mpvResponse
-			if err := json.Unmarshal(m.scanner.Bytes(), &resp); err != nil {
-				continue
-			}
-			if resp.RequestID >= startID && resp.RequestID <= endID {
-				idx := resp.RequestID - startID
-				responses[idx] = &resp
-				got++
-			}
-		}
-		if got == len(cmds) {
-			return responses, nil
-		}
-		m.conn.Close()
-		m.conn = nil
-		m.scanner = nil
-	}
-	return nil, fmt.Errorf("mpv: batch failed")
-}
-
-func (m *mpvClient) getProperty(name string) (any, error) {
-	resp, err := m.command("get_property", name)
-	if err != nil {
-		return nil, err
-	}
-	return resp.Data, nil
-}
-
-func (m *mpvClient) setProperty(name string, value any) error {
-	// mpv uses "no" instead of "off" for its replaygain property
-	if name == "replaygain" {
-		if s, ok := value.(string); ok && s == "off" {
-			value = "no"
-		}
-	}
-	_, err := m.command("set_property", name, value)
-	return err
-}
-
-func (m *mpvClient) loadFile(url string, mode string, meta map[string]any) error {
-	_, err := m.command("loadfile", url, mode)
-	return err
-}
-
-func (m *mpvClient) loadFileBatch(urls []string, mode string) error {
-	if len(urls) == 0 {
-		return nil
-	}
-	cmds := make([][]any, len(urls))
-	for i, url := range urls {
-		m := mode
-		if i > 0 && mode == "replace" {
-			m = "append"
-		}
-		cmds[i] = []any{"loadfile", url, m}
-	}
-	_, err := m.commandBatch(cmds)
-	return err
-}
-
-func (m *mpvClient) playlistClear() error {
-	_, err := m.command("playlist-clear")
-	return err
-}
-
-func (m *mpvClient) playlistRemove(index int) error {
-	_, err := m.command("playlist-remove", index)
-	return err
-}
-
-func (m *mpvClient) playlistMove(from, to int) error {
-	_, err := m.command("playlist-move", from, to)
-	return err
-}
-
 // ---------------------------------------------------------------------------
 // Playback target / device helpers
 // ---------------------------------------------------------------------------
@@ -1286,17 +1039,27 @@ func (m *mpvClient) playlistMove(from, to int) error {
 func (a *app) target() playbackTarget {
 	a.devicesMu.RLock()
 	defer a.devicesMu.RUnlock()
-	if a.activeDevice == "" || a.activeDevice == "local" {
-		return a.mpv
-	}
-	if at, ok := a.agentTargets[a.activeDevice]; ok && at.isRunning() {
+	devID := a.activeDevice
+	if at, ok := a.agentTargets[devID]; ok && at.isRunning() {
 		return at
 	}
-	if wt, ok := a.webTargets[a.activeDevice]; ok && wt.isRunning() {
+	if wt, ok := a.webTargets[devID]; ok && wt.isRunning() {
 		return wt
 	}
-	return a.mpv
+	return &noopTarget{}
 }
+
+// noopTarget is returned when no playback device is available.
+type noopTarget struct{}
+
+func (noopTarget) loadFile(string, string, map[string]any) error { return nil }
+func (noopTarget) loadFileBatch([]string, string) error          { return nil }
+func (noopTarget) playlistClear() error                          { return nil }
+func (noopTarget) playlistRemove(int) error                      { return nil }
+func (noopTarget) playlistMove(int, int) error                   { return nil }
+func (noopTarget) getProperty(string) (any, error)               { return nil, fmt.Errorf("no device") }
+func (noopTarget) setProperty(string, any) error                 { return nil }
+func (noopTarget) isRunning() bool                               { return false }
 
 // sortedDevices returns devices in stable order: "local" first, then agents sorted by ID.
 // Caller must hold devicesMu.
@@ -1323,12 +1086,6 @@ func (a *app) sortedDevices() []*device {
 func (a *app) activeDeviceInfo() *device {
 	a.devicesMu.RLock()
 	defer a.devicesMu.RUnlock()
-	if a.activeDevice == "" || a.activeDevice == "local" {
-		if d, ok := a.devices["local"]; ok {
-			return d
-		}
-		return &device{ID: "local", Name: a.cfg.Server.Name, IsLocal: true, LastSeen: time.Now()}
-	}
 	return a.devices[a.activeDevice]
 }
 
@@ -1364,7 +1121,6 @@ func (a *app) addSongsWithPriority(songIDs []string, mode string, priority int) 
 	}
 
 	a.playQueueMu.Lock()
-	defer a.playQueueMu.Unlock()
 
 	// Build priority slice for the new tracks
 	prios := make([]int, len(songIDs))
@@ -1389,7 +1145,9 @@ func (a *app) addSongsWithPriority(songIDs []string, mode string, priority int) 
 			a.generateShuffle()
 		}
 		a.savePlayQueue()
-		a.syncTarget()
+		plan := a.planSyncTarget()
+		a.playQueueMu.Unlock()
+		a.execSyncPlan(plan)
 		return a.target().setProperty("pause", false)
 
 	case "insert":
@@ -1423,11 +1181,14 @@ func (a *app) addSongsWithPriority(songIDs []string, mode string, priority int) 
 		a.queueVersion++
 		a.savePlayQueue()
 		// Resync preloaded next track since insert may change it
-		a.syncNextTrack()
+		ntPlan := a.planNextTrack()
+		a.playQueueMu.Unlock()
+		a.execNextTrackPlan(ntPlan)
 		return a.target().setProperty("pause", false)
 
 	default: // "add"
 		wasEmpty := len(a.playQueue) == 0
+		oldNextPos := a.pendingNextPos
 		a.playQueue = append(a.playQueue, songIDs...)
 		a.queuePriority = append(a.queuePriority, prios...)
 		for range songIDs {
@@ -1438,10 +1199,18 @@ func (a *app) addSongsWithPriority(songIDs []string, mode string, priority int) 
 		a.savePlayQueue()
 		if wasEmpty {
 			a.curQueuePos = 0
-			a.syncTarget()
+			plan := a.planSyncTarget()
+			a.playQueueMu.Unlock()
+			a.execSyncPlan(plan)
 		} else {
-			// Resync preloaded next track in case it changed (priority may affect next)
-			a.syncNextTrack()
+			// Only resync preload if the next track actually changed
+			// (e.g. priority tracks were added). Appending to the end
+			// of the queue never changes the next track.
+			ntPlan := a.planNextTrack()
+			a.playQueueMu.Unlock()
+			if ntPlan.nextPos != oldNextPos {
+				a.execNextTrackPlan(ntPlan)
+			}
 		}
 		return nil
 	}
@@ -1498,23 +1267,20 @@ func (a *app) restorePlayQueue() {
 	}
 	a.logger.Printf("restored play queue: %d tracks", len(a.playQueue))
 
-	// For local target, reload into mpv (paused) so clients can browse/click
-	if a.activeDevice == "" || a.activeDevice == "local" {
-		go a.reloadQueueIntoTarget()
-	}
+	go a.reloadQueueIntoTarget()
 }
 
 // reloadQueueIntoTarget loads the 2-track window into the current target (paused).
 func (a *app) reloadQueueIntoTarget() {
-	// Wait for mpv to be ready
-	for i := 0; i < 20; i++ {
-		if a.mpv.isRunning() {
+	// Wait for a playback target to be ready
+	for i := 0; i < 30; i++ {
+		if t := a.target(); t != nil && t.isRunning() {
 			break
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	if !a.mpv.isRunning() {
-		a.logger.Printf("restore: mpv not ready, skipping queue reload")
+	if t := a.target(); t == nil || !t.isRunning() {
+		a.logger.Printf("restore: no target ready, skipping queue reload")
 		return
 	}
 
@@ -1530,8 +1296,9 @@ func (a *app) reloadQueueIntoTarget() {
 	a.restorePlayStatePos()
 
 	a.playQueueMu.Lock()
-	a.syncTarget()
+	plan := a.planSyncTarget()
 	a.playQueueMu.Unlock()
+	a.execSyncPlan(plan)
 
 	_ = a.target().setProperty("pause", true)
 	a.logger.Printf("restored 2-track window at pos %d (paused)", a.curQueuePos)
@@ -1562,7 +1329,7 @@ func (a *app) savePlayState() {
 	ps.Random = a.modeRandom
 	ps.Single = a.modeSingle
 	ps.Consume = a.modeConsume
-	ps.ReplayGain = a.cfg.MPV.ReplayGain
+	ps.ReplayGain = a.cfg.Player.ReplayGain
 	if tpRaw, err := t.getProperty("time-pos"); err == nil {
 		if f, ok := tpRaw.(float64); ok {
 			ps.TimePos = f
@@ -1596,7 +1363,7 @@ func (a *app) restorePlayStatePos() {
 	a.modeSingle = ps.Single
 	a.modeConsume = ps.Consume
 	if ps.ReplayGain != "" {
-		a.cfg.MPV.ReplayGain = ps.ReplayGain
+		a.cfg.Player.ReplayGain = ps.ReplayGain
 	}
 	if a.modeRandom {
 		a.generateShuffle()
@@ -1860,10 +1627,9 @@ func (a *app) handleCoverArt(w http.ResponseWriter, r *http.Request) {
 
 // switchDevice performs a full device handoff: captures playback state from old device,
 // loads the queue into the new device, seeks to the same position, and resumes.
-// Returns ("already active", nil) if newID is already active, or an error string if device not found.
 func (a *app) switchDevice(newID string) error {
 	a.devicesMu.Lock()
-	newDev, exists := a.devices[newID]
+	_, exists := a.devices[newID]
 	if !exists {
 		a.devicesMu.Unlock()
 		return fmt.Errorf("device not found: %s", newID)
@@ -1877,49 +1643,51 @@ func (a *app) switchDevice(newID string) error {
 
 	// Build old target while holding devicesMu
 	var oldTarget playbackTarget
-	if oldID == "" || oldID == "local" {
-		oldTarget = a.mpv
-	} else if at, ok := a.agentTargets[oldID]; ok && at.isRunning() {
+	if at, ok := a.agentTargets[oldID]; ok && at.isRunning() {
 		oldTarget = at
 	} else if wt, ok := a.webTargets[oldID]; ok && wt.isRunning() {
 		oldTarget = wt
-	} else {
-		oldTarget = a.mpv
 	}
 
 	// Build new target
 	var newTarget playbackTarget
-	if newDev.IsLocal {
-		newTarget = a.mpv
-	} else if at, ok := a.agentTargets[newDev.ID]; ok && at.isRunning() {
+	if at, ok := a.agentTargets[newID]; ok && at.isRunning() {
 		newTarget = at
-	} else if wt, ok := a.webTargets[newDev.ID]; ok && wt.isRunning() {
+	} else if wt, ok := a.webTargets[newID]; ok && wt.isRunning() {
 		newTarget = wt
 	} else {
 		a.devicesMu.Unlock()
-		return fmt.Errorf("device %s not connected", newDev.ID)
+		return fmt.Errorf("device %s not connected", newID)
 	}
 
 	a.devicesMu.Unlock()
 
 	// Capture state from old target
 	var timePos float64
+	var volume float64 = -1
 	var wasPaused bool
 
-	if tpRaw, err := oldTarget.getProperty("time-pos"); err == nil {
-		if f, ok := tpRaw.(float64); ok {
-			timePos = f
+	if oldTarget != nil {
+		if tpRaw, err := oldTarget.getProperty("time-pos"); err == nil {
+			if f, ok := tpRaw.(float64); ok {
+				timePos = f
+			}
 		}
-	}
-	if pauseRaw, err := oldTarget.getProperty("pause"); err == nil {
-		if p, ok := pauseRaw.(bool); ok {
-			wasPaused = p
+		if pauseRaw, err := oldTarget.getProperty("pause"); err == nil {
+			if p, ok := pauseRaw.(bool); ok {
+				wasPaused = p
+			}
 		}
-	}
+		if volRaw, err := oldTarget.getProperty("volume"); err == nil {
+			if f, ok := volRaw.(float64); ok {
+				volume = f
+			}
+		}
 
-	// Pause old target and clear its playlist
-	_ = oldTarget.setProperty("pause", true)
-	_ = oldTarget.playlistClear()
+		// Stop old target
+		_ = oldTarget.setProperty("pause", true)
+		_ = oldTarget.playlistClear()
+	}
 
 	// Update active device before syncing so target() returns the new one
 	a.devicesMu.Lock()
@@ -1927,33 +1695,53 @@ func (a *app) switchDevice(newID string) error {
 	a.devicesMu.Unlock()
 	_ = os.WriteFile(a.paths.ActiveDeviceFile, []byte(newID), 0o644)
 
-	// Load 2-track window into new target
+	// Transfer volume and replaygain to new target
+	if volume >= 0 {
+		_ = newTarget.setProperty("volume", volume)
+	}
+	if a.cfg.Player.ReplayGain != "" {
+		_ = newTarget.setProperty("replaygain", a.cfg.Player.ReplayGain)
+	}
+
+	// Load 2-track window into new target with seek position
 	a.playQueueMu.Lock()
 	qLen := len(a.playQueue)
-	a.syncTarget()
+	plan := a.planSyncTarget()
 	a.playQueueMu.Unlock()
 
 	if qLen > 0 {
-		// Wait for track to load before seeking
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			if v, err := newTarget.getProperty("duration"); err == nil {
-				if d, ok := v.(float64); ok && d > 0 {
-					break
-				}
+		// For agent targets, use agentPlayAt to seek atomically before audio starts
+		if at, ok := newTarget.(*agentTarget); ok {
+			at.ensureQueueSync()
+			if err := at.agentPlayAt(plan.curPos, plan.nextPos, timePos); err != nil {
+				a.logger.Printf("switchDevice: agentPlayAt failed: %v", err)
 			}
-			time.Sleep(50 * time.Millisecond)
-		}
-		if timePos > 0 {
-			_ = newTarget.setProperty("time-pos", timePos)
-		}
-		if !wasPaused {
-			_ = newTarget.setProperty("pause", false)
+			if wasPaused {
+				_ = newTarget.setProperty("pause", true)
+			}
+		} else {
+			a.execSyncPlan(plan)
+			// Wait for track to load before seeking
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				if v, err := newTarget.getProperty("duration"); err == nil {
+					if d, ok := v.(float64); ok && d > 0 {
+						break
+					}
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+			if timePos > 0 {
+				_ = newTarget.setProperty("time-pos", timePos)
+			}
+			if !wasPaused {
+				_ = newTarget.setProperty("pause", false)
+			}
 		}
 	}
 
 	a.logger.Printf("active device switched: %s -> %s", oldID, newID)
-	a.mpdHub.notify(SubOutput, SubPlayer)
+	a.mpdHub.notify(SubOutput, SubPlayer, SubMixer)
 	return nil
 }
 
@@ -1961,14 +1749,20 @@ func (a *app) switchDevice(newID string) error {
 // reloadQueueIntoAgent loads the 2-track window into a reconnected agent.
 // Called when an agent re-registers and was already the active device.
 func (a *app) reloadQueueIntoAgent(at *agentTarget, dev *device) {
+	// Apply replaygain setting
+	if a.cfg.Player.ReplayGain != "" {
+		_ = at.setProperty("replaygain", a.cfg.Player.ReplayGain)
+	}
+
 	a.playQueueMu.Lock()
 	qLen := len(a.playQueue)
 	if qLen == 0 {
 		a.playQueueMu.Unlock()
 		return
 	}
-	a.syncTarget()
+	plan := a.planSyncTarget()
 	a.playQueueMu.Unlock()
+	a.execSyncPlan(plan)
 	a.logger.Printf("agent reload: loaded 2-track window into %s at pos %d", dev.Name, a.curQueuePos)
 }
 
