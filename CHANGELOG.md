@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.0.0 (2026-05-29)
+
+### Breaking Changes
+
+- Replace mpv-based playback with autonomous agent architecture — agents now own their audio pipeline (built-in Go audio player for server, ExoPlayer for Android)
+- Remove melody-rofi (unused)
+- melodyd and melody-agent no longer depend on mpv
+
+### Features
+
+- Autonomous agent protocol (v2): agents manage their own playback queue, gapless preloading, and report state back to the server
+- Built-in local audio player for melodyd using beep/oto (FLAC, MP3, OGG Vorbis)
+- Local agent connects to server via in-memory pipe — no external process needed
+- ReplayGain support (track and album mode) in built-in player
+- Redesigned melody-musiclist HTML output with modern styling, dark mode, and sortable table
+
+### Bug Fixes
+
+- Fix Android queue flickering by rejecting truncated playlistinfo responses
+- Fix Android device list not updating on agent connect/disconnect (refresh on output idle events)
+- Reduce idle notification spam: agent_state heartbeats only notify on meaningful changes (state, track, volume), not every 2-second elapsed update
+- Fix Android seek not working on device switch (atomic setMediaItems with start position)
+- Fix Android progress bar stuck at 00:00 due to locale-dependent number formatting
+- Fix Android play button not working when agent is stopped (use play instead of pause 0)
+- Fix Android track transition loop caused by preload cleanup removing the current track
+
+### Improvements
+
+- melody-agent rewritten as autonomous player with 2-track window and gapless transitions
+- Android PlaybackService rewritten for v2 protocol with dedicated WebSocket for queue sync
+- Server agent handling: debounced state notifications, proper device switching handoff
+
 ## 0.14.0 (2026-05-27)
 
 ### Features

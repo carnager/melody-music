@@ -4,7 +4,6 @@ mkdir -p bin
 go build -o bin/melodyd ./melodyd/
 go build -o bin/melody-tui ./cmd/melody-tui/
 go build -o bin/melody-cli ./cmd/melody-cli/
-go build -o bin/melody-rofi ./cmd/melody-rofi/
 go build -o bin/melody-musiclist ./cmd/melody-musiclist/
 go build -o bin/melody-agent ./cmd/melody-agent/
 go build -o bin/melody-lrcmatch ./cmd/melody-lrcmatch/

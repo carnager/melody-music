@@ -1,6 +1,6 @@
 # Maintainer: Rasmus Steinke <rasi at xssn dot at>
-pkgname=('melodyd' 'melody-agent' 'melody-tui' 'melody-cli' 'melody-rofi' 'melody-musiclist' 'melody-lrcmatch')
-pkgver=0.14.0
+pkgname=('melodyd' 'melody-agent' 'melody-tui' 'melody-cli' 'melody-musiclist' 'melody-lrcmatch')
+pkgver=1.0.0
 pkgrel=1
 arch=('x86_64')
 url="https://github.com/carnager/melody-music"
@@ -20,7 +20,6 @@ build() {
 
 package_melodyd() {
   pkgdesc="Melody music server daemon"
-  depends=('mpv')
   install -Dm755 "$srcdir/melody-music/bin/melodyd" \
                   "$pkgdir/usr/bin/melodyd"
   install -Dm644 "$srcdir/melody-music/melodyd/melodyd.service" \
@@ -29,7 +28,6 @@ package_melodyd() {
 
 package_melody-agent() {
   pkgdesc="Remote playback agent for Melody"
-  depends=('mpv')
   install -Dm755 "$srcdir/melody-music/bin/melody-agent" \
                   "$pkgdir/usr/bin/melody-agent"
 }
@@ -46,14 +44,6 @@ package_melody-cli() {
   optdepends=('melodyd: local daemon')
   install -Dm755 "$srcdir/melody-music/bin/melody-cli" \
                   "$pkgdir/usr/bin/melody-cli"
-}
-
-package_melody-rofi() {
-  pkgdesc="Rofi client for Melody"
-  depends=('rofi')
-  optdepends=('melodyd: local daemon')
-  install -Dm755 "$srcdir/melody-music/bin/melody-rofi" \
-                  "$pkgdir/usr/bin/melody-rofi"
 }
 
 package_melody-musiclist() {
