@@ -151,7 +151,7 @@ class MainViewModel : ViewModel() {
                 val valid = when {
                     forceQueue -> newQueue.isNotEmpty() || expectedLen == 0
                     expectedLen > 0 -> newQueue.size >= expectedLen
-                    else -> newQueue.isNotEmpty()
+                    else -> true
                 }
                 if (valid) {
                     queue = newQueue.map { it.copy(current = it.position == curPos) }

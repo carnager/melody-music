@@ -33,20 +33,21 @@ func init() {
 	"seekid":   cmdSeekID,
 
 	// Queue
-	"playlistinfo": cmdPlaylistInfo,
-	"playlistid":   cmdPlaylistID,
-	"plchanges":    cmdPlChanges,
-	"add":          cmdAdd,
-	"addid":        cmdAddID,
-	"delete":       cmdDelete,
-	"deleteid":     cmdDeleteID,
-	"clear":        cmdClear,
-	"move":         cmdMove,
-	"moveid":       cmdMoveID,
-	"shuffle":      cmdShuffle,
-	"prio":         cmdPrio,
-	"prioid":       cmdPrioID,
-	"addidprio":    cmdAddIDPrio,
+	"playlistinfo":   cmdPlaylistInfo,
+	"playlistid":     cmdPlaylistID,
+	"plchanges":      cmdPlChanges,
+	"plchangesposid": cmdPlChangesPosID,
+	"add":            cmdAdd,
+	"addid":          cmdAddID,
+	"delete":         cmdDelete,
+	"deleteid":       cmdDeleteID,
+	"clear":          cmdClear,
+	"move":           cmdMove,
+	"moveid":         cmdMoveID,
+	"shuffle":        cmdShuffle,
+	"prio":           cmdPrio,
+	"prioid":         cmdPrioID,
+	"addidprio":      cmdAddIDPrio,
 
 	// Database
 	"lsinfo":  cmdLsInfo,
@@ -426,7 +427,11 @@ func cmdNext(c *mpdConn, args []string) *mpdError {
 	if err := a.target().setProperty("pause", false); err != nil {
 		a.logger.Printf("cmdNext: unpause failed: %v", err)
 	}
-	a.mpdHub.notify(SubPlayer)
+	if oldHadPrio {
+		a.mpdHub.notify(SubPlaylist, SubPlayer)
+	} else {
+		a.mpdHub.notify(SubPlayer)
+	}
 	return nil
 }
 
@@ -612,22 +617,56 @@ func cmdPlaylistID(c *mpdConn, args []string) *mpdError {
 }
 
 func cmdPlChanges(c *mpdConn, args []string) *mpdError {
-	if len(args) < 1 {
-		return mpdErr(errArg, "plchanges", "need version argument")
-	}
-	ver, err := strconv.Atoi(args[0])
+	ver, err := parsePlChangesVersion(args, "plchanges")
 	if err != nil {
-		return mpdErr(errArg, "plchanges", "invalid version")
+		return err
 	}
 	c.app.playQueueMu.Lock()
 	currentVer := c.app.queueVersion
 	c.app.playQueueMu.Unlock()
 
-	if ver > 0 && ver >= currentVer {
+	if !plChangesNeedsFull(ver, currentVer) {
 		return nil // no changes
 	}
 	// Return full playlist on version 0 or any version mismatch
 	return cmdPlaylistInfo(c, nil)
+}
+
+func cmdPlChangesPosID(c *mpdConn, args []string) *mpdError {
+	ver, err := parsePlChangesVersion(args, "plchangesposid")
+	if err != nil {
+		return err
+	}
+
+	c.app.playQueueMu.Lock()
+	currentVer := c.app.queueVersion
+	ids := make([]int, len(c.app.queueIDs))
+	copy(ids, c.app.queueIDs)
+	c.app.playQueueMu.Unlock()
+
+	if !plChangesNeedsFull(ver, currentVer) {
+		return nil
+	}
+	for pos, id := range ids {
+		c.writeKV("cpos", pos)
+		c.writeKV("Id", id)
+	}
+	return nil
+}
+
+func parsePlChangesVersion(args []string, cmd string) (int, *mpdError) {
+	if len(args) < 1 {
+		return 0, mpdErr(errArg, cmd, "need version argument")
+	}
+	ver, err := strconv.Atoi(args[0])
+	if err != nil {
+		return 0, mpdErr(errArg, cmd, "invalid version")
+	}
+	return ver, nil
+}
+
+func plChangesNeedsFull(clientVer, currentVer int) bool {
+	return clientVer <= 0 || clientVer != currentVer
 }
 
 func cmdAdd(c *mpdConn, args []string) *mpdError {

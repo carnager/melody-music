@@ -188,7 +188,9 @@ func main() {
 		a.queueIDs = append(a.queueIDs, a.queueIDCounter)
 	}
 	if len(a.playQueue) > 0 {
-		a.queueVersion = 1
+		if a.queueVersion == 0 {
+			a.queueVersion = 1
+		}
 	}
 	a.playQueueMu.Unlock()
 
@@ -1230,11 +1232,12 @@ func (a *app) queuePosByMPDID(mpdID int) int {
 type savedQueue struct {
 	Songs      []string `json:"songs"`
 	Priorities []int    `json:"priorities,omitempty"`
+	Version    int      `json:"version,omitempty"`
 }
 
 // savePlayQueue persists the current play queue to disk (caller must hold playQueueMu or be safe).
 func (a *app) savePlayQueue() {
-	sq := savedQueue{Songs: a.playQueue, Priorities: a.queuePriority}
+	sq := savedQueue{Songs: a.playQueue, Priorities: a.queuePriority, Version: a.queueVersion}
 	data, _ := json.Marshal(sq)
 	_ = os.WriteFile(a.paths.PlayQueueFile, data, 0o644)
 }
@@ -1251,6 +1254,7 @@ func (a *app) restorePlayQueue() {
 	if json.Unmarshal(data, &sq) == nil && len(sq.Songs) > 0 {
 		a.playQueue = sq.Songs
 		a.queuePriority = sq.Priorities
+		a.queueVersion = sq.Version
 		if len(a.queuePriority) < len(a.playQueue) {
 			a.queuePriority = append(a.queuePriority, make([]int, len(a.playQueue)-len(a.queuePriority))...)
 		}

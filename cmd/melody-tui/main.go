@@ -372,6 +372,8 @@ func reconnectMPD() {
 		return
 	}
 	fetchConn = fc
+	lastQueueVersion = 0
+	forceQueueRefresh = true
 }
 
 // ---------------------------------------------------------------------------

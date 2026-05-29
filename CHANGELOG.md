@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.1 (2026-05-30)
+
+### Features
+
+- Add Opus audio decoding support in the built-in player
+- Add MPD `plchangesposid` support for clients that use positional queue diffs
+
+### Bug Fixes
+
+- Fix MPD and TUI clients sometimes showing stale queue data after melodyd restarts
+- Fix queue cache invalidation on melody-tui reconnect
+- Fix Android queue refresh when the server reports an empty queue
+- Fix playlist idle notification when skipping away from an auto-consumed priority track
+- Fix last-track replay loop in the built-in player
+
+### Improvements
+
+- Persist MPD queue version with the saved queue to reduce client cache ambiguity across restarts
+
 ## 1.0.0 (2026-05-29)
 
 ### Breaking Changes

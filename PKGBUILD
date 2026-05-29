@@ -1,8 +1,8 @@
 # Maintainer: Rasmus Steinke <rasi at xssn dot at>
 pkgname=('melodyd' 'melody-agent' 'melody-tui' 'melody-cli' 'melody-musiclist' 'melody-lrcmatch')
-pkgver=1.0.0
+pkgver=1.1
 pkgrel=1
-arch=('x86_64')
+arch=('x86_64' 'aarch64')
 url="https://github.com/carnager/melody-music"
 license=('MIT')
 makedepends=('go')
