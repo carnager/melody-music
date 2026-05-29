@@ -432,6 +432,8 @@ func decodeAudio(src io.ReadSeekCloser, path string) (beep.StreamSeekCloser, bee
 		return vorbis.Decode(src)
 	case ".wav":
 		return wav.Decode(src)
+	case ".opus":
+		return decodeOpus(src)
 	default:
 		return nil, beep.Format{}, fmt.Errorf("unsupported format: %s", ext)
 	}

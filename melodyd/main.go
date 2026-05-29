@@ -982,10 +982,8 @@ func (a *app) advanceTrack() {
 		}
 	} else {
 		// No next track was preloaded — end of queue, stop playback
-		plan := a.planSyncTarget()
 		a.playQueueMu.Unlock()
-		_ = a.target().setProperty("pause", true)
-		a.execSyncPlan(plan)
+		_ = a.target().playlistClear()
 		a.mpdHub.notify(SubPlayer)
 		return
 	}
