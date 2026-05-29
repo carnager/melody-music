@@ -269,231 +269,388 @@ func renderHTML(jsonData string) string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Music Library</title>
-  <script src="https://cdn.tailwindcss.com/3.4.3"></script>
-  <script>tailwind.config = { darkMode: 'class' }</script>
+  <title>Music Collection</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <style>
-    body { font-family: 'Inter', sans-serif; }
-    th.sortable { cursor: pointer; user-select: none; }
-    html:not(.dark) th.sortable:hover { background-color: #f0f4f8; }
-    html.dark th.sortable:hover { background-color: #374151; }
-    th .sort-icon { display: inline-block; margin-left: 5px; opacity: 0.4; width: 1em; vertical-align: middle; }
-    th.sorted-asc .sort-icon::after { content: ' ▲'; opacity: 1; }
-    th.sorted-desc .sort-icon::after { content: ' ▼'; opacity: 1; }
-    .star { color: #d1d5db; }
-    .star.filled { color: #eab308; }
-    html.dark .star { color: #4b5563; }
-    html.dark .star.filled { color: #eab308; }
-    .alpha-button.active { background-color: #4f46e5; color: white; }
-    html.dark .alpha-button.active { background-color: #6366f1; }
+    :root {
+      --bg: #fafaf9; --bg-card: #ffffff; --bg-hover: #f5f5f4;
+      --bg-badge: #f5f5f4; --bg-header: #f8f8f7;
+      --border: #e7e5e4; --border-focus: #a8a29e;
+      --text: #1c1917; --text-secondary: #57534e; --text-muted: #a8a29e;
+      --accent: #dc2626; --accent-hover: #b91c1c; --accent-soft: #fef2f2;
+      --star: #d6d3d1; --star-filled: #f59e0b; --star-computed: #fbbf24;
+      --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+      --row-alt: rgba(0,0,0,0.015);
+    }
+    .dark {
+      --bg: #0c0a09; --bg-card: #1c1917; --bg-hover: #292524;
+      --bg-badge: #292524; --bg-header: #1a1816;
+      --border: #292524; --border-focus: #57534e;
+      --text: #fafaf9; --text-secondary: #a8a29e; --text-muted: #57534e;
+      --accent: #ef4444; --accent-hover: #f87171; --accent-soft: #1c1917;
+      --star: #44403c; --star-filled: #f59e0b; --star-computed: #d97706;
+      --shadow: 0 1px 3px rgba(0,0,0,0.3);
+      --row-alt: rgba(255,255,255,0.02);
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg); color: var(--text);
+      line-height: 1.6; min-height: 100vh;
+      transition: background 0.3s, color 0.3s;
+    }
+    .container { max-width: 1200px; margin: 0 auto; padding: 2rem 1.5rem; }
+
+    /* Header */
+    .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2rem; }
+    .header-left h1 {
+      font-size: 1.75rem; font-weight: 700; letter-spacing: -0.03em;
+      background: linear-gradient(135deg, var(--accent), #f97316);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .header-left .subtitle {
+      font-size: 0.8rem; color: var(--text-muted); margin-top: 0.15rem;
+      font-family: 'JetBrains Mono', monospace; letter-spacing: 0.02em;
+    }
+    .header-right { display: flex; align-items: center; gap: 0.75rem; }
+    .stat-badge {
+      font-family: 'JetBrains Mono', monospace; font-size: 0.75rem;
+      color: var(--text-secondary); background: var(--bg-badge);
+      padding: 0.35rem 0.75rem; border-radius: 2rem; border: 1px solid var(--border);
+    }
+    .theme-toggle {
+      width: 36px; height: 36px; border-radius: 50%%; border: 1px solid var(--border);
+      background: var(--bg-card); cursor: pointer; display: flex; align-items: center;
+      justify-content: center; font-size: 1rem; transition: all 0.2s;
+      color: var(--text-secondary);
+    }
+    .theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* Alphabet filter */
+    .alpha-bar {
+      display: flex; flex-wrap: wrap; justify-content: center; gap: 0.25rem;
+      margin-bottom: 1.25rem;
+    }
+    .alpha-btn {
+      font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; font-weight: 500;
+      width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;
+      border-radius: 6px; border: 1px solid var(--border); background: var(--bg-card);
+      color: var(--text-secondary); cursor: pointer; transition: all 0.15s;
+    }
+    .alpha-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .alpha-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+    /* Search */
+    .search-bar { position: relative; margin-bottom: 1.25rem; }
+    .search-bar input {
+      width: 100%%; font-size: 0.9rem; padding: 0.75rem 1rem 0.75rem 2.75rem;
+      border: 1px solid var(--border); border-radius: 12px; background: var(--bg-card);
+      color: var(--text); outline: none; transition: all 0.2s; box-shadow: var(--shadow);
+      font-family: inherit;
+    }
+    .search-bar input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .search-bar input::placeholder { color: var(--text-muted); }
+    .search-bar .search-icon {
+      position: absolute; left: 0.9rem; top: 50%%; transform: translateY(-50%%);
+      color: var(--text-muted); font-size: 1rem; pointer-events: none;
+    }
+    .search-bar .clear-btn {
+      position: absolute; right: 0.75rem; top: 50%%; transform: translateY(-50%%);
+      background: none; border: none; color: var(--text-muted); cursor: pointer;
+      font-size: 1.1rem; padding: 0.25rem; border-radius: 4px; display: none; line-height: 1;
+    }
+    .search-bar .clear-btn:hover { color: var(--accent); }
+    .search-bar.has-value .clear-btn { display: block; }
+
+    /* Table */
+    .table-wrap {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: 12px; overflow: hidden; box-shadow: var(--shadow);
+      margin-bottom: 1.5rem;
+    }
+    .table-wrap table { width: 100%%; border-collapse: collapse; }
+    .table-wrap th {
+      text-align: left; padding: 0.7rem 1rem; font-size: 0.7rem; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted);
+      background: var(--bg-header); border-bottom: 1px solid var(--border);
+      cursor: pointer; user-select: none; transition: color 0.15s;
+      white-space: nowrap;
+    }
+    .table-wrap th:hover { color: var(--accent); }
+    .table-wrap th.sorted { color: var(--accent); }
+    .table-wrap th .arrow { font-size: 0.6rem; margin-left: 0.3rem; opacity: 0.5; }
+    .table-wrap th.sorted .arrow { opacity: 1; }
+    .table-wrap td { padding: 0.55rem 1rem; font-size: 0.85rem; border-bottom: 1px solid var(--border); }
+    .table-wrap tr:last-child td { border-bottom: none; }
+    .table-wrap tbody tr { transition: background 0.1s; }
+    .table-wrap tbody tr:nth-child(even) { background: var(--row-alt); }
+    .table-wrap tbody tr:hover { background: var(--bg-hover); }
+    .col-artist { font-weight: 500; color: var(--text); max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .col-album { color: var(--text-secondary); max-width: 350px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .col-year { font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: var(--text-muted); width: 5rem; }
+    .col-rating { width: 7rem; white-space: nowrap; }
+    .col-rating .s { color: var(--star); }
+    .col-rating .s.on { color: var(--star-filled); }
+    .col-rating .s.computed { color: var(--star-computed); opacity: 0.6; }
+    .col-rating .no-rating { font-size: 0.75rem; color: var(--text-muted); }
+
+    /* Empty state */
+    .empty-row td { text-align: center; padding: 3rem 1rem; color: var(--text-muted); font-size: 0.9rem; }
+
+    /* Pagination */
+    .pagination {
+      display: flex; align-items: center; justify-content: space-between;
+      flex-wrap: wrap; gap: 1rem;
+    }
+    .pagination .info {
+      font-size: 0.75rem; color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .pagination .controls { display: flex; align-items: center; gap: 0.5rem; }
+    .pagination select {
+      font-size: 0.75rem; padding: 0.35rem 0.5rem; border-radius: 6px;
+      border: 1px solid var(--border); background: var(--bg-card); color: var(--text);
+      cursor: pointer; font-family: 'JetBrains Mono', monospace;
+    }
+    .page-btn {
+      font-size: 0.75rem; padding: 0.35rem 0.75rem; border-radius: 6px;
+      border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary);
+      cursor: pointer; transition: all 0.15s; font-family: inherit;
+    }
+    .page-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    .page-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+    .page-indicator {
+      font-family: 'JetBrains Mono', monospace; font-size: 0.75rem;
+      color: var(--text-secondary); min-width: 7rem; text-align: center;
+    }
+
+    @media (max-width: 640px) {
+      .container { padding: 1rem; }
+      .header-left h1 { font-size: 1.3rem; }
+      .table-wrap td, .table-wrap th { padding: 0.5rem 0.6rem; }
+      .col-artist, .col-album { max-width: 150px; }
+      .pagination { flex-direction: column; align-items: stretch; text-align: center; }
+      .pagination .controls { justify-content: center; }
+    }
   </style>
 </head>
-<body class="bg-gray-100 dark:bg-gray-900 text-gray-800 dark:text-gray-200">
-<div class="container mx-auto px-4 py-8 max-w-7xl">
-  <div class="flex justify-between items-center mb-2">
-    <h1 class="text-3xl font-bold text-gray-700 dark:text-gray-300">Music Library</h1>
-    <button id="darkModeToggle" title="Toggle Dark Mode" class="p-2 rounded-full text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700">
-      <span class="sun-icon">☀</span><span class="moon-icon">☾</span>
-    </button>
-  </div>
-  <p class="text-sm text-gray-500 dark:text-gray-400 text-center mb-6">Generated on %s</p>
-  <div id="alphabet-filter-buttons" class="mb-6 flex flex-wrap justify-center gap-1 sm:gap-2"></div>
-  <div class="mb-6 bg-white dark:bg-gray-800 p-4 rounded-lg shadow-sm flex flex-wrap gap-4 items-end">
-    <div class="flex-grow min-w-[200px]">
-      <label for="filter" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Filter:</label>
-      <input type="text" id="filter" placeholder="Artist, album, year, or r=N..." class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+<body>
+<div class="container">
+  <div class="header">
+    <div class="header-left">
+      <h1>Music Collection</h1>
+      <div class="subtitle">generated %s</div>
     </div>
-    <button id="clearFilter" class="px-4 py-2 bg-gray-200 dark:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-md hover:bg-gray-300 dark:hover:bg-gray-500 text-sm">Clear</button>
-  </div>
-  <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
-    <div class="table-container overflow-x-auto">
-      <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-        <thead class="bg-gray-50 dark:bg-gray-700">
-          <tr>
-            <th scope="col" data-sort="artist" class="sortable px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Artist <span class="sort-icon"></span></th>
-            <th scope="col" data-sort="album" class="sortable px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Album <span class="sort-icon"></span></th>
-            <th scope="col" data-sort="year" class="sortable px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider w-28">Year <span class="sort-icon"></span></th>
-            <th scope="col" data-sort="rating" class="sortable px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider w-32">Rating <span class="sort-icon"></span></th>
-          </tr>
-        </thead>
-        <tbody id="album-table-body" class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700"></tbody>
-      </table>
+    <div class="header-right">
+      <span class="stat-badge" id="album-count"></span>
+      <button class="theme-toggle" id="darkModeToggle" title="Toggle theme">
+        <span class="toggle-icon"></span>
+      </button>
     </div>
   </div>
-  <div class="mt-6 flex flex-col sm:flex-row justify-between items-center text-sm text-gray-600 dark:text-gray-400">
-    <div class="mb-2 sm:mb-0"><span id="pagination-info">Showing 0 to 0 of 0 entries</span></div>
-    <div class="flex items-center space-x-1">
-      <label for="itemsPerPage" class="mr-2 font-medium text-gray-700 dark:text-gray-300">Per Page:</label>
-      <select id="itemsPerPage" class="border border-gray-300 dark:border-gray-600 rounded-md px-2 py-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+
+  <div class="alpha-bar" id="alphabet-filter-buttons"></div>
+
+  <div class="search-bar" id="search-bar">
+    <span class="search-icon">&#x2315;</span>
+    <input type="text" id="filter" placeholder="Search artists, albums, years... or r=N for rating">
+    <button class="clear-btn" id="clearFilter">&#x2715;</button>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th class="sorted" data-sort="artist">Artist <span class="arrow">&#9650;</span></th>
+          <th data-sort="album">Album <span class="arrow"></span></th>
+          <th data-sort="year">Year <span class="arrow"></span></th>
+          <th data-sort="rating">Rating <span class="arrow"></span></th>
+        </tr>
+      </thead>
+      <tbody id="album-tbody"></tbody>
+    </table>
+  </div>
+
+  <div class="pagination">
+    <div class="info"><span id="pagination-info"></span></div>
+    <div class="controls">
+      <select id="itemsPerPage">
         <option value="25">25</option>
         <option value="50" selected>50</option>
         <option value="100">100</option>
         <option value="250">250</option>
       </select>
-      <button id="prev-page" class="px-3 py-1 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700">Previous</button>
-      <span id="page-indicator" class="px-3 py-1">Page 1 of 1</span>
-      <button id="next-page" class="px-3 py-1 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700">Next</button>
+      <button class="page-btn" id="prev-page">&#8592; Prev</button>
+      <span class="page-indicator" id="page-indicator"></span>
+      <button class="page-btn" id="next-page">Next &#8594;</button>
     </div>
   </div>
 </div>
+
 <script>
-  const allAlbums = %s;
-  const SYMBOL_FILTER_KEY = "#SYMBOLS#";
-  let currentPage = 1;
-  let itemsPerPage = 50;
-  let currentSortColumn = 'artist';
-  let currentSortDirection = 'asc';
-  let currentTextFilter = '';
-  let currentLetterFilter = null;
-  let filteredAndSortedAlbums = [];
-  const tableBody = document.getElementById('album-table-body');
-  const filterInput = document.getElementById('filter');
-  const clearFilterButton = document.getElementById('clearFilter');
-  const prevButton = document.getElementById('prev-page');
-  const nextButton = document.getElementById('next-page');
-  const pageIndicator = document.getElementById('page-indicator');
-  const paginationInfo = document.getElementById('pagination-info');
-  const itemsPerPageSelect = document.getElementById('itemsPerPage');
-  const tableHeaders = document.querySelectorAll('th.sortable');
-  const darkModeToggle = document.getElementById('darkModeToggle');
-  const alphabetButtonsContainer = document.getElementById('alphabet-filter-buttons');
-  try {
-    const theme = localStorage.theme;
-    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    if (theme === 'dark' || (!theme && prefersDark)) document.documentElement.classList.add('dark');
-  } catch (_) {}
-  function normalizeForSearch(str) {
-    if (!str) return '';
-    return str.normalize("NFD").replace(/\p{Diacritic}/gu, "").toUpperCase();
+const allAlbums = %s;
+const SYM = "#SYM#";
+let page = 1, perPage = 50, sortCol = 'artist', sortDir = 'asc';
+let textFilter = '', letterFilter = null, filtered = [];
+
+const $ = id => document.getElementById(id);
+const tbody = $('album-tbody'), filterInput = $('filter'), clearBtn = $('clearFilter');
+const prevBtn = $('prev-page'), nextBtn = $('next-page');
+const pageInd = $('page-indicator'), pageInfo = $('pagination-info');
+const perPageSel = $('itemsPerPage'), alphaBar = $('alphabet-filter-buttons');
+const searchBar = $('search-bar'), countBadge = $('album-count');
+const headers = document.querySelectorAll('.table-wrap th[data-sort]');
+
+// Theme
+try {
+  const t = localStorage.theme, p = matchMedia('(prefers-color-scheme:dark)').matches;
+  if (t === 'dark' || (!t && p)) document.documentElement.classList.add('dark');
+} catch(_){}
+function updateThemeIcon() {
+  const d = document.documentElement.classList.contains('dark');
+  document.querySelector('.toggle-icon').textContent = d ? '\u2600' : '\u263E';
+}
+updateThemeIcon();
+$('darkModeToggle').onclick = () => {
+  const d = document.documentElement.classList.toggle('dark');
+  try { localStorage.theme = d ? 'dark' : 'light'; } catch(_){}
+  updateThemeIcon();
+};
+
+function norm(s) { return s ? s.normalize("NFD").replace(/\p{Diacritic}/gu,"").toUpperCase() : ""; }
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+function stars(rating, computed) {
+  const display = rating > 0 ? rating : (computed > 0 ? Math.round(computed) : 0);
+  const isComp = rating === 0 && computed > 0;
+  if (!display) return '<span class="no-rating">\u2014</span>';
+  let h = '';
+  for (let i = 1; i <= 5; i++)
+    h += '<span class="s' + (i <= display ? (isComp ? ' computed' : ' on') : '') + '">\u2605</span>';
+  if (isComp) h = '<span title="Avg: ' + computed.toFixed(1) + '">' + h + '</span>';
+  return h;
+}
+
+// Alphabet
+function buildAlpha() {
+  const letters = new Set(); let sym = false;
+  allAlbums.forEach(a => {
+    const f = norm((a.artist||'')[0]||'');
+    if (!f) return;
+    if (f >= 'A' && f <= 'Z') letters.add(f); else sym = true;
+  });
+  alphaBar.innerHTML = '';
+  const all = ['All', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').filter(l=>letters.has(l)), ...(sym?['#']:[])];
+  all.forEach(l => {
+    const b = document.createElement('button');
+    b.textContent = l; b.className = 'alpha-btn';
+    b.dataset.letter = l === '#' ? SYM : l === 'All' ? 'ALL' : l;
+    b.onclick = () => {
+      const k = b.dataset.letter;
+      letterFilter = (k === 'ALL' || letterFilter === k) ? null : k;
+      styleAlpha(); run();
+    };
+    alphaBar.appendChild(b);
+  });
+  styleAlpha();
+}
+function styleAlpha() {
+  alphaBar.querySelectorAll('.alpha-btn').forEach(b => {
+    b.classList.toggle('active', (letterFilter===null && b.dataset.letter==='ALL') || b.dataset.letter===letterFilter);
+  });
+}
+
+function run() {
+  let rFilter = -1;
+  const raw = textFilter.toLowerCase().split(' ').filter(Boolean), terms = [];
+  raw.forEach(t => {
+    if (t.startsWith('r=')) { const n = parseInt(t.slice(2),10); if(!isNaN(n)&&n>=0&&n<=5) rFilter=n; else terms.push(t); }
+    else terms.push(t);
+  });
+  let a = [...allAlbums];
+  if (letterFilter) a = a.filter(al => {
+    const f = norm((al.artist||'')[0]||'');
+    return letterFilter === SYM ? !(f>='A'&&f<='Z') : f === letterFilter;
+  });
+  if (rFilter !== -1) a = a.filter(al => al.rating === rFilter);
+  if (terms.length) a = a.filter(al => {
+    const s = (al.artist+' '+al.album+' '+al.year).toLowerCase();
+    return terms.every(t => s.includes(t));
+  });
+  a.sort((x,y) => {
+    let xv, yv;
+    if (sortCol==='year') { xv=x.year_int; yv=y.year_int; }
+    else if (sortCol==='rating') { xv=x.rating||x.computed||0; yv=y.rating||y.computed||0; }
+    else { xv=norm(x[sortCol]); yv=norm(y[sortCol]); }
+    let c = xv>yv?1:xv<yv?-1:0;
+    return sortDir==='desc'?-c:c;
+  });
+  filtered = a; page = 1;
+  render(); paginate();
+}
+
+function render() {
+  tbody.innerHTML = '';
+  countBadge.textContent = filtered.length + ' albums';
+  if (!filtered.length) {
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="4">\u266A No albums match your search.</td></tr>';
+    return;
   }
-  function renderStars(rating) {
-    let html = '';
-    for (let i = 1; i <= 5; i++) {
-      html += '<span class="star' + (i <= rating ? ' filled' : '') + '">★</span>';
-    }
-    return html;
-  }
-  function generateAlphabetButtons() {
-    const availableLetters = new Set();
-    let hasSymbolChars = false;
-    allAlbums.forEach(album => {
-      if (!album.artist) return;
-      const first = normalizeForSearch(album.artist[0]);
-      if (!first) return;
-      if (first >= 'A' && first <= 'Z') availableLetters.add(first); else hasSymbolChars = true;
-    });
-    alphabetButtonsContainer.innerHTML = '';
-    ['All', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').filter(letter => availableLetters.has(letter)), ...(hasSymbolChars ? ['#'] : [])].forEach(letter => {
-      const button = document.createElement('button');
-      button.textContent = letter;
-      button.dataset.letter = letter === '#' ? SYMBOL_FILTER_KEY : (letter === 'All' ? 'ALL' : letter);
-      button.className = 'alpha-button px-3 py-1 sm:px-2 sm:py-1 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-600 text-sm font-medium';
-      button.addEventListener('click', () => handleAlphabetFilterClick(button.dataset.letter));
-      alphabetButtonsContainer.appendChild(button);
-    });
-    updateAlphabetButtonStyles();
-  }
-  function updateAlphabetButtonStyles() {
-    alphabetButtonsContainer.querySelectorAll('.alpha-button').forEach(button => {
-      button.classList.toggle('active', (currentLetterFilter === null && button.dataset.letter === 'ALL') || button.dataset.letter === currentLetterFilter);
-    });
-  }
-  function handleAlphabetFilterClick(letterOrKey) {
-    if (letterOrKey === 'ALL' || currentLetterFilter === letterOrKey) currentLetterFilter = null; else currentLetterFilter = letterOrKey;
-    updateAlphabetButtonStyles();
-    applyFilterAndSort();
-  }
-  function applyFilterAndSort() {
-    let ratingFilterValue = -1;
-    const rawTerms = currentTextFilter.toLowerCase().split(' ').filter(Boolean);
-    const textTerms = [];
-    rawTerms.forEach(term => {
-      if (term.startsWith('r=')) {
-        const n = parseInt(term.slice(2), 10);
-        if (!isNaN(n) && n >= 0 && n <= 5) ratingFilterValue = n; else textTerms.push(term);
-      } else textTerms.push(term);
-    });
-    let albums = [...allAlbums];
-    if (currentLetterFilter) {
-      albums = albums.filter(album => {
-        const first = normalizeForSearch((album.artist || '')[0] || '');
-        if (currentLetterFilter === SYMBOL_FILTER_KEY) return !(first >= 'A' && first <= 'Z');
-        return first === currentLetterFilter;
-      });
-    }
-    if (ratingFilterValue !== -1) albums = albums.filter(album => album.rating === ratingFilterValue);
-    if (textTerms.length) albums = albums.filter(album => {
-      const searchableText = (album.artist + ' ' + album.album + ' ' + album.year).toLowerCase();
-      return textTerms.every(term => searchableText.includes(term));
-    });
-    albums.sort((a, b) => {
-      let av, bv;
-      if (currentSortColumn === 'year') { av = a.year_int; bv = b.year_int; }
-      else if (currentSortColumn === 'rating') { av = a.rating || a.computed || 0; bv = b.rating || b.computed || 0; }
-      else { av = normalizeForSearch(a[currentSortColumn]); bv = normalizeForSearch(b[currentSortColumn]); }
-      let cmp = av > bv ? 1 : av < bv ? -1 : 0;
-      return currentSortDirection === 'desc' ? -cmp : cmp;
-    });
-    filteredAndSortedAlbums = albums;
-    currentPage = 1;
-    updateTable();
-    updatePaginationControls();
-  }
-  function updateTable() {
-    tableBody.innerHTML = '';
-    if (!filteredAndSortedAlbums.length) {
-      tableBody.innerHTML = '<tr><td colspan="4" class="text-center py-10 text-gray-500 dark:text-gray-400">No albums match your criteria.</td></tr>';
-      return;
-    }
-    const start = (currentPage - 1) * itemsPerPage;
-    const end = start + itemsPerPage;
-    filteredAndSortedAlbums.slice(start, end).forEach(album => {
-      const row = document.createElement('tr');
-      row.className = 'hover:bg-gray-50 dark:hover:bg-gray-700';
-      const displayRating = album.rating > 0 ? album.rating : (album.computed > 0 ? Math.round(album.computed) : 0);
-      const isComputed = album.rating === 0 && album.computed > 0;
-      const starsHtml = displayRating > 0
-        ? '<span' + (isComputed ? ' title="Avg of track ratings: ' + album.computed.toFixed(1) + '" style="opacity:0.6"' : '') + '>' + renderStars(displayRating) + '</span>'
-        : '<span class="text-gray-400 dark:text-gray-600 text-xs">—</span>';
-      row.innerHTML =
-        '<td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">' + album.artist + '</td>' +
-        '<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600 dark:text-gray-300">' + album.album + '</td>' +
-        '<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600 dark:text-gray-300">' + album.year + '</td>' +
-        '<td class="px-6 py-4 whitespace-nowrap text-sm">' + starsHtml + '</td>';
-      tableBody.appendChild(row);
-    });
-  }
-  function updatePaginationControls() {
-    const totalItems = filteredAndSortedAlbums.length;
-    const totalPages = Math.ceil(totalItems / itemsPerPage) || 1;
-    pageIndicator.textContent = 'Page ' + currentPage + ' of ' + totalPages;
-    const startItem = totalItems === 0 ? 0 : (currentPage - 1) * itemsPerPage + 1;
-    const endItem = Math.min(currentPage * itemsPerPage, totalItems);
-    paginationInfo.textContent = 'Showing ' + startItem + ' to ' + endItem + ' of ' + totalItems + ' entries';
-    prevButton.disabled = currentPage === 1;
-    nextButton.disabled = currentPage === totalPages;
-  }
-  tableHeaders.forEach(header => header.addEventListener('click', () => {
-    const sortKey = header.dataset.sort;
-    if (currentSortColumn === sortKey) currentSortDirection = currentSortDirection === 'asc' ? 'desc' : 'asc'; else { currentSortColumn = sortKey; currentSortDirection = 'asc'; }
-    applyFilterAndSort();
-    tableHeaders.forEach(h => h.classList.remove('sorted-asc', 'sorted-desc'));
-    header.classList.add(currentSortDirection === 'asc' ? 'sorted-asc' : 'sorted-desc');
-  }));
-  filterInput.addEventListener('input', () => { currentTextFilter = filterInput.value; applyFilterAndSort(); });
-  clearFilterButton.addEventListener('click', () => { filterInput.value = ''; currentTextFilter = ''; currentLetterFilter = null; updateAlphabetButtonStyles(); applyFilterAndSort(); });
-  prevButton.addEventListener('click', () => { if (currentPage > 1) { currentPage--; updateTable(); updatePaginationControls(); } });
-  nextButton.addEventListener('click', () => { const totalPages = Math.ceil(filteredAndSortedAlbums.length / itemsPerPage); if (currentPage < totalPages) { currentPage++; updateTable(); updatePaginationControls(); } });
-  itemsPerPageSelect.addEventListener('change', e => { itemsPerPage = parseInt(e.target.value, 10); currentPage = 1; updateTable(); updatePaginationControls(); });
-  if (darkModeToggle) darkModeToggle.addEventListener('click', () => { const dark = document.documentElement.classList.toggle('dark'); try { localStorage.theme = dark ? 'dark' : 'light'; } catch (_) {} });
-  generateAlphabetButtons();
-  applyFilterAndSort();
+  const start = (page-1)*perPage, end = start+perPage;
+  filtered.slice(start, end).forEach(a => {
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td class="col-artist">' + esc(a.artist) + '</td>' +
+      '<td class="col-album">' + esc(a.album) + '</td>' +
+      '<td class="col-year">' + esc(a.year) + '</td>' +
+      '<td class="col-rating">' + stars(a.rating, a.computed) + '</td>';
+    tbody.appendChild(tr);
+  });
+}
+
+function paginate() {
+  const total = filtered.length, pages = Math.ceil(total/perPage)||1;
+  pageInd.textContent = page + ' / ' + pages;
+  const s = total ? (page-1)*perPage+1 : 0, e = Math.min(page*perPage, total);
+  pageInfo.textContent = s + '\u2013' + e + ' of ' + total;
+  prevBtn.disabled = page === 1;
+  nextBtn.disabled = page === pages;
+}
+
+// Sort headers
+headers.forEach(th => th.onclick = () => {
+  const col = th.dataset.sort;
+  if (sortCol === col) sortDir = sortDir==='asc'?'desc':'asc';
+  else { sortCol = col; sortDir = 'asc'; }
+  headers.forEach(h => { h.classList.remove('sorted'); h.querySelector('.arrow').textContent = ''; });
+  th.classList.add('sorted');
+  th.querySelector('.arrow').textContent = sortDir==='asc' ? '\u25B2' : '\u25BC';
+  run();
+});
+
+filterInput.oninput = () => {
+  textFilter = filterInput.value;
+  searchBar.classList.toggle('has-value', !!textFilter);
+  run();
+};
+clearBtn.onclick = () => {
+  filterInput.value = ''; textFilter = ''; letterFilter = null;
+  searchBar.classList.remove('has-value');
+  styleAlpha(); run();
+};
+prevBtn.onclick = () => { if(page>1){page--;render();paginate();} };
+nextBtn.onclick = () => { if(page<Math.ceil(filtered.length/perPage)){page++;render();paginate();} };
+perPageSel.onchange = e => { perPage=parseInt(e.target.value,10); page=1; render(); paginate(); };
+
+buildAlpha();
+run();
 </script>
 </body>
-</html>`, time.Now().Format("2006-01-02 15:04:05"), jsonData)
+</html>`, time.Now().Format("2006-01-02 15:04"), jsonData)
 }
 
 // ---------------------------------------------------------------------------

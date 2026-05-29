@@ -671,15 +671,28 @@ func (at *agentTarget) handleAgentState(line string) {
 	if len(parts) < 6 {
 		return
 	}
+	newState := parts[1]
+	newPos, _ := strconv.Atoi(parts[2])
+	newElapsed, _ := strconv.ParseFloat(parts[3], 64)
+	newDuration, _ := strconv.ParseFloat(parts[4], 64)
+	newVolume, _ := strconv.ParseFloat(parts[5], 64)
+
 	at.stateMu.Lock()
-	at.agState = parts[1]
-	at.agPos, _ = strconv.Atoi(parts[2])
-	at.agElapsed, _ = strconv.ParseFloat(parts[3], 64)
-	at.agDuration, _ = strconv.ParseFloat(parts[4], 64)
-	at.agVolume, _ = strconv.ParseFloat(parts[5], 64)
+	// Only notify idle clients when something meaningful changed —
+	// not on every 2-second heartbeat which just updates elapsed time.
+	changed := at.agState != newState || at.agPos != newPos ||
+		at.agDuration != newDuration || at.agVolume != newVolume
+	at.agState = newState
+	at.agPos = newPos
+	at.agElapsed = newElapsed
+	at.agDuration = newDuration
+	at.agVolume = newVolume
 	at.agStateTime = time.Now()
 	at.stateMu.Unlock()
-	at.app.mpdHub.notify(SubPlayer)
+
+	if changed {
+		at.app.mpdHub.notify(SubPlayer)
+	}
 }
 
 // handleAgentAdvance is called when the agent reports a natural track end.

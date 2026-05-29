@@ -107,10 +107,16 @@ class MainViewModel : ViewModel() {
             if (idleRefreshJob?.isActive != true) {
                 idleRefreshJob = viewModelScope.launch { refresh(forceQueue = "rating" in changed) }
             }
+            if ("output" in changed) {
+                viewModelScope.launch { loadDevices() }
+            }
         }
         mpd.onReconnected = {
             isConnected = true
-            viewModelScope.launch { refresh(forceQueue = true) }
+            viewModelScope.launch {
+                refresh(forceQueue = true)
+                loadDevices()
+            }
         }
         mpd.startIdle()
     }
@@ -139,8 +145,15 @@ class MainViewModel : ViewModel() {
             val plVersion = newStatus.playlistVersion
             if (plVersion != lastPlaylistVersion || queue.isEmpty() || forceQueue) {
                 val newQueue = mpd.getQueue()
-                // Don't replace a valid queue with empty on transient failure
-                if (newQueue.isNotEmpty() || forceQueue) {
+                val expectedLen = newStatus.playlistLength
+                // Reject truncated responses: if status says N tracks but we got
+                // fewer, the response was likely corrupted — keep the old queue.
+                val valid = when {
+                    forceQueue -> newQueue.isNotEmpty() || expectedLen == 0
+                    expectedLen > 0 -> newQueue.size >= expectedLen
+                    else -> newQueue.isNotEmpty()
+                }
+                if (valid) {
                     queue = newQueue.map { it.copy(current = it.position == curPos) }
                     lastPlaylistVersion = plVersion
                 }

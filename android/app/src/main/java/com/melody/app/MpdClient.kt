@@ -569,6 +569,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
                 songId = songMap["X-SongId"] ?: "",
                 currentSongPos = statusMap["song"]?.toIntOrNull() ?: -1,
                 playlistVersion = statusMap["playlist"]?.toIntOrNull() ?: 0,
+                playlistLength = statusMap["playlistlength"]?.toIntOrNull() ?: 0,
                 repeat = statusMap["repeat"] == "1",
                 random = statusMap["random"] == "1",
                 single = statusMap["single"] == "1",
