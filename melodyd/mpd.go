@@ -763,10 +763,7 @@ func (at *agentTarget) agentPlay(curPos, nextPos int) error {
 // a position before audio output starts.
 func (at *agentTarget) agentPlayAt(curPos, nextPos int, seekPos float64) error {
 	at.ensureQueueSync()
-	cmd := fmt.Sprintf("play %d", curPos)
-	if nextPos >= 0 {
-		cmd += fmt.Sprintf(" next=%d", nextPos)
-	}
+	cmd := fmt.Sprintf("play %d next=%d", curPos, nextPos)
 	if seekPos > 0 {
 		cmd += fmt.Sprintf(" seek=%.3f", seekPos)
 	}

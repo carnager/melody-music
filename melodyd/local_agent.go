@@ -23,6 +23,7 @@ type localAgent struct {
 	queueMu sync.Mutex
 	queue   []queueItem
 	curPos  int
+	nextPos int
 
 	// Control connection to server (via net.Pipe)
 	ctrlMu sync.Mutex
@@ -41,16 +42,24 @@ type queueItem struct {
 // startLocalAgent creates and runs an embedded agent.
 // It connects to the MPD server via an in-memory pipe.
 func (a *app) startLocalAgent() {
-	p := player.New()
+	p, err := player.NewWithConfig(a.cfg.Player.MPVPath, a.cfg.Player.MPVSocket)
+	if err != nil {
+		a.logger.Printf("local-agent: start mpv player failed: %v", err)
+		return
+	}
 
 	la := &localAgent{
-		app:    a,
-		player: p,
-		curPos: -1,
+		app:     a,
+		player:  p,
+		curPos:  -1,
+		nextPos: -1,
 	}
 
 	if a.cfg.Player.ReplayGain != "" {
 		p.SetReplayGain(a.cfg.Player.ReplayGain)
+	}
+	if a.cfg.Player.Volume > 0 {
+		p.SetVolume(a.cfg.Player.Volume)
 	}
 
 	p.OnTrackEnd = la.handleTrackEnd
@@ -62,6 +71,7 @@ func (a *app) startLocalAgent() {
 		}
 		la.player.Stop()
 		la.curPos = -1
+		la.nextPos = -1
 		time.Sleep(2 * time.Second)
 	}
 }
@@ -176,6 +186,7 @@ func (la *localAgent) handleCommand(w *bufio.Writer, line string) {
 	case "stop":
 		la.player.Stop()
 		la.curPos = -1
+		la.nextPos = -1
 		fmt.Fprintln(w, "OK")
 
 	case "seek":
@@ -275,24 +286,34 @@ func (la *localAgent) handlePlay(w *bufio.Writer, args []string) {
 		return
 	}
 
-	if err := la.player.Play(path, item.File, item.RGTrack, item.RGAlbum); err != nil {
+	currentSpec := player.TrackSpec{
+		Path:       path,
+		FormatHint: item.File,
+		RGTrack:    item.RGTrack,
+		RGAlbum:    item.RGAlbum,
+	}
+	var nextSpec *player.TrackSpec
+	if nextItem != nil {
+		nextPath := la.resolveTrackPath(*nextItem)
+		if nextPath != "" {
+			nextSpec = &player.TrackSpec{
+				Path:       nextPath,
+				FormatHint: nextItem.File,
+				RGTrack:    nextItem.RGTrack,
+				RGAlbum:    nextItem.RGAlbum,
+			}
+		}
+	}
+
+	if err := la.player.PlayPair(currentSpec, nextSpec, seekPos); err != nil {
 		fmt.Fprintf(w, "ACK [56@0] {play} %s\n", err)
 		return
 	}
 	la.curPos = pos
-
-	// Seek before any audio reaches the speaker (within the speaker buffer window)
-	if seekPos > 0 {
-		la.player.Seek(seekPos)
-	}
-
-	if nextItem != nil {
-		nextPath := la.resolveTrackPath(*nextItem)
-		if nextPath != "" {
-			if err := la.player.Preload(nextPath, nextItem.File, nextItem.RGTrack, nextItem.RGAlbum); err != nil {
-				la.app.logger.Printf("local-agent: preload pos %d failed: %v", nextPos, err)
-			}
-		}
+	if nextSpec != nil {
+		la.nextPos = nextPos
+	} else {
+		la.nextPos = -1
 	}
 
 	fmt.Fprintln(w, "OK")
@@ -305,8 +326,17 @@ func (la *localAgent) handlePreload(w *bufio.Writer, args []string) {
 	}
 
 	pos, err := strconv.Atoi(args[0])
-	if err != nil || pos < 0 {
+	if err != nil {
 		fmt.Fprintln(w, "ACK [2@0] {preload} invalid position")
+		return
+	}
+	if pos < 0 {
+		if err := la.player.ClearPreload(); err != nil {
+			fmt.Fprintf(w, "ACK [56@0] {preload} %s\n", err)
+			return
+		}
+		la.nextPos = -1
+		fmt.Fprintln(w, "OK")
 		return
 	}
 
@@ -329,6 +359,7 @@ func (la *localAgent) handlePreload(w *bufio.Writer, args []string) {
 		fmt.Fprintf(w, "ACK [56@0] {preload} %s\n", err)
 		return
 	}
+	la.nextPos = pos
 	fmt.Fprintln(w, "OK")
 }
 
@@ -387,6 +418,12 @@ func (la *localAgent) handleTrackEnd() {
 	}
 
 	oldPos := la.curPos
+	if la.nextPos >= 0 {
+		la.curPos = la.nextPos
+		la.nextPos = -1
+	} else {
+		la.curPos = -1
+	}
 	la.sendToServer(fmt.Sprintf("agent_advance %d", oldPos))
 }
 

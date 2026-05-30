@@ -32,7 +32,9 @@ type agentConfig struct {
 	} `toml:"agent"`
 	Player struct {
 		ReplayGain string  `toml:"replaygain"` // "track", "album", "off"
-		Volume     float64 `toml:"volume"`      // 0-100, default 100
+		Volume     float64 `toml:"volume"`     // 0-100, default 100
+		MPVPath    string  `toml:"mpv_path"`
+		MPVSocket  string  `toml:"mpv_socket"`
 	} `toml:"player"`
 }
 
@@ -62,6 +64,7 @@ type agent struct {
 	queueMu sync.Mutex
 	queue   []queueItem
 	curPos  int // current queue position being played
+	nextPos int // daemon-selected preloaded queue position, or -1
 
 	// Control connection to server
 	ctrlMu   sync.Mutex
@@ -77,13 +80,17 @@ func main() {
 		logger.Fatalf("load config: %v", err)
 	}
 
-	p := player.New()
+	p, err := player.NewWithConfig(cfg.Player.MPVPath, cfg.Player.MPVSocket)
+	if err != nil {
+		logger.Fatalf("start mpv player: %v", err)
+	}
 
 	a := &agent{
-		cfg:    cfg,
-		logger: logger,
-		player: p,
-		curPos: -1,
+		cfg:     cfg,
+		logger:  logger,
+		player:  p,
+		curPos:  -1,
+		nextPos: -1,
 	}
 
 	// Set initial player state from config
@@ -143,6 +150,9 @@ func loadAgentConfig() (agentConfig, error) {
 	if cfg.Player.Volume == 0 {
 		cfg.Player.Volume = 100
 	}
+	if cfg.Player.MPVPath == "" {
+		cfg.Player.MPVPath = "mpv"
+	}
 
 	return cfg, nil
 }
@@ -159,6 +169,8 @@ max_bitrate = 0
 [player]
 replaygain = "track"
 volume = 100
+mpv_path = "mpv"
+mpv_socket = ""
 `
 }
 
@@ -173,6 +185,7 @@ func (a *agent) connectLoop() {
 		}
 		a.player.Stop()
 		a.curPos = -1
+		a.nextPos = -1
 		time.Sleep(5 * time.Second)
 	}
 }
@@ -295,6 +308,7 @@ func (a *agent) handleCommand(w *bufio.Writer, line string) {
 	case "stop":
 		a.player.Stop()
 		a.curPos = -1
+		a.nextPos = -1
 		fmt.Fprintln(w, "OK")
 
 	case "seek":
@@ -398,25 +412,34 @@ func (a *agent) handlePlay(w *bufio.Writer, args []string) {
 		return
 	}
 
-	if err := a.player.Play(path, item.File, item.RGTrack, item.RGAlbum); err != nil {
+	currentSpec := player.TrackSpec{
+		Path:       path,
+		FormatHint: item.File,
+		RGTrack:    item.RGTrack,
+		RGAlbum:    item.RGAlbum,
+	}
+	var nextSpec *player.TrackSpec
+	if nextItem != nil {
+		nextPath := a.resolveTrackPath(*nextItem)
+		if nextPath != "" {
+			nextSpec = &player.TrackSpec{
+				Path:       nextPath,
+				FormatHint: nextItem.File,
+				RGTrack:    nextItem.RGTrack,
+				RGAlbum:    nextItem.RGAlbum,
+			}
+		}
+	}
+
+	if err := a.player.PlayPair(currentSpec, nextSpec, seekPos); err != nil {
 		fmt.Fprintf(w, "ACK [56@0] {play} %s\n", err)
 		return
 	}
 	a.curPos = pos
-
-	// Seek before any audio reaches the speaker (within the speaker buffer window)
-	if seekPos > 0 {
-		a.player.Seek(seekPos)
-	}
-
-	// Preload next track
-	if nextItem != nil {
-		nextPath := a.resolveTrackPath(*nextItem)
-		if nextPath != "" {
-			if err := a.player.Preload(nextPath, nextItem.File, nextItem.RGTrack, nextItem.RGAlbum); err != nil {
-				a.logger.Printf("preload failed: %v", err)
-			}
-		}
+	if nextSpec != nil {
+		a.nextPos = nextPos
+	} else {
+		a.nextPos = -1
 	}
 
 	fmt.Fprintln(w, "OK")
@@ -429,8 +452,17 @@ func (a *agent) handlePreload(w *bufio.Writer, args []string) {
 	}
 
 	pos, err := strconv.Atoi(args[0])
-	if err != nil || pos < 0 {
+	if err != nil {
 		fmt.Fprintln(w, "ACK [2@0] {preload} invalid position")
+		return
+	}
+	if pos < 0 {
+		if err := a.player.ClearPreload(); err != nil {
+			fmt.Fprintf(w, "ACK [56@0] {preload} %s\n", err)
+			return
+		}
+		a.nextPos = -1
+		fmt.Fprintln(w, "OK")
 		return
 	}
 
@@ -453,6 +485,7 @@ func (a *agent) handlePreload(w *bufio.Writer, args []string) {
 		fmt.Fprintf(w, "ACK [56@0] {preload} %s\n", err)
 		return
 	}
+	a.nextPos = pos
 	fmt.Fprintln(w, "OK")
 }
 
@@ -512,14 +545,13 @@ func (a *agent) handleTrackEnd() {
 		return
 	}
 
-	// The gapless mixer has already swapped to the next track.
-	// We need to figure out what position we're now at.
-	// The server told us the next position via the play/preload commands.
-	// We advance our position and tell the server.
-
-	// For now, increment curPos. The server will send the actual correct
-	// position in its response to agent_advance.
 	oldPos := a.curPos
+	if a.nextPos >= 0 {
+		a.curPos = a.nextPos
+		a.nextPos = -1
+	} else {
+		a.curPos = -1
+	}
 	a.sendToServer(fmt.Sprintf("agent_advance %d", oldPos))
 }
 

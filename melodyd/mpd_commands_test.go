@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -85,6 +87,24 @@ func TestVolumeCommandsUpdateTarget(t *testing.T) {
 	}
 }
 
+func TestAgentPreloadSendsClearCommand(t *testing.T) {
+	got := captureAgentCommand(t, func(at *agentTarget) error {
+		return at.agentPreload(-1)
+	})
+	if got != "preload -1" {
+		t.Fatalf("agentPreload(-1) sent %q, want preload -1", got)
+	}
+}
+
+func TestAgentPlaySendsNegativeNext(t *testing.T) {
+	got := captureAgentCommand(t, func(at *agentTarget) error {
+		return at.agentPlayAt(3, -1, -1)
+	})
+	if got != "play 3 next=-1" {
+		t.Fatalf("agentPlayAt sent %q, want play 3 next=-1", got)
+	}
+}
+
 func TestIdleNotificationPreservesFollowingCommandList(t *testing.T) {
 	c, rw, closeFn := newTestMPDConn(t)
 	defer closeFn()
@@ -110,6 +130,63 @@ func TestIdleNotificationPreservesFollowingCommandList(t *testing.T) {
 	if got := readLine(t, rw); got != "OK" {
 		t.Fatalf("command list response = %q", got)
 	}
+}
+
+func captureAgentCommand(t *testing.T, call func(*agentTarget) error) string {
+	t.Helper()
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	})
+
+	at := &agentTarget{
+		writer:    bufio.NewWriter(clientConn),
+		conn:      clientConn,
+		alive:     true,
+		done:      make(chan struct{}),
+		app:       &app{},
+		respCh:    make(chan agentResp, 1),
+		closeOnce: sync.Once{},
+	}
+	go at.readLoop(bufio.NewReader(clientConn))
+
+	cmdCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		r := bufio.NewReader(serverConn)
+		line, err := r.ReadString('\n')
+		if err != nil {
+			errCh <- err
+			return
+		}
+		cmdCh <- strings.TrimRight(line, "\r\n")
+		_, err = fmt.Fprintln(serverConn, "OK")
+		errCh <- err
+	}()
+
+	if err := call(at); err != nil {
+		t.Fatalf("agent call: %v", err)
+	}
+	at.close()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("server side command capture: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for server side command capture")
+	}
+
+	select {
+	case got := <-cmdCh:
+		return got
+	default:
+		t.Fatal("no command captured")
+	}
+	return ""
 }
 
 func TestIdleAllowsCommandInsteadOfNoidle(t *testing.T) {

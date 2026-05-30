@@ -46,7 +46,10 @@ type config struct {
 		SaveLRC     bool   `toml:"save_lrc"`
 	} `toml:"library"`
 	Player struct {
-		ReplayGain string `toml:"replaygain"` // "off", "track", "album"
+		ReplayGain string  `toml:"replaygain"` // "off", "track", "album"
+		Volume     float64 `toml:"volume"`
+		MPVPath    string  `toml:"mpv_path"`
+		MPVSocket  string  `toml:"mpv_socket"`
 	} `toml:"player"`
 	Random struct {
 		Tracks int `toml:"tracks"`
@@ -286,6 +289,9 @@ func loadConfig() (config, paths, error) {
 	cfg.Library.EmbedLyrics = boolFromAny(library["embed_lyrics"], false)
 	cfg.Library.SaveLRC = boolFromAny(library["save_lrc"], false)
 	cfg.Player.ReplayGain = stringify(playerSection["replaygain"])
+	cfg.Player.Volume = floatFromAny(playerSection["volume"], 100)
+	cfg.Player.MPVPath = stringify(playerSection["mpv_path"])
+	cfg.Player.MPVSocket = stringify(playerSection["mpv_socket"])
 	cfg.Random.Tracks = intFromAny(random["tracks"], 20)
 	mpdSection, _ := raw["mpd"].(map[string]any)
 	cfg.MPD.Port = intFromAny(mpdSection["port"], 6600)
@@ -302,6 +308,9 @@ music_dir = ""
 
 [player]
 replaygain = ""
+volume = 100
+mpv_path = "mpv"
+mpv_socket = ""
 
 [random]
 tracks = 20
@@ -320,6 +329,12 @@ func applyDefaults(cfg *config) {
 	}
 	if cfg.Random.Tracks <= 0 {
 		cfg.Random.Tracks = 20
+	}
+	if cfg.Player.Volume == 0 {
+		cfg.Player.Volume = 100
+	}
+	if cfg.Player.MPVPath == "" {
+		cfg.Player.MPVPath = "mpv"
 	}
 	if envBind := os.Getenv("MELODYD_BIND_TO_ADDRESS"); envBind != "" {
 		cfg.Server.BindToAddress = splitAndTrim(envBind, ",")
@@ -761,6 +776,7 @@ func (a *app) planSyncTarget() syncPlan {
 		doClear:   true,
 		curPos:    a.curQueuePos,
 		curSongID: a.playQueue[a.curQueuePos],
+		nextPos:   -1,
 	}
 	plan.currentURL = a.streamURLForActiveDevice(plan.curSongID)
 
@@ -840,10 +856,8 @@ func (a *app) execNextTrackPlan(plan nextTrackPlan) {
 
 	// Agent targets use position-based preload
 	if at, ok := t.(*agentTarget); ok {
-		if plan.nextPos >= 0 {
-			if err := at.agentPreload(plan.nextPos); err != nil {
-				a.logger.Printf("execNextTrackPlan(agent): preload %d failed: %v", plan.nextPos, err)
-			}
+		if err := at.agentPreload(plan.nextPos); err != nil {
+			a.logger.Printf("execNextTrackPlan(agent): preload %d failed: %v", plan.nextPos, err)
 		}
 		return
 	}
@@ -952,9 +966,7 @@ func (a *app) advanceTrack() {
 		t := a.target()
 		if at, ok := t.(*agentTarget); ok {
 			// Agent: just tell it about the next track to preload
-			if nextPreloadPos >= 0 {
-				_ = at.agentPreload(nextPreloadPos)
-			}
+			_ = at.agentPreload(nextPreloadPos)
 		} else {
 			_ = t.playlistRemove(0)
 			if nextURL != "" {
@@ -1000,9 +1012,7 @@ func (a *app) advanceTrack() {
 	t := a.target()
 	if at, ok := t.(*agentTarget); ok {
 		// Agent: just tell it about the next track to preload
-		if nextPreloadPos >= 0 {
-			_ = at.agentPreload(nextPreloadPos)
-		}
+		_ = at.agentPreload(nextPreloadPos)
 	} else {
 		_ = t.playlistRemove(0)
 		if nextURL != "" {
@@ -1840,6 +1850,10 @@ func getenvDefault(key, fallback string) string {
 
 func intFromAny(value any, fallback int) int {
 	return shared.IntFromAny(value, fallback)
+}
+
+func floatFromAny(value any, fallback float64) float64 {
+	return shared.FloatFromAny(value, fallback)
 }
 
 func boolFromAny(value any, fallback bool) bool {

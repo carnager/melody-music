@@ -1,300 +1,565 @@
 package player
 
 import (
+	"bufio"
+	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"math"
-	"net/http"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/gopxl/beep/v2"
-	"github.com/gopxl/beep/v2/flac"
-	"github.com/gopxl/beep/v2/mp3"
-	"github.com/gopxl/beep/v2/speaker"
-	"github.com/gopxl/beep/v2/vorbis"
-	"github.com/gopxl/beep/v2/wav"
 )
 
 const (
-	OutputSampleRate = beep.SampleRate(48000)
-	bufferSize       = 4800 // 100ms at 48kHz
+	defaultMPVPath = "mpv"
+	commandTimeout = 10 * time.Second
 )
 
-// Player handles audio decoding, gapless playback, ReplayGain, and output.
+// TrackSpec describes a track to load into the backend.
+// ReplayGain values are kept for API compatibility. mpv applies its own
+// ReplayGain mode and does not use Melody's decoded gain values here.
+type TrackSpec struct {
+	Path       string
+	FormatHint string
+	RGTrack    float64
+	RGAlbum    float64
+}
+
 type Player struct {
 	mu sync.Mutex
 
-	// Current playback state
-	current    beep.StreamSeekCloser
-	currentFmt beep.Format
-	currentSrc io.Closer // underlying file/http body
+	mpvPath    string
+	socketPath string
+	cmd        *exec.Cmd
+	conn       net.Conn
+	done       chan struct{}
+	closed     bool
+	startErr   error
 
-	// Preloaded next track for gapless
-	next    beep.StreamSeekCloser
-	nextFmt beep.Format
-	nextSrc io.Closer
+	writeMu       sync.Mutex
+	pendingMu     sync.Mutex
+	nextRequestID int
+	pending       map[int]chan commandResult
+	eventCh       chan mpvEvent
+	commandHook   func(args ...any) (mpvResponse, error)
 
-	// The mixer streamer registered with the speaker
-	mixer *gaplessMixer
+	state      string
+	volume     float64
+	replayGain string
 
-	// State
-	paused   bool
-	volume   float64 // 0-100
-	rgMode   string  // "track", "album", "off"
-	rgTrack  float64 // ReplayGain track gain in dB
-	rgAlbum  float64 // ReplayGain album gain in dB
-	nrgTrack float64 // next track RG
-	nrgAlbum float64 // next track RG
+	currentLoaded  bool
+	nextLoaded     bool
+	currentPath    string
+	nextPath       string
+	currentEntryID int64
+	nextEntryID    int64
+	generation     uint64
 
-	// Callbacks
-	OnTrackEnd func() // called when current track ends naturally
+	OnTrackEnd func()
 }
 
-// gaplessMixer is the streamer registered with the speaker. It wraps the
-// current decoded stream and handles gapless transition to the next track.
-type gaplessMixer struct {
-	p *Player
+type mpvRequest struct {
+	Command   []any `json:"command"`
+	RequestID int   `json:"request_id"`
 }
 
-func (g *gaplessMixer) Stream(samples [][2]float64) (int, bool) {
-	g.p.mu.Lock()
-	defer g.p.mu.Unlock()
-
-	if g.p.current == nil {
-		for i := range samples {
-			samples[i] = [2]float64{}
-		}
-		return len(samples), true
-	}
-
-	if g.p.paused {
-		for i := range samples {
-			samples[i] = [2]float64{}
-		}
-		return len(samples), true
-	}
-
-	gain := g.p.currentGain()
-	filled := 0
-
-	for filled < len(samples) {
-		n, ok := g.p.current.Stream(samples[filled:])
-		for i := filled; i < filled+n; i++ {
-			samples[i][0] *= gain
-			samples[i][1] *= gain
-		}
-		filled += n
-
-		if !ok {
-			g.p.current.Close()
-			if g.p.currentSrc != nil {
-				g.p.currentSrc.Close()
-				g.p.currentSrc = nil
-			}
-
-			if g.p.next != nil {
-				// Gapless transition
-				g.p.current = g.p.next
-				g.p.currentFmt = g.p.nextFmt
-				g.p.currentSrc = g.p.nextSrc
-				g.p.rgTrack = g.p.nrgTrack
-				g.p.rgAlbum = g.p.nrgAlbum
-				g.p.next = nil
-				g.p.nextSrc = nil
-				gain = g.p.currentGain()
-
-				if g.p.OnTrackEnd != nil {
-					go g.p.OnTrackEnd()
-				}
-				continue
-			}
-
-			// No next track — playback stops
-			g.p.current = nil
-			if g.p.OnTrackEnd != nil {
-				go g.p.OnTrackEnd()
-			}
-
-			for i := filled; i < len(samples); i++ {
-				samples[i] = [2]float64{}
-			}
-			return len(samples), true
-		}
-	}
-	return filled, true
+type mpvResponse struct {
+	Data      any    `json:"data,omitempty"`
+	Error     string `json:"error,omitempty"`
+	RequestID int    `json:"request_id,omitempty"`
 }
 
-func (*gaplessMixer) Err() error { return nil }
-
-// currentGain returns the linear gain factor for the current track.
-func (p *Player) currentGain() float64 {
-	vol := p.volume / 100.0
-	var rgDB float64
-	switch p.rgMode {
-	case "track":
-		rgDB = p.rgTrack
-	case "album":
-		rgDB = p.rgAlbum
-	default:
-		rgDB = 0
-	}
-	rg := math.Pow(10, rgDB/20)
-	return vol * rg
+type commandResult struct {
+	resp mpvResponse
+	err  error
 }
 
-// New creates and initializes a new Player.
+type mpvEvent struct {
+	Event           string `json:"event"`
+	Reason          string `json:"reason,omitempty"`
+	PlaylistEntryID int64  `json:"playlist_entry_id,omitempty"`
+}
+
 func New() *Player {
-	p := &Player{
-		volume: 100,
-		rgMode: "off",
+	p, err := NewWithConfig("", "")
+	if err != nil {
+		return &Player{
+			mpvPath:       defaultMPVPath,
+			socketPath:    defaultSocketPath(),
+			state:         "stop",
+			volume:        100,
+			replayGain:    "no",
+			pending:       make(map[int]chan commandResult),
+			eventCh:       make(chan mpvEvent, 64),
+			nextRequestID: 1,
+			startErr:      err,
+		}
 	}
-	p.mixer = &gaplessMixer{p: p}
-
-	speaker.Init(OutputSampleRate, bufferSize)
-	speaker.Play(p.mixer)
-
 	return p
 }
 
-// Play loads and starts playing a track. Stops any current playback.
-// formatHint is an optional filename used for format detection when path has no extension (e.g. HTTP URLs).
-func (p *Player) Play(path, formatHint string, rgTrack, rgAlbum float64) error {
-	stream, format, src, err := openAudio(path, formatHint)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
+func NewWithConfig(mpvPath, socketPath string) (*Player, error) {
+	if strings.TrimSpace(mpvPath) == "" {
+		mpvPath = defaultMPVPath
+	}
+	if strings.TrimSpace(socketPath) == "" {
+		socketPath = defaultSocketPath()
 	}
 
-	resampled := resampleStream(stream, format)
-
-	speaker.Lock()
-	p.mu.Lock()
-	if p.current != nil {
-		p.current.Close()
+	p := &Player{
+		mpvPath:       mpvPath,
+		socketPath:    socketPath,
+		state:         "stop",
+		volume:        100,
+		replayGain:    "no",
+		pending:       make(map[int]chan commandResult),
+		eventCh:       make(chan mpvEvent, 64),
+		nextRequestID: 1,
 	}
-	if p.currentSrc != nil {
-		p.currentSrc.Close()
+	if err := p.startLocked(); err != nil {
+		p.startErr = err
+		return p, err
 	}
-	if p.next != nil {
-		p.next.Close()
-	}
-	if p.nextSrc != nil {
-		p.nextSrc.Close()
-	}
-	p.current = resampled
-	p.currentFmt = format
-	p.currentSrc = src
-	p.rgTrack = rgTrack
-	p.rgAlbum = rgAlbum
-	p.next = nil
-	p.nextSrc = nil
-	p.paused = false
-	p.mu.Unlock()
-	speaker.Unlock()
-
-	return nil
+	return p, nil
 }
 
-// Preload prepares the next track for gapless playback.
-// formatHint is an optional filename used for format detection when path has no extension.
-func (p *Player) Preload(path, formatHint string, rgTrack, rgAlbum float64) error {
-	stream, format, src, err := openAudio(path, formatHint)
-	if err != nil {
-		return fmt.Errorf("preload %s: %w", path, err)
+func defaultSocketPath() string {
+	base := os.Getenv("XDG_RUNTIME_DIR")
+	if base != "" {
+		base = filepath.Join(base, "melody")
+	} else {
+		base = filepath.Join(os.TempDir(), fmt.Sprintf("melody-%d", os.Getuid()))
 	}
-
-	resampled := resampleStream(stream, format)
-
-	speaker.Lock()
-	p.mu.Lock()
-	if p.next != nil {
-		p.next.Close()
-	}
-	if p.nextSrc != nil {
-		p.nextSrc.Close()
-	}
-	p.next = resampled
-	p.nextFmt = format
-	p.nextSrc = src
-	p.nrgTrack = rgTrack
-	p.nrgAlbum = rgAlbum
-	p.mu.Unlock()
-	speaker.Unlock()
-
-	return nil
+	return filepath.Join(base, fmt.Sprintf("melody-%d.mpv.sock", os.Getpid()))
 }
 
-// Pause pauses playback.
-func (p *Player) Pause() {
-	speaker.Lock()
-	p.mu.Lock()
-	p.paused = true
-	p.mu.Unlock()
-	speaker.Unlock()
-}
-
-// Resume resumes playback.
-func (p *Player) Resume() {
-	speaker.Lock()
-	p.mu.Lock()
-	p.paused = false
-	p.mu.Unlock()
-	speaker.Unlock()
-}
-
-// Stop stops playback and clears all streams.
-func (p *Player) Stop() {
-	speaker.Lock()
-	p.mu.Lock()
-	if p.current != nil {
-		p.current.Close()
-		p.current = nil
+func (p *Player) startLocked() error {
+	if p.closed {
+		return errors.New("player closed")
 	}
-	if p.currentSrc != nil {
-		p.currentSrc.Close()
-		p.currentSrc = nil
-	}
-	if p.next != nil {
-		p.next.Close()
-		p.next = nil
-	}
-	if p.nextSrc != nil {
-		p.nextSrc.Close()
-		p.nextSrc = nil
-	}
-	p.paused = false
-	p.mu.Unlock()
-	speaker.Unlock()
-}
-
-// Seek seeks to the given position in seconds.
-func (p *Player) Seek(seconds float64) error {
-	speaker.Lock()
-	p.mu.Lock()
-	defer func() {
-		p.mu.Unlock()
-		speaker.Unlock()
-	}()
-
-	if p.current == nil {
+	if p.conn != nil && p.cmd != nil && p.cmd.Process != nil {
 		return nil
 	}
 
-	samplePos := int(seconds * float64(OutputSampleRate))
-	total := p.current.Len()
-	if samplePos < 0 {
-		samplePos = 0
+	if err := os.MkdirAll(filepath.Dir(p.socketPath), 0o700); err != nil {
+		return fmt.Errorf("create mpv socket dir: %w", err)
 	}
-	if samplePos > total {
-		samplePos = total
+	_ = os.Remove(p.socketPath)
+
+	cmd := exec.Command(p.mpvPath,
+		"--idle=yes",
+		"--no-video",
+		"--no-terminal",
+		"--audio-display=no",
+		"--force-window=no",
+		"--gapless-audio=yes",
+		"--input-ipc-server="+p.socketPath,
+	)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start mpv %q: %w", p.mpvPath, err)
 	}
-	return p.current.Seek(samplePos)
+
+	deadline := time.Now().Add(5 * time.Second)
+	var conn net.Conn
+	var err error
+	for time.Now().Before(deadline) {
+		conn, err = net.DialTimeout("unix", p.socketPath, 200*time.Millisecond)
+		if err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if conn == nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("connect mpv IPC %s: %w", p.socketPath, err)
+	}
+
+	p.cmd = cmd
+	p.conn = conn
+	p.done = make(chan struct{})
+	p.pending = make(map[int]chan commandResult)
+	p.nextRequestID = 1
+	p.startErr = nil
+
+	go p.readLoop(conn, p.done)
+	go p.eventLoop(p.done)
+	go p.waitLoop(cmd, p.done)
+	return nil
 }
 
-// SetVolume sets the volume (0-100).
+func (p *Player) ensureStartedLocked() error {
+	if p.commandHook != nil {
+		return nil
+	}
+	if p.conn != nil && p.cmd != nil && p.cmd.Process != nil {
+		return nil
+	}
+	if p.startErr != nil {
+		p.startErr = nil
+	}
+	return p.startLocked()
+}
+
+func (p *Player) waitLoop(cmd *exec.Cmd, done chan struct{}) {
+	_ = cmd.Wait()
+	p.mu.Lock()
+	if p.cmd == cmd {
+		p.conn = nil
+		p.cmd = nil
+		p.currentLoaded = false
+		p.nextLoaded = false
+		p.currentPath = ""
+		p.nextPath = ""
+		p.currentEntryID = 0
+		p.nextEntryID = 0
+		p.state = "stop"
+		p.generation++
+	}
+	p.mu.Unlock()
+	p.failPending(errors.New("mpv exited"))
+	close(done)
+}
+
+func (p *Player) readLoop(conn net.Conn, done chan struct{}) {
+	scanner := bufio.NewScanner(conn)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		var raw struct {
+			RequestID       int    `json:"request_id,omitempty"`
+			Event           string `json:"event,omitempty"`
+			Reason          string `json:"reason,omitempty"`
+			PlaylistEntryID int64  `json:"playlist_entry_id,omitempty"`
+			Error           string `json:"error,omitempty"`
+			Data            any    `json:"data,omitempty"`
+		}
+		if err := json.Unmarshal(line, &raw); err != nil {
+			continue
+		}
+		if raw.RequestID != 0 {
+			p.pendingMu.Lock()
+			ch := p.pending[raw.RequestID]
+			delete(p.pending, raw.RequestID)
+			p.pendingMu.Unlock()
+			if ch != nil {
+				ch <- commandResult{resp: mpvResponse{
+					Data:      raw.Data,
+					Error:     raw.Error,
+					RequestID: raw.RequestID,
+				}}
+			}
+			continue
+		}
+		if raw.Event != "" {
+			ev := mpvEvent{
+				Event:           raw.Event,
+				Reason:          raw.Reason,
+				PlaylistEntryID: raw.PlaylistEntryID,
+			}
+			select {
+			case p.eventCh <- ev:
+			case <-done:
+				return
+			}
+		}
+	}
+	p.failPending(errors.New("mpv IPC closed"))
+}
+
+func (p *Player) eventLoop(done chan struct{}) {
+	for {
+		select {
+		case ev := <-p.eventCh:
+			p.handleEvent(ev)
+		case <-done:
+			return
+		}
+	}
+}
+
+func (p *Player) failPending(err error) {
+	p.pendingMu.Lock()
+	for id, ch := range p.pending {
+		delete(p.pending, id)
+		ch <- commandResult{err: err}
+	}
+	p.pendingMu.Unlock()
+}
+
+func (p *Player) handleEvent(ev mpvEvent) {
+	if ev.Event != "end-file" || ev.Reason != "eof" {
+		return
+	}
+
+	var cb func()
+	p.mu.Lock()
+	if !p.currentLoaded || ev.PlaylistEntryID != p.currentEntryID {
+		p.mu.Unlock()
+		return
+	}
+
+	if p.nextLoaded {
+		_, _ = p.commandLocked("playlist-remove", 0)
+		p.currentLoaded = true
+		p.currentPath = p.nextPath
+		p.currentEntryID = p.nextEntryID
+		p.nextLoaded = false
+		p.nextPath = ""
+		p.nextEntryID = 0
+		p.state = "play"
+	} else {
+		p.currentLoaded = false
+		p.currentPath = ""
+		p.currentEntryID = 0
+		p.state = "stop"
+	}
+	p.generation++
+	cb = p.OnTrackEnd
+	p.mu.Unlock()
+
+	if cb != nil {
+		go cb()
+	}
+}
+
+func (p *Player) commandLocked(args ...any) (mpvResponse, error) {
+	if p.commandHook != nil {
+		return p.commandHook(args...)
+	}
+	if p.conn == nil {
+		return mpvResponse{}, errors.New("mpv is not running")
+	}
+
+	p.pendingMu.Lock()
+	id := p.nextRequestID
+	p.nextRequestID++
+	ch := make(chan commandResult, 1)
+	p.pending[id] = ch
+	p.pendingMu.Unlock()
+
+	req := mpvRequest{Command: args, RequestID: id}
+	data, err := json.Marshal(req)
+	if err != nil {
+		p.removePending(id)
+		return mpvResponse{}, err
+	}
+	data = append(data, '\n')
+
+	p.writeMu.Lock()
+	_, err = p.conn.Write(data)
+	p.writeMu.Unlock()
+	if err != nil {
+		p.removePending(id)
+		return mpvResponse{}, err
+	}
+
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			return mpvResponse{}, res.err
+		}
+		if res.resp.Error != "" && res.resp.Error != "success" {
+			return res.resp, errors.New(res.resp.Error)
+		}
+		return res.resp, nil
+	case <-time.After(commandTimeout):
+		p.removePending(id)
+		return mpvResponse{}, fmt.Errorf("mpv command %v timed out", args)
+	}
+}
+
+func (p *Player) removePending(id int) {
+	p.pendingMu.Lock()
+	delete(p.pending, id)
+	p.pendingMu.Unlock()
+}
+
+func (p *Player) Play(path, formatHint string, rgTrack, rgAlbum float64) error {
+	return p.PlayPair(TrackSpec{
+		Path:       path,
+		FormatHint: formatHint,
+		RGTrack:    rgTrack,
+		RGAlbum:    rgAlbum,
+	}, nil, -1)
+}
+
+func (p *Player) PlayPair(current TrackSpec, next *TrackSpec, seek float64) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if current.Path == "" {
+		return errors.New("empty path")
+	}
+	if err := p.ensureStartedLocked(); err != nil {
+		p.startErr = err
+		return err
+	}
+
+	p.generation++
+	if err := p.clearPlaylistLocked(); err != nil {
+		return err
+	}
+	if _, err := p.commandLocked("loadfile", current.Path, "replace"); err != nil {
+		p.currentLoaded = false
+		p.nextLoaded = false
+		p.state = "stop"
+		return err
+	}
+	curID, err := p.playlistEntryIDLocked(0)
+	if err != nil {
+		return err
+	}
+
+	nextLoaded := false
+	var nextPath string
+	var nextID int64
+	if next != nil && next.Path != "" {
+		if _, err := p.commandLocked("loadfile", next.Path, "append"); err != nil {
+			p.nextLoaded = false
+			return err
+		}
+		nextID, err = p.playlistEntryIDLocked(1)
+		if err != nil {
+			return err
+		}
+		nextLoaded = true
+		nextPath = next.Path
+	}
+
+	_ = p.setReplayGainLocked(p.replayGain)
+	_, _ = p.commandLocked("set_property", "volume", p.volume)
+	if seek > 0 {
+		_, _ = p.commandLocked("seek", seek, "absolute", "exact")
+	}
+	if _, err := p.commandLocked("set_property", "pause", false); err != nil {
+		return err
+	}
+
+	p.currentLoaded = true
+	p.currentPath = current.Path
+	p.currentEntryID = curID
+	p.nextLoaded = nextLoaded
+	p.nextPath = nextPath
+	p.nextEntryID = nextID
+	p.state = "play"
+	return nil
+}
+
+func (p *Player) Preload(path, formatHint string, rgTrack, rgAlbum float64) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if path == "" {
+		return errors.New("empty path")
+	}
+	if !p.currentLoaded {
+		p.nextLoaded = false
+		p.nextPath = ""
+		p.nextEntryID = 0
+		return nil
+	}
+	if err := p.ensureStartedLocked(); err != nil {
+		p.startErr = err
+		return err
+	}
+	if err := p.clearPreloadLocked(); err != nil {
+		return err
+	}
+	if _, err := p.commandLocked("loadfile", path, "append"); err != nil {
+		p.nextLoaded = false
+		p.nextPath = ""
+		p.nextEntryID = 0
+		return err
+	}
+	id, err := p.playlistEntryIDLocked(1)
+	if err != nil {
+		p.nextLoaded = false
+		p.nextPath = ""
+		p.nextEntryID = 0
+		return err
+	}
+	p.nextLoaded = true
+	p.nextPath = path
+	p.nextEntryID = id
+	return nil
+}
+
+func (p *Player) ClearPreload() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.currentLoaded {
+		p.nextLoaded = false
+		p.nextPath = ""
+		p.nextEntryID = 0
+		return nil
+	}
+	if err := p.ensureStartedLocked(); err != nil {
+		p.startErr = err
+		return err
+	}
+	return p.clearPreloadLocked()
+}
+
+func (p *Player) Pause() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.ensureStartedLocked(); err != nil {
+		p.startErr = err
+		return
+	}
+	_, _ = p.commandLocked("set_property", "pause", true)
+	if p.currentLoaded {
+		p.state = "pause"
+	}
+}
+
+func (p *Player) Resume() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.ensureStartedLocked(); err != nil {
+		p.startErr = err
+		return
+	}
+	_, _ = p.commandLocked("set_property", "pause", false)
+	if p.currentLoaded {
+		p.state = "play"
+	}
+}
+
+func (p *Player) Stop() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.generation++
+	if p.conn != nil {
+		_ = p.clearPlaylistLocked()
+	}
+	p.currentLoaded = false
+	p.nextLoaded = false
+	p.currentPath = ""
+	p.nextPath = ""
+	p.currentEntryID = 0
+	p.nextEntryID = 0
+	p.state = "stop"
+}
+
+func (p *Player) Seek(seconds float64) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.ensureStartedLocked(); err != nil {
+		p.startErr = err
+		return err
+	}
+	_, err := p.commandLocked("seek", seconds, "absolute", "exact")
+	return err
+}
+
 func (p *Player) SetVolume(level float64) {
 	if level < 0 {
 		level = 0
@@ -302,181 +567,238 @@ func (p *Player) SetVolume(level float64) {
 	if level > 100 {
 		level = 100
 	}
-	speaker.Lock()
+
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.volume = level
-	p.mu.Unlock()
-	speaker.Unlock()
+	if err := p.ensureStartedLocked(); err != nil {
+		p.startErr = err
+		return
+	}
+	_, _ = p.commandLocked("set_property", "volume", level)
 }
 
-// SetReplayGain sets the ReplayGain mode ("track", "album", "off").
 func (p *Player) SetReplayGain(mode string) {
-	speaker.Lock()
 	p.mu.Lock()
-	p.rgMode = mode
-	p.mu.Unlock()
-	speaker.Unlock()
+	defer p.mu.Unlock()
+	p.replayGain = normalizeReplayGain(mode)
+	if err := p.ensureStartedLocked(); err != nil {
+		p.startErr = err
+		return
+	}
+	_ = p.setReplayGainLocked(p.replayGain)
 }
 
-// State returns the current playback state.
 func (p *Player) State() (state string, elapsed, duration float64, vol float64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	state = p.state
 	vol = p.volume
-
-	if p.current == nil {
-		return "stop", 0, 0, vol
-	}
-	if p.paused {
-		state = "pause"
-	} else {
-		state = "play"
+	if p.conn == nil || !p.currentLoaded {
+		return state, 0, 0, vol
 	}
 
-	elapsed = float64(p.current.Position()) / float64(OutputSampleRate)
-	duration = float64(p.current.Len()) / float64(OutputSampleRate)
-
+	if paused, err := p.getBoolPropertyLocked("pause"); err == nil {
+		if paused {
+			state = "pause"
+		} else {
+			state = "play"
+		}
+		p.state = state
+	}
+	if v, err := p.getFloatPropertyLocked("time-pos"); err == nil {
+		elapsed = v
+	}
+	if v, err := p.getFloatPropertyLocked("duration"); err == nil {
+		duration = v
+	}
+	if v, err := p.getFloatPropertyLocked("volume"); err == nil {
+		vol = v
+		p.volume = v
+	}
 	return state, elapsed, duration, vol
 }
 
-// Close shuts down the player.
-func (p *Player) Close() {
-	p.Stop()
-	speaker.Close()
-}
-
-// StartPositionReporter calls fn every interval with the current state.
 func (p *Player) StartPositionReporter(interval time.Duration, fn func(state string, elapsed, duration, vol float64)) {
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
 	go func() {
-		for {
-			time.Sleep(interval)
-			state, elapsed, dur, vol := p.State()
-			fn(state, elapsed, dur, vol)
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for range t.C {
+			p.mu.Lock()
+			closed := p.closed
+			p.mu.Unlock()
+			if closed {
+				return
+			}
+			fn(p.State())
 		}
 	}()
 }
 
-// ---------------------------------------------------------------------------
-// Audio file opening and format detection
-// ---------------------------------------------------------------------------
-
-func openAudio(path, formatHint string) (beep.StreamSeekCloser, beep.Format, io.Closer, error) {
-	var src io.ReadSeekCloser
-	var closer io.Closer
-
-	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
-		resp, err := http.Get(path)
-		if err != nil {
-			return nil, beep.Format{}, nil, err
-		}
-		tmp, err := os.CreateTemp("", "melody-stream-*"+filepath.Ext(path))
-		if err != nil {
-			resp.Body.Close()
-			return nil, beep.Format{}, nil, err
-		}
-		if _, err := io.Copy(tmp, resp.Body); err != nil {
-			resp.Body.Close()
-			tmp.Close()
-			os.Remove(tmp.Name())
-			return nil, beep.Format{}, nil, err
-		}
-		resp.Body.Close()
-		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-			tmp.Close()
-			os.Remove(tmp.Name())
-			return nil, beep.Format{}, nil, err
-		}
-		src = tmp
-		closer = &tempFileCloser{f: tmp}
-	} else {
-		f, err := os.Open(path)
-		if err != nil {
-			return nil, beep.Format{}, nil, err
-		}
-		src = f
-		closer = f
+func (p *Player) Close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.closed = true
+	p.generation++
+	if p.conn != nil {
+		_ = p.commandNoWaitLocked("quit")
+		_ = p.conn.Close()
+		p.conn = nil
 	}
-
-	fmtPath := path
-	if formatHint != "" {
-		fmtPath = formatHint
+	if p.cmd != nil && p.cmd.Process != nil {
+		_ = p.cmd.Process.Kill()
 	}
-	stream, format, err := decodeAudio(src, fmtPath)
+	p.currentLoaded = false
+	p.nextLoaded = false
+	p.state = "stop"
+}
+
+func (p *Player) clearPlaylistLocked() error {
+	if p.conn == nil && p.commandHook == nil {
+		return nil
+	}
+	_, err := p.commandLocked("playlist-clear")
+	p.currentLoaded = false
+	p.nextLoaded = false
+	p.currentPath = ""
+	p.nextPath = ""
+	p.currentEntryID = 0
+	p.nextEntryID = 0
+	return err
+}
+
+func (p *Player) clearPreloadLocked() error {
+	if p.conn == nil && p.commandHook == nil {
+		p.nextLoaded = false
+		p.nextPath = ""
+		p.nextEntryID = 0
+		return nil
+	}
+	for {
+		count, err := p.playlistCountLocked()
+		if err != nil {
+			return err
+		}
+		if count <= 1 {
+			break
+		}
+		if _, err := p.commandLocked("playlist-remove", 1); err != nil {
+			return err
+		}
+	}
+	p.nextLoaded = false
+	p.nextPath = ""
+	p.nextEntryID = 0
+	return nil
+}
+
+func (p *Player) playlistCountLocked() (int, error) {
+	resp, err := p.commandLocked("get_property", "playlist-count")
 	if err != nil {
-		closer.Close()
-		return nil, beep.Format{}, nil, err
+		return 0, err
 	}
-
-	return stream, format, closer, nil
+	return intFromAny(resp.Data)
 }
 
-type tempFileCloser struct {
-	f *os.File
+func (p *Player) playlistEntryIDLocked(index int) (int64, error) {
+	resp, err := p.commandLocked("get_property", fmt.Sprintf("playlist/%d/id", index))
+	if err != nil {
+		return 0, err
+	}
+	return int64FromAny(resp.Data)
 }
 
-func (t *tempFileCloser) Close() error {
-	name := t.f.Name()
-	t.f.Close()
-	return os.Remove(name)
+func (p *Player) getFloatPropertyLocked(name string) (float64, error) {
+	resp, err := p.commandLocked("get_property", name)
+	if err != nil {
+		return 0, err
+	}
+	return floatFromAny(resp.Data)
 }
 
-func decodeAudio(src io.ReadSeekCloser, path string) (beep.StreamSeekCloser, beep.Format, error) {
-	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
-	case ".flac":
-		return flac.Decode(src)
-	case ".mp3":
-		return mp3.Decode(src)
-	case ".ogg", ".oga":
-		return vorbis.Decode(src)
-	case ".wav":
-		return wav.Decode(src)
-	case ".opus":
-		return decodeOpus(src)
+func (p *Player) getBoolPropertyLocked(name string) (bool, error) {
+	resp, err := p.commandLocked("get_property", name)
+	if err != nil {
+		return false, err
+	}
+	v, ok := resp.Data.(bool)
+	if !ok {
+		return false, fmt.Errorf("property %s is not bool", name)
+	}
+	return v, nil
+}
+
+func (p *Player) setReplayGainLocked(mode string) error {
+	_, err := p.commandLocked("set_property", "replaygain", normalizeReplayGain(mode))
+	return err
+}
+
+func (p *Player) commandNoWaitLocked(args ...any) error {
+	if p.conn == nil {
+		return nil
+	}
+	req := struct {
+		Command []any `json:"command"`
+	}{Command: args}
+	data, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	_, err = p.conn.Write(data)
+	return err
+}
+
+func normalizeReplayGain(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "track":
+		return "track"
+	case "album":
+		return "album"
 	default:
-		return nil, beep.Format{}, fmt.Errorf("unsupported format: %s", ext)
+		return "no"
 	}
 }
 
-func resampleStream(s beep.StreamSeekCloser, format beep.Format) beep.StreamSeekCloser {
-	if format.SampleRate == OutputSampleRate {
-		return s
+func intFromAny(v any) (int, error) {
+	switch n := v.(type) {
+	case float64:
+		return int(n), nil
+	case int:
+		return n, nil
+	default:
+		return 0, fmt.Errorf("not an int: %T", v)
 	}
-	return &resampledStream{
-		resampled: beep.Resample(4, format.SampleRate, OutputSampleRate, s),
-		inner:     s,
-		ratio:     float64(OutputSampleRate) / float64(format.SampleRate),
+}
+
+func int64FromAny(v any) (int64, error) {
+	switch n := v.(type) {
+	case float64:
+		return int64(n), nil
+	case int:
+		return int64(n), nil
+	case int64:
+		return n, nil
+	default:
+		return 0, fmt.Errorf("not an int64: %T", v)
 	}
 }
 
-type resampledStream struct {
-	resampled beep.Streamer
-	inner     beep.StreamSeekCloser
-	ratio     float64
-}
-
-func (r *resampledStream) Stream(samples [][2]float64) (int, bool) {
-	return r.resampled.Stream(samples)
-}
-
-func (r *resampledStream) Err() error {
-	return r.inner.Err()
-}
-
-func (r *resampledStream) Len() int {
-	return int(float64(r.inner.Len()) * r.ratio)
-}
-
-func (r *resampledStream) Position() int {
-	return int(float64(r.inner.Position()) * r.ratio)
-}
-
-func (r *resampledStream) Seek(p int) error {
-	innerPos := int(float64(p) / r.ratio)
-	return r.inner.Seek(innerPos)
-}
-
-func (r *resampledStream) Close() error {
-	return r.inner.Close()
+func floatFromAny(v any) (float64, error) {
+	switch n := v.(type) {
+	case float64:
+		return n, nil
+	case int:
+		return float64(n), nil
+	case nil:
+		return 0, nil
+	default:
+		return 0, fmt.Errorf("not a float: %T", v)
+	}
 }
