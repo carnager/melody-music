@@ -37,6 +37,7 @@ func (a *app) refreshCoreAudioOutputs() error {
 	if err != nil {
 		return err
 	}
+	a.logger.Printf("coreaudio discovery: outputs=%d %s", len(outputs), describeCoreAudioOutputs(outputs))
 	if len(outputs) == 0 {
 		return nil
 	}
@@ -115,6 +116,7 @@ func (t *coreAudioTarget) selectDevice() (*agentTarget, error) {
 	if err != nil {
 		return nil, err
 	}
+	t.app.logger.Printf("coreaudio %s: selecting mpv audio device %s", t.name, t.mpvDevice)
 	if _, err := at.sendCommand("audio_device " + mpdQuoteArg(t.mpvDevice)); err != nil {
 		return nil, err
 	}
@@ -204,4 +206,15 @@ func coreAudioDeviceID(uid, name string) string {
 		key = name
 	}
 	return coreAudioDevicePrefix + sanitizeDeviceID(key)
+}
+
+func describeCoreAudioOutputs(outputs []coreAudioOutputDevice) string {
+	if len(outputs) == 0 {
+		return "[]"
+	}
+	parts := make([]string, 0, len(outputs))
+	for _, out := range outputs {
+		parts = append(parts, fmt.Sprintf("%q=%s", out.Name, out.MPVDevice))
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
 }

@@ -214,13 +214,20 @@ func (la *localAgent) handleCommand(w *bufio.Writer, line string) {
 			fmt.Fprintln(w, "ACK [2@0] {audio_device} missing device")
 			return
 		}
+		la.app.logger.Printf("local-agent: selecting audio output %s", args[0])
 		if err := la.player.SetAudioDevice(args[0]); err != nil {
+			la.app.logger.Printf("local-agent: select audio output %s failed: %v", args[0], err)
 			fmt.Fprintf(w, "ACK [56@0] {audio_device} %s\n", err)
 			return
 		}
+		actual, err := la.player.AudioDevice()
+		if err != nil {
+			la.app.logger.Printf("local-agent: selected audio output %s; readback failed: %v", args[0], err)
+		} else {
+			la.app.logger.Printf("local-agent: selected audio output requested=%s active=%s", args[0], actual)
+		}
 		if la.audioDevice != args[0] {
 			la.audioDevice = args[0]
-			la.app.logger.Printf("local-agent: selected audio output %s", args[0])
 		}
 		fmt.Fprintln(w, "OK")
 

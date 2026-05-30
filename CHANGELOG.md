@@ -12,6 +12,7 @@
 - Add `chromecast.format` config for choosing MP3 or FLAC Cast streams.
 - Add TUI +/- hotkeys for MPD software volume changes.
 - Show each output backend in the TUI device picker.
+- Log CoreAudio discovery and libmpv audio-device selection details.
 
 ### Bug Fixes
 

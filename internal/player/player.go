@@ -38,6 +38,10 @@ static int mpv_set_string(mpv_handle *ctx, const char *name, const char *value) 
 	return mpv_set_property_string(ctx, name, value);
 }
 
+static char *mpv_get_string(mpv_handle *ctx, const char *name) {
+	return mpv_get_property_string(ctx, name);
+}
+
 static int mpv_get_double(mpv_handle *ctx, const char *name, double *value) {
 	return mpv_get_property(ctx, name, MPV_FORMAT_DOUBLE, value);
 }
@@ -238,6 +242,24 @@ func (p *Player) SetAudioDevice(device string) error {
 		return fmt.Errorf("mpv set audio-device: %s", mpvError(rc))
 	}
 	return nil
+}
+
+// AudioDevice returns the libmpv audio-device property value.
+func (p *Player) AudioDevice() (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.ctx == nil {
+		return "", fmt.Errorf("player closed")
+	}
+
+	name := C.CString("audio-device")
+	defer C.free(unsafe.Pointer(name))
+	value := C.mpv_get_string(p.ctx, name)
+	if value == nil {
+		return "", fmt.Errorf("mpv get audio-device failed")
+	}
+	defer C.mpv_free(unsafe.Pointer(value))
+	return C.GoString(value), nil
 }
 
 // State returns the current playback state.
