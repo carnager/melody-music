@@ -43,23 +43,33 @@ type upnpTarget struct {
 	monitorID int
 }
 
+type upnpDiscoveryStats struct {
+	responses int
+	locations int
+	renderers int
+}
+
 func (a *app) upnpDiscoveryLoop() {
 	for {
-		if err := a.discoverUPnPOnce(); err != nil {
+		stats, err := a.discoverUPnPOnce()
+		if err != nil {
 			a.logger.Printf("upnp discovery: %v", err)
+		} else {
+			a.logger.Printf("upnp discovery: responses=%d locations=%d renderers=%d", stats.responses, stats.locations, stats.renderers)
 		}
 		time.Sleep(60 * time.Second)
 	}
 }
 
-func (a *app) discoverUPnPOnce() error {
+func (a *app) discoverUPnPOnce() (upnpDiscoveryStats, error) {
+	var stats upnpDiscoveryStats
 	addr, err := net.ResolveUDPAddr("udp4", "239.255.255.250:1900")
 	if err != nil {
-		return err
+		return stats, err
 	}
 	conn, err := net.ListenPacket("udp4", "0.0.0.0:0")
 	if err != nil {
-		return err
+		return stats, err
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
@@ -81,7 +91,7 @@ func (a *app) discoverUPnPOnce() error {
 			"",
 		}, "\r\n")
 		if _, err := conn.WriteTo([]byte(msg), addr); err != nil {
-			return err
+			return stats, err
 		}
 	}
 
@@ -91,10 +101,11 @@ func (a *app) discoverUPnPOnce() error {
 		n, _, err := conn.ReadFrom(buf)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				return nil
+				return stats, nil
 			}
-			return err
+			return stats, err
 		}
+		stats.responses++
 		location := ssdpHeader(string(buf[:n]), "location")
 		if location == "" {
 			continue
@@ -103,12 +114,15 @@ func (a *app) discoverUPnPOnce() error {
 			continue
 		}
 		seen[location] = struct{}{}
+		stats.locations++
 		if err := a.registerUPnPRenderer(location); err != nil {
 			if errors.Is(err, errNotUPnPMediaRenderer) {
 				continue
 			}
 			a.logger.Printf("upnp %s: %v", location, err)
+			continue
 		}
+		stats.renderers++
 	}
 }
 
