@@ -1,5 +1,5 @@
 # Maintainer: Rasmus Steinke <rasi at xssn dot at>
-pkgname=('melodyd' 'melody-agent' 'melody-tui' 'melody-cli' 'melody-musiclist' 'melody-lrcmatch')
+pkgname=('melodyd' 'melody-agent' 'melody-airplay' 'melody-tui' 'melody-cli' 'melody-musiclist' 'melody-lrcmatch')
 pkgver=1.1
 pkgrel=1
 arch=('x86_64' 'aarch64')
@@ -30,6 +30,12 @@ package_melody-agent() {
   pkgdesc="Remote playback agent for Melody"
   install -Dm755 "$srcdir/melody-music/bin/melody-agent" \
                   "$pkgdir/usr/bin/melody-agent"
+}
+
+package_melody-airplay() {
+  pkgdesc="AirPlay/CoreAudio playback agent for Melody"
+  install -Dm755 "$srcdir/melody-music/bin/melody-airplay" \
+                  "$pkgdir/usr/bin/melody-airplay"
 }
 
 package_melody-tui() {
