@@ -16,111 +16,111 @@ var commandTable map[string]func(*mpdConn, []string) *mpdError
 
 func init() {
 	commandTable = map[string]func(*mpdConn, []string) *mpdError{
-	// Status
-	"status":      cmdStatus,
-	"currentsong": cmdCurrentSong,
-	"stats":       cmdStats,
+		// Status
+		"status":      cmdStatus,
+		"currentsong": cmdCurrentSong,
+		"stats":       cmdStats,
 
-	// Playback control
-	"play":     cmdPlay,
-	"playid":   cmdPlayID,
-	"pause":    cmdPause,
-	"stop":     cmdStop,
-	"next":     cmdNext,
-	"previous": cmdPrevious,
-	"seekcur":  cmdSeekCur,
-	"seek":     cmdSeek,
-	"seekid":   cmdSeekID,
+		// Playback control
+		"play":     cmdPlay,
+		"playid":   cmdPlayID,
+		"pause":    cmdPause,
+		"stop":     cmdStop,
+		"next":     cmdNext,
+		"previous": cmdPrevious,
+		"seekcur":  cmdSeekCur,
+		"seek":     cmdSeek,
+		"seekid":   cmdSeekID,
 
-	// Queue
-	"playlistinfo":   cmdPlaylistInfo,
-	"playlistid":     cmdPlaylistID,
-	"plchanges":      cmdPlChanges,
-	"plchangesposid": cmdPlChangesPosID,
-	"add":            cmdAdd,
-	"addid":          cmdAddID,
-	"delete":         cmdDelete,
-	"deleteid":       cmdDeleteID,
-	"clear":          cmdClear,
-	"move":           cmdMove,
-	"moveid":         cmdMoveID,
-	"shuffle":        cmdShuffle,
-	"prio":           cmdPrio,
-	"prioid":         cmdPrioID,
-	"addidprio":      cmdAddIDPrio,
+		// Queue
+		"playlistinfo":   cmdPlaylistInfo,
+		"playlistid":     cmdPlaylistID,
+		"plchanges":      cmdPlChanges,
+		"plchangesposid": cmdPlChangesPosID,
+		"add":            cmdAdd,
+		"addid":          cmdAddID,
+		"delete":         cmdDelete,
+		"deleteid":       cmdDeleteID,
+		"clear":          cmdClear,
+		"move":           cmdMove,
+		"moveid":         cmdMoveID,
+		"shuffle":        cmdShuffle,
+		"prio":           cmdPrio,
+		"prioid":         cmdPrioID,
+		"addidprio":      cmdAddIDPrio,
 
-	// Database
-	"lsinfo":  cmdLsInfo,
-	"list":    cmdList,
-	"find":    cmdFind,
-	"search":  cmdSearch,
-	"count":   cmdCount,
-	"listall": cmdListAll,
-	"listallinfo": cmdListAllInfo,
-	"findadd":     cmdFindAdd,
-	"searchadd":   cmdSearchAdd,
+		// Database
+		"lsinfo":      cmdLsInfo,
+		"list":        cmdList,
+		"find":        cmdFind,
+		"search":      cmdSearch,
+		"count":       cmdCount,
+		"listall":     cmdListAll,
+		"listallinfo": cmdListAllInfo,
+		"findadd":     cmdFindAdd,
+		"searchadd":   cmdSearchAdd,
 
-	// Stored playlists
-	"listplaylists":     cmdListPlaylists,
-	"listplaylistinfo":  cmdListPlaylistInfo,
-	"load":              cmdLoad,
-	"save":              cmdSave,
-	"rm":                cmdRm,
-	"playlistadd":       cmdPlaylistAdd,
+		// Stored playlists
+		"listplaylists":    cmdListPlaylists,
+		"listplaylistinfo": cmdListPlaylistInfo,
+		"load":             cmdLoad,
+		"save":             cmdSave,
+		"rm":               cmdRm,
+		"playlistadd":      cmdPlaylistAdd,
 
-	// Outputs (devices)
-	"outputs":       cmdOutputs,
-	"enableoutput":  cmdEnableOutput,
-	"disableoutput": cmdDisableOutput,
+		// Outputs (devices)
+		"outputs":       cmdOutputs,
+		"enableoutput":  cmdEnableOutput,
+		"disableoutput": cmdDisableOutput,
 
-	// Volume
-	"setvol":   cmdSetVol,
-	"volume":   cmdVolume,
+		// Volume
+		"setvol": cmdSetVol,
+		"volume": cmdVolume,
 
-	// Options
-	"replay_gain_mode":   cmdReplayGainMode,
-	"replay_gain_status": cmdReplayGainStatus,
-	"repeat":             cmdRepeat,
-	"random":             cmdRandom,
-	"single":             cmdSingle,
-	"consume":            cmdConsume,
-	"crossfade":          cmdIgnore,
-	"trackended":         cmdTrackEnded,
+		// Options
+		"replay_gain_mode":   cmdReplayGainMode,
+		"replay_gain_status": cmdReplayGainStatus,
+		"repeat":             cmdRepeat,
+		"random":             cmdRandom,
+		"single":             cmdSingle,
+		"consume":            cmdConsume,
+		"crossfade":          cmdIgnore,
+		"trackended":         cmdTrackEnded,
 
-	// Ratings (custom extension)
-	"rate":           cmdRate,
-	"albumrate":      cmdAlbumRate,
-	"getrating":      cmdGetRating,
-	"getalbumrating": cmdGetAlbumRating,
+		// Ratings (custom extension)
+		"rate":           cmdRate,
+		"albumrate":      cmdAlbumRate,
+		"getrating":      cmdGetRating,
+		"getalbumrating": cmdGetAlbumRating,
 
-	// Web client
-	"web_register":   cmdWebRegister,
-	"web_unregister": cmdWebUnregister,
+		// Web client
+		"web_register":   cmdWebRegister,
+		"web_unregister": cmdWebUnregister,
 
-	// Cover art
-	"albumart":    cmdAlbumArt,
-	"readpicture": cmdReadPicture,
+		// Cover art
+		"albumart":    cmdAlbumArt,
+		"readpicture": cmdReadPicture,
 
-	// Lyrics
-	"readlyrics": cmdReadLyrics,
+		// Lyrics
+		"readlyrics": cmdReadLyrics,
 
-	// Connection
-	"ping":         cmdPing,
-	"commands":     cmdCommands,
-	"notcommands":  cmdNotCommands,
-	"tagtypes":     cmdTagTypes,
-	"decoders":     cmdDecoders,
-	"binarylimit":  cmdIgnore,
-	"password":     cmdIgnore,
-	"config":       cmdIgnore,
-	"urlhandlers":  cmdIgnore,
-	"protocols":    cmdIgnore,
-	"subscribe":    cmdIgnore,
-	"unsubscribe":  cmdIgnore,
-	"channels":     cmdChannels,
-	"readmessages": cmdEmpty,
-	"mixrampdb":    cmdIgnore,
-	"mixrampdelay": cmdIgnore,
+		// Connection
+		"ping":         cmdPing,
+		"commands":     cmdCommands,
+		"notcommands":  cmdNotCommands,
+		"tagtypes":     cmdTagTypes,
+		"decoders":     cmdDecoders,
+		"binarylimit":  cmdIgnore,
+		"password":     cmdIgnore,
+		"config":       cmdIgnore,
+		"urlhandlers":  cmdIgnore,
+		"protocols":    cmdIgnore,
+		"subscribe":    cmdIgnore,
+		"unsubscribe":  cmdIgnore,
+		"channels":     cmdChannels,
+		"readmessages": cmdEmpty,
+		"mixrampdb":    cmdIgnore,
+		"mixrampdelay": cmdIgnore,
 	}
 }
 
@@ -792,7 +792,7 @@ func cmdDelete(c *mpdConn, args []string) *mpdError {
 	if start < len(a.queuePriority) {
 		a.queuePriority = append(a.queuePriority[:start], a.queuePriority[end:]...)
 	}
-	a.queueVersion++
+	a.bumpQueueVersionLocked()
 
 	// Adjust curQueuePos
 	count := end - start
@@ -842,7 +842,7 @@ func cmdClear(c *mpdConn, args []string) *mpdError {
 	a.curQueuePos = 0
 	a.pendingNextPos = -1
 	a.prioReturnPos = -1
-	a.queueVersion++
+	a.bumpQueueVersionLocked()
 	a.savePlayQueue()
 	a.playQueueMu.Unlock()
 	t := a.target()
@@ -909,7 +909,7 @@ func cmdMove(c *mpdConn, args []string) *mpdError {
 	for len(a.queuePriority) < len(a.playQueue) {
 		a.queuePriority = append(a.queuePriority, 0)
 	}
-	a.queueVersion++
+	a.bumpQueueVersionLocked()
 	a.savePlayQueue()
 	plan := a.planNextTrack()
 	a.playQueueMu.Unlock()
@@ -999,7 +999,7 @@ func cmdShuffle(c *mpdConn, args []string) *mpdError {
 		}
 	}
 
-	a.queueVersion++
+	a.bumpQueueVersionLocked()
 	a.savePlayQueue()
 
 	// Regenerate shuffle order if random mode is on
@@ -1047,7 +1047,7 @@ func cmdPrio(c *mpdConn, args []string) *mpdError {
 			a.queuePriority[i] = prio
 		}
 	}
-	a.queueVersion++
+	a.bumpQueueVersionLocked()
 	a.savePlayQueue()
 	plan := a.planNextTrack()
 	a.playQueueMu.Unlock()
@@ -1094,7 +1094,7 @@ func cmdPrioID(c *mpdConn, args []string) *mpdError {
 		}
 		a.queuePriority[pos] = prio
 	}
-	a.queueVersion++
+	a.bumpQueueVersionLocked()
 	a.savePlayQueue()
 	plan := a.planNextTrack()
 	a.playQueueMu.Unlock()

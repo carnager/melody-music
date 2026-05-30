@@ -16,11 +16,11 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"syscall"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -92,9 +92,9 @@ type device struct {
 	IsLocal    bool      `json:"is_local"`
 	Type       string    `json:"type"` // "local", "agent"
 	Format     string    `json:"format"`
-	MaxBitRate    int       `json:"max_bitrate"`
-	ReplayGain    string    `json:"replaygain,omitempty"` // "off", "track", "album"
-	LastSeen      time.Time `json:"last_seen"`
+	MaxBitRate int       `json:"max_bitrate"`
+	ReplayGain string    `json:"replaygain,omitempty"` // "off", "track", "album"
+	LastSeen   time.Time `json:"last_seen"`
 }
 
 // ---------------------------------------------------------------------------
@@ -102,10 +102,10 @@ type device struct {
 // ---------------------------------------------------------------------------
 
 type app struct {
-	cfg    config
-	paths  paths
-	logger *log.Logger
-	db     *musicDB
+	cfg     config
+	paths   paths
+	logger  *log.Logger
+	db      *musicDB
 	scanner *scanner
 	// playQueue tracks song IDs (SQLite track IDs as strings) in current mpv playlist order
 	playQueue      []string
@@ -188,9 +188,7 @@ func main() {
 		a.queueIDs = append(a.queueIDs, a.queueIDCounter)
 	}
 	if len(a.playQueue) > 0 {
-		if a.queueVersion == 0 {
-			a.queueVersion = 1
-		}
+		a.ensureQueueVersionLocked()
 	}
 	a.playQueueMu.Unlock()
 
@@ -614,7 +612,6 @@ func (a *app) restoreActiveDevice() {
 	}
 }
 
-
 // generateShuffle creates a shuffled order for the queue.
 // The current track is placed at shufflePos (position 0), and only the
 // remaining (unplayed) tracks after it are shuffled — matching MPD behavior
@@ -902,7 +899,7 @@ func (a *app) advanceTrack() {
 		if a.curQueuePos < len(a.queuePriority) {
 			a.queuePriority = append(a.queuePriority[:a.curQueuePos], a.queuePriority[a.curQueuePos+1:]...)
 		}
-		a.queueVersion++
+		a.bumpQueueVersionLocked()
 		a.savePlayQueue()
 		qLen = len(a.playQueue)
 
@@ -1028,8 +1025,24 @@ func (a *app) removeFromQueue(pos int) {
 	if pos < len(a.queuePriority) {
 		a.queuePriority = append(a.queuePriority[:pos], a.queuePriority[pos+1:]...)
 	}
-	a.queueVersion++
+	a.bumpQueueVersionLocked()
 	a.savePlayQueue()
+}
+
+func (a *app) ensureQueueVersionLocked() {
+	now := int(time.Now().Unix())
+	if a.queueVersion < now {
+		a.queueVersion = now
+	}
+}
+
+func (a *app) bumpQueueVersionLocked() {
+	now := int(time.Now().Unix())
+	if a.queueVersion < now {
+		a.queueVersion = now
+		return
+	}
+	a.queueVersion++
 }
 
 // ---------------------------------------------------------------------------
@@ -1139,7 +1152,7 @@ func (a *app) addSongsWithPriority(songIDs []string, mode string, priority int) 
 			a.queueIDCounter++
 			a.queueIDs = append(a.queueIDs, a.queueIDCounter)
 		}
-		a.queueVersion++
+		a.bumpQueueVersionLocked()
 		a.curQueuePos = 0
 		if a.modeRandom {
 			a.generateShuffle()
@@ -1178,7 +1191,7 @@ func (a *app) addSongsWithPriority(songIDs []string, mode string, priority int) 
 			newPrios = append(newPrios, a.queuePriority[pos:]...)
 		}
 		a.queuePriority = newPrios
-		a.queueVersion++
+		a.bumpQueueVersionLocked()
 		a.savePlayQueue()
 		// Resync preloaded next track since insert may change it
 		ntPlan := a.planNextTrack()
@@ -1195,7 +1208,7 @@ func (a *app) addSongsWithPriority(songIDs []string, mode string, priority int) 
 			a.queueIDCounter++
 			a.queueIDs = append(a.queueIDs, a.queueIDCounter)
 		}
-		a.queueVersion++
+		a.bumpQueueVersionLocked()
 		a.savePlayQueue()
 		if wasEmpty {
 			a.curQueuePos = 0
@@ -1420,7 +1433,6 @@ func (a *app) currentPlayingSongID() string {
 	return a.playQueue[a.curQueuePos]
 }
 
-
 func (a *app) handleStream(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
@@ -1626,7 +1638,6 @@ func (a *app) handleCoverArt(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "no cover art", http.StatusNotFound)
 }
 
-
 // switchDevice performs a full device handoff: captures playback state from old device,
 // loads the queue into the new device, seeks to the same position, and resumes.
 func (a *app) switchDevice(newID string) error {
@@ -1747,7 +1758,6 @@ func (a *app) switchDevice(newID string) error {
 	return nil
 }
 
-
 // reloadQueueIntoAgent loads the 2-track window into a reconnected agent.
 // Called when an agent re-registers and was already the active device.
 func (a *app) reloadQueueIntoAgent(at *agentTarget, dev *device) {
@@ -1773,7 +1783,6 @@ func (a *app) deviceCleanup() {
 	// is automatic. This goroutine is kept for future non-agent device types.
 	select {}
 }
-
 
 // ---------------------------------------------------------------------------
 // Generic helpers
@@ -1809,7 +1818,6 @@ func stringSlice(value any) []string {
 		return nil
 	}
 }
-
 
 func stringify(value any) string {
 	return shared.Stringify(value)

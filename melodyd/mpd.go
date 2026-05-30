@@ -303,10 +303,6 @@ func (c *mpdConn) handleIdle(subs []string) {
 			c.idleCh <- pendingMatch
 		}
 
-		// Set a generous read deadline so that silently-dropped clients
-		// don't block this goroutine forever.
-		c.conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
-
 		// Read next line in a goroutine so we can select between notification and noidle
 		lineCh := make(chan string, 1)
 		go func() {
@@ -363,13 +359,11 @@ func (c *mpdConn) handleIdle(subs []string) {
 			c.idleMu.Unlock()
 
 			if line == "" {
-				c.conn.SetReadDeadline(time.Time{})
 				return // connection closed
 			}
 			if line == "noidle" {
 				c.writeLine("OK")
 				c.flush()
-				c.conn.SetReadDeadline(time.Time{})
 				return
 			}
 			// Client sent a real command instead of noidle — handle it
@@ -383,7 +377,6 @@ func (c *mpdConn) handleIdle(subs []string) {
 			c.flush()
 		}
 
-		c.conn.SetReadDeadline(time.Time{})
 		if !continueIdle {
 			return
 		}
@@ -596,7 +589,7 @@ type agentTarget struct {
 
 	// Cached state from periodic agent_state messages
 	stateMu     sync.RWMutex
-	agState     string  // "play", "pause", "stop"
+	agState     string // "play", "pause", "stop"
 	agPos       int
 	agElapsed   float64
 	agDuration  float64
