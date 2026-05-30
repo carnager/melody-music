@@ -1,7 +1,9 @@
 package player
 
 /*
-#cgo pkg-config: mpv
+#cgo linux pkg-config: mpv
+#cgo darwin CFLAGS: -I/opt/homebrew/include -I/usr/local/include
+#cgo darwin LDFLAGS: -L/opt/homebrew/lib -L/usr/local/lib -Wl,-rpath,/opt/homebrew/lib -Wl,-rpath,/usr/local/lib -lmpv
 #include <stdlib.h>
 #include <mpv/client.h>
 
