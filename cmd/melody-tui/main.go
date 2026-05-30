@@ -1528,6 +1528,26 @@ func mpdCommand(cmds ...string) tea.Cmd {
 	}
 }
 
+func volumeDeltaKey(msg tea.KeyMsg, key string) (int, bool) {
+	switch key {
+	case "+", "=", "plus", "kp+", "shift+=":
+		return 5, true
+	case "-", "_", "minus", "kp-":
+		return -5, true
+	}
+
+	if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 {
+		switch msg.Runes[0] {
+		case '+', '=':
+			return 5, true
+		case '-', '_':
+			return -5, true
+		}
+	}
+
+	return 0, false
+}
+
 func rateTrack(songID, rating string) tea.Cmd {
 	return func() tea.Msg {
 		if mpd == nil {
@@ -2054,6 +2074,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
+	if !m.searching && !m.libFiltering && !m.showPlPicker {
+		if delta, ok := volumeDeltaKey(msg, key); ok {
+			return m, mpdCommand(fmt.Sprintf("volume %+d", delta))
+		}
+	}
+
 	if m.showHelp {
 		m.showHelp = false
 		return m, nil
@@ -2149,10 +2175,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, mpdCommand("previous")
 	case "s":
 		return m, mpdCommand("stop")
-	case "+", "=":
-		return m, mpdCommand("volume +5")
-	case "-":
-		return m, mpdCommand("volume -5")
 	case "r":
 		return m, doRandomAlbum()
 	case "R":
