@@ -5,13 +5,16 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.MediaSession
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import okhttp3.*
@@ -24,6 +27,10 @@ private data class QueueEntry(
     val position: Int,
     val file: String,       // relative path (e.g. "Artist/Album/Track.flac")
     val songId: String,     // X-SongId from DB
+    val title: String,
+    val artist: String,
+    val album: String,
+    val albumId: String,
     val duration: Double,
     val rgTrack: Double,
     val rgAlbum: Double
@@ -32,6 +39,7 @@ private data class QueueEntry(
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class PlaybackService : Service() {
     private var player: ExoPlayer? = null
+    private var mediaSession: MediaSession? = null
     private var agentWs: WebSocket? = null
     private var agentJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -120,6 +128,7 @@ class PlaybackService : Service() {
                     android.util.Log.e("PlaybackService", "ExoPlayer error: ${error.errorCodeName} — ${error.message}")
                 }
             })
+            mediaSession = MediaSession.Builder(this, p).setId("melody").build()
         }
         val prefs = getSharedPreferences("melody", MODE_PRIVATE)
         replaygainMode = prefs.getString("replaygain", "off") ?: "off"
@@ -399,10 +408,10 @@ class PlaybackService : Service() {
             if (seekPos > 0 && isTranscodedUrl(resolvedUrl)) {
                 // Transcoded streams: seek via URL parameter
                 streamStartOffset = seekPos
-                mediaItems.add(MediaItem.fromUri(urlWithStart(resolvedUrl, seekPos)))
+                mediaItems.add(mediaItemFor(item, urlWithStart(resolvedUrl, seekPos)))
                 startPositionMs = C.TIME_UNSET
             } else {
-                mediaItems.add(MediaItem.fromUri(resolvedUrl))
+                mediaItems.add(mediaItemFor(item, resolvedUrl))
                 startPositionMs = if (seekPos > 0) (seekPos * 1000).toLong() else C.TIME_UNSET
             }
             if (isOffline) offlineIndexes.add(0)
@@ -414,7 +423,7 @@ class PlaybackService : Service() {
                 val nextUrl = nextLocalPath ?: resolveStreamUrl(nextItem)
                 if (nextUrl != null) {
                     if (nextLocalPath != null) offlineIndexes.add(1)
-                    mediaItems.add(MediaItem.fromUri(nextUrl))
+                    mediaItems.add(mediaItemFor(nextItem, nextUrl))
                 }
             }
 
@@ -464,7 +473,7 @@ class PlaybackService : Service() {
                 offlineIndexes.clear()
             }
 
-            p.addMediaItem(MediaItem.fromUri(url))
+            p.addMediaItem(mediaItemFor(item, url))
 
             "OK"
         }
@@ -624,6 +633,10 @@ class PlaybackService : Service() {
             position = kv["Pos"]?.toIntOrNull() ?: 0,
             file = kv["file"] ?: "",
             songId = kv["X-SongId"] ?: "",
+            title = kv["Title"] ?: "",
+            artist = kv["Artist"] ?: kv["AlbumArtist"] ?: "",
+            album = kv["Album"] ?: "",
+            albumId = kv["X-AlbumId"] ?: "",
             duration = kv["duration"]?.toDoubleOrNull() ?: kv["Time"]?.toDoubleOrNull() ?: 0.0,
             rgTrack = kv["X-ReplayGainTrack"]?.toDoubleOrNull() ?: 0.0,
             rgAlbum = kv["X-ReplayGainAlbum"]?.toDoubleOrNull() ?: 0.0
@@ -644,6 +657,25 @@ class PlaybackService : Service() {
         return "${mpd.httpBaseUrl}/stream/${item.songId}"
     }
 
+    private fun mediaItemFor(item: QueueEntry, url: String): MediaItem {
+        val metadata = MediaMetadata.Builder()
+            .setTitle(item.title.ifBlank { item.file.substringAfterLast('/') })
+            .setArtist(item.artist)
+            .setAlbumTitle(item.album)
+            .setArtworkUri(coverUri(item.albumId))
+            .build()
+        return MediaItem.Builder()
+            .setUri(url)
+            .setMediaId(item.songId.ifBlank { item.file })
+            .setMediaMetadata(metadata)
+            .build()
+    }
+
+    private fun coverUri(albumId: String): Uri? {
+        if (albumId.isBlank()) return null
+        return Uri.parse("${MelodyApp.instance.mpd.httpBaseUrl}/cover/$albumId?size=512")
+    }
+
     // ---- Transcoding helpers ----
 
     private fun isTranscodedUrl(url: String): Boolean {
@@ -660,7 +692,7 @@ class PlaybackService : Service() {
         val items = mutableListOf<MediaItem>()
         for (i in 0 until p.mediaItemCount) {
             if (i == idx) {
-                items.add(MediaItem.fromUri(newUrl))
+                items.add(p.getMediaItemAt(i).buildUpon().setUri(newUrl).build())
             } else {
                 items.add(p.getMediaItemAt(i))
             }
@@ -714,6 +746,8 @@ class PlaybackService : Service() {
         agentWs?.close(1000, "service destroyed")
         agentJob?.cancel()
         scope.cancel()
+        mediaSession?.release()
+        mediaSession = null
         player?.release()
         player = null
         instance = null
