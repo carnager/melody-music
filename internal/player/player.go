@@ -159,6 +159,7 @@ func (p *Player) startLocked() error {
 		"--gapless-audio=yes",
 		"--input-ipc-server="+p.socketPath,
 	)
+	configureCommand(cmd)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start mpv %q: %w", p.mpvPath, err)
 	}

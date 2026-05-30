@@ -47,6 +47,7 @@ func (a *app) startLocalAgent() {
 		a.logger.Printf("local-agent: start mpv player failed: %v", err)
 		return
 	}
+	defer p.Close()
 
 	la := &localAgent{
 		app:     a,

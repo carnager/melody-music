@@ -8,10 +8,12 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -84,6 +86,7 @@ func main() {
 	if err != nil {
 		logger.Fatalf("start mpv player: %v", err)
 	}
+	defer p.Close()
 
 	a := &agent{
 		cfg:     cfg,
@@ -106,6 +109,7 @@ func main() {
 
 	// Start position reporter
 	p.StartPositionReporter(2*time.Second, a.reportState)
+	installShutdownHandler(logger, p)
 
 	logger.Printf("agent %q connecting to master at %s", cfg.Agent.Name, cfg.Agent.Master)
 	if cfg.Agent.MusicDir != "" {
@@ -115,6 +119,17 @@ func main() {
 	}
 
 	a.connectLoop()
+}
+
+func installShutdownHandler(logger *log.Logger, p *player.Player) {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		logger.Printf("received %s, shutting down player", sig)
+		p.Close()
+		os.Exit(0)
+	}()
 }
 
 func loadAgentConfig() (agentConfig, error) {
