@@ -92,7 +92,7 @@ func TestPlayPairLoadsCurrentAndNext(t *testing.T) {
 	}
 }
 
-func TestPlayPairSeekLoadsPausedThenUnpauses(t *testing.T) {
+func TestPlayPairSeekUsesLoadStartOption(t *testing.T) {
 	f := &fakeMPV{}
 	p := newTestPlayer(f)
 
@@ -101,21 +101,19 @@ func TestPlayPairSeekLoadsPausedThenUnpauses(t *testing.T) {
 	}
 
 	joined := strings.Join(f.commands, "\n")
+	if strings.Contains(joined, "seek 42.5 absolute exact") {
+		t.Fatalf("PlayPair should use loadfile start option, not a separate seek:\n%s", joined)
+	}
+	if strings.Contains(joined, "set_property pause true") {
+		t.Fatalf("PlayPair should not force pause during handoff:\n%s", joined)
+	}
 	for _, want := range []string{
-		"set_property pause true",
-		"loadfile current.flac replace",
-		"seek 42.5 absolute exact",
+		"loadfile current.flac replace -1 map[start:42.500]",
 		"set_property pause false",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commands missing %q:\n%s", want, joined)
 		}
-	}
-	if strings.Index(joined, "set_property pause true") > strings.Index(joined, "loadfile current.flac replace") {
-		t.Fatalf("pause true should happen before loadfile:\n%s", joined)
-	}
-	if strings.Index(joined, "seek 42.5 absolute exact") > strings.Index(joined, "set_property pause false") {
-		t.Fatalf("seek should happen before unpause:\n%s", joined)
 	}
 }
 

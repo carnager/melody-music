@@ -402,11 +402,10 @@ func (p *Player) PlayPair(current TrackSpec, next *TrackSpec, seek float64) erro
 	}
 
 	p.generation++
-	_, _ = p.commandLocked("set_property", "pause", true)
 	if err := p.clearPlaylistLocked(); err != nil {
 		return err
 	}
-	if _, err := p.commandLocked("loadfile", current.Path, "replace"); err != nil {
+	if _, err := p.loadCurrentLocked(current.Path, seek); err != nil {
 		p.currentLoaded = false
 		p.nextLoaded = false
 		p.state = "stop"
@@ -435,11 +434,6 @@ func (p *Player) PlayPair(current TrackSpec, next *TrackSpec, seek float64) erro
 
 	_ = p.setReplayGainLocked(p.replayGain)
 	_, _ = p.commandLocked("set_property", "volume", p.volume)
-	if seek > 0 {
-		if _, err := p.commandLocked("seek", seek, "absolute", "exact"); err != nil {
-			return err
-		}
-	}
 	if _, err := p.commandLocked("set_property", "pause", false); err != nil {
 		return err
 	}
@@ -452,6 +446,15 @@ func (p *Player) PlayPair(current TrackSpec, next *TrackSpec, seek float64) erro
 	p.nextEntryID = nextID
 	p.state = "play"
 	return nil
+}
+
+func (p *Player) loadCurrentLocked(path string, seek float64) (mpvResponse, error) {
+	if seek > 0 {
+		return p.commandLocked("loadfile", path, "replace", -1, map[string]string{
+			"start": fmt.Sprintf("%.3f", seek),
+		})
+	}
+	return p.commandLocked("loadfile", path, "replace")
 }
 
 func (p *Player) Preload(path, formatHint string, rgTrack, rgAlbum float64) error {
