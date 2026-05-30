@@ -2072,7 +2072,7 @@ func cmdSetVol(c *mpdConn, args []string) *mpdError {
 		return mpdErr(errArg, "setvol", "invalid volume")
 	}
 	t := c.app.target()
-	if err := t.setProperty("volume", vol); err != nil {
+	if err := t.setProperty("volume", float64(vol)); err != nil {
 		return mpdErr(errSystem, "setvol", err.Error())
 	}
 	c.app.mpdHub.notify(SubMixer)
@@ -2097,7 +2097,7 @@ func cmdVolume(c *mpdConn, args []string) *mpdError {
 	if newVol > 100 {
 		newVol = 100
 	}
-	if err := t.setProperty("volume", newVol); err != nil {
+	if err := t.setProperty("volume", float64(newVol)); err != nil {
 		return mpdErr(errSystem, "volume", err.Error())
 	}
 	c.app.mpdHub.notify(SubMixer)

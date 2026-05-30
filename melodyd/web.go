@@ -140,7 +140,7 @@ func (wt *webTarget) setProperty(name string, value any) error {
 			wt.paused = b
 		}
 	case "volume":
-		if f, ok := value.(float64); ok {
+		if f, ok := numericFloat(value); ok {
 			wt.volume = f
 		}
 	}

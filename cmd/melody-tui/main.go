@@ -4245,6 +4245,7 @@ func (m model) helpView() string {
 			"  >          Next track",
 			"  <          Previous track",
 			"  s          Stop",
+			"  +/-        Volume up/down",
 			"  r          Random album",
 			"  R          Random tracks",
 			"  u          Update library",

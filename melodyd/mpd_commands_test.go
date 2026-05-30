@@ -47,6 +47,44 @@ func TestBumpQueueVersionLocked(t *testing.T) {
 	}
 }
 
+func TestVolumeCommandsUpdateTarget(t *testing.T) {
+	wt := &webTarget{alive: true, volume: 40}
+	a := &app{
+		webTargets:   map[string]*webTarget{"web": wt},
+		activeDevice: "web",
+		mpdHub:       newNotifyHub(),
+	}
+	c := &mpdConn{app: a}
+
+	if err := cmdSetVol(c, []string{"70"}); err != nil {
+		t.Fatalf("cmdSetVol: %v", err)
+	}
+	if wt.volume != 70 {
+		t.Fatalf("setvol target volume = %v, want 70", wt.volume)
+	}
+
+	if err := cmdVolume(c, []string{"-50"}); err != nil {
+		t.Fatalf("cmdVolume: %v", err)
+	}
+	if wt.volume != 20 {
+		t.Fatalf("volume -50 target volume = %v, want 20", wt.volume)
+	}
+
+	if err := cmdVolume(c, []string{"-50"}); err != nil {
+		t.Fatalf("cmdVolume clamp low: %v", err)
+	}
+	if wt.volume != 0 {
+		t.Fatalf("volume clamp low = %v, want 0", wt.volume)
+	}
+
+	if err := cmdVolume(c, []string{"+150"}); err != nil {
+		t.Fatalf("cmdVolume clamp high: %v", err)
+	}
+	if wt.volume != 100 {
+		t.Fatalf("volume clamp high = %v, want 100", wt.volume)
+	}
+}
+
 func TestIdleNotificationPreservesFollowingCommandList(t *testing.T) {
 	c, rw, closeFn := newTestMPDConn(t)
 	defer closeFn()

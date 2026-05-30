@@ -859,8 +859,13 @@ func (at *agentTarget) setProperty(name string, value any) error {
 			return err
 		}
 	case "volume":
-		if f, ok := value.(float64); ok {
+		if f, ok := numericFloat(value); ok {
 			_, err := at.sendCommand(fmt.Sprintf("volume %f", f))
+			if err == nil {
+				at.stateMu.Lock()
+				at.agVolume = f
+				at.stateMu.Unlock()
+			}
 			return err
 		}
 	case "replaygain":
@@ -872,6 +877,17 @@ func (at *agentTarget) setProperty(name string, value any) error {
 
 func (at *agentTarget) isRunning() bool {
 	return at.alive
+}
+
+func numericFloat(value any) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case int:
+		return float64(v), true
+	default:
+		return 0, false
+	}
 }
 
 // mpdQuoteArg quotes a string for the agent protocol if it contains special characters.
