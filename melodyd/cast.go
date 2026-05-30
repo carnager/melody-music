@@ -179,7 +179,7 @@ func (a *app) registerCastDevice(entry *zeroconf.ServiceEntry, info map[string]s
 		Address:  net.JoinHostPort(addr, strconv.Itoa(entry.Port)),
 		IsLocal:  false,
 		Type:     "cast",
-		Format:   "mp3",
+		Format:   "flac",
 		LastSeen: time.Now(),
 	}
 	a.devicesMu.Unlock()
@@ -211,7 +211,7 @@ func (t *castTarget) loadFile(url, mode string, meta map[string]any) error {
 	t.monitorID++
 	t.mu.Unlock()
 
-	if err := t.loadURL(url, "audio/mp3"); err != nil {
+	if err := t.loadURL(url, "audio/flac"); err != nil {
 		t.app.logger.Printf("cast %s: load failed: %v", t.name, err)
 		return err
 	}

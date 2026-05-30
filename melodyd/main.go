@@ -1515,6 +1515,8 @@ func (a *app) transcodeCachePath(songID, format string, maxBitrate int) string {
 
 func transcodeContentType(format string) string {
 	switch format {
+	case "flac":
+		return "audio/flac"
 	case "mp3":
 		return "audio/mpeg"
 	case "opus":
@@ -1552,6 +1554,8 @@ func (a *app) streamTranscoded(w http.ResponseWriter, r *http.Request, songID, p
 		args = []string{"-i", path, "-v", "quiet", "-vn"}
 	}
 	switch format {
+	case "flac":
+		args = append(args, "-f", "flac", "-codec:a", "flac")
 	case "mp3":
 		args = append(args, "-f", "mp3", "-codec:a", "libmp3lame")
 	case "opus":
