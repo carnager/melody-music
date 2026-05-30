@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -19,7 +20,10 @@ const (
 	upnpAVTransportService      = "urn:schemas-upnp-org:service:AVTransport:1"
 	upnpRenderingControlService = "urn:schemas-upnp-org:service:RenderingControl:1"
 	upnpMediaRendererST         = "urn:schemas-upnp-org:device:MediaRenderer:1"
+	upnpRootDeviceST            = "upnp:rootdevice"
 )
+
+var errNotUPnPMediaRenderer = errors.New("not a UPnP MediaRenderer")
 
 type upnpTarget struct {
 	app       *app
@@ -60,17 +64,25 @@ func (a *app) discoverUPnPOnce() error {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
 
-	msg := strings.Join([]string{
-		"M-SEARCH * HTTP/1.1",
-		"HOST: 239.255.255.250:1900",
-		`MAN: "ssdp:discover"`,
-		"MX: 2",
-		"ST: " + upnpMediaRendererST,
-		"",
-		"",
-	}, "\r\n")
-	if _, err := conn.WriteTo([]byte(msg), addr); err != nil {
-		return err
+	targets := []string{
+		upnpMediaRendererST,
+		"urn:schemas-upnp-org:device:MediaRenderer:2",
+		"urn:schemas-upnp-org:device:MediaRenderer:3",
+		upnpRootDeviceST,
+	}
+	for _, st := range targets {
+		msg := strings.Join([]string{
+			"M-SEARCH * HTTP/1.1",
+			"HOST: 239.255.255.250:1900",
+			`MAN: "ssdp:discover"`,
+			"MX: 2",
+			"ST: " + st,
+			"",
+			"",
+		}, "\r\n")
+		if _, err := conn.WriteTo([]byte(msg), addr); err != nil {
+			return err
+		}
 	}
 
 	seen := map[string]struct{}{}
@@ -92,6 +104,9 @@ func (a *app) discoverUPnPOnce() error {
 		}
 		seen[location] = struct{}{}
 		if err := a.registerUPnPRenderer(location); err != nil {
+			if errors.Is(err, errNotUPnPMediaRenderer) {
+				continue
+			}
 			a.logger.Printf("upnp %s: %v", location, err)
 		}
 	}
@@ -139,7 +154,13 @@ func (a *app) registerUPnPRenderer(location string) error {
 	}
 	dev := findUPnPDevice(desc.Device, "urn:schemas-upnp-org:device:MediaRenderer:1")
 	if dev == nil {
-		return fmt.Errorf("not a MediaRenderer")
+		dev = findUPnPDevice(desc.Device, "urn:schemas-upnp-org:device:MediaRenderer:2")
+	}
+	if dev == nil {
+		dev = findUPnPDevice(desc.Device, "urn:schemas-upnp-org:device:MediaRenderer:3")
+	}
+	if dev == nil {
+		return errNotUPnPMediaRenderer
 	}
 	av := findUPnPService(*dev, upnpAVTransportService)
 	rc := findUPnPService(*dev, upnpRenderingControlService)
