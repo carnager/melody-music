@@ -90,7 +90,7 @@ type device struct {
 	Name       string    `json:"name"`
 	Address    string    `json:"address"`
 	IsLocal    bool      `json:"is_local"`
-	Type       string    `json:"type"` // "local", "agent", "web", "upnp"
+	Type       string    `json:"type"` // "local", "agent", "web", "upnp", "cast"
 	Format     string    `json:"format"`
 	MaxBitRate int       `json:"max_bitrate"`
 	ReplayGain string    `json:"replaygain,omitempty"` // "off", "track", "album"
@@ -133,6 +133,7 @@ type app struct {
 	agentTargets map[string]*agentTarget // keyed by device ID
 	webTargets   map[string]*webTarget   // keyed by device ID
 	upnpTargets  map[string]*upnpTarget  // keyed by device ID
+	castTargets  map[string]*castTarget  // keyed by device ID
 	devicesMu    sync.RWMutex
 	activeDevice string // device ID, "" = local
 }
@@ -164,6 +165,7 @@ func main() {
 		agentTargets:  make(map[string]*agentTarget),
 		webTargets:    make(map[string]*webTarget),
 		upnpTargets:   make(map[string]*upnpTarget),
+		castTargets:   make(map[string]*castTarget),
 		prioReturnPos: -1,
 		mpdHub:        newNotifyHub(),
 	}
@@ -206,6 +208,7 @@ func main() {
 
 	go a.startLocalAgent()
 	go a.upnpDiscoveryLoop()
+	go a.castDiscoveryLoop()
 	go a.watchPlayState()
 	go a.deviceCleanup()
 	if a.cfg.MPD.Port > 0 {
@@ -961,7 +964,7 @@ func (a *app) advanceTrack() {
 			if nextPreloadPos >= 0 {
 				_ = at.agentPreload(nextPreloadPos)
 			}
-		} else if _, ok := t.(*upnpTarget); ok {
+		} else if isSingleLoadTarget(t) {
 			if currentURL != "" {
 				_ = t.loadFile(currentURL, "replace", nil)
 			}
@@ -1014,7 +1017,7 @@ func (a *app) advanceTrack() {
 		if nextPreloadPos >= 0 {
 			_ = at.agentPreload(nextPreloadPos)
 		}
-	} else if _, ok := t.(*upnpTarget); ok {
+	} else if isSingleLoadTarget(t) {
 		if currentURL != "" {
 			_ = t.loadFile(currentURL, "replace", nil)
 		}
@@ -1061,7 +1064,19 @@ func (a *app) target() playbackTarget {
 	if ut, ok := a.upnpTargets[devID]; ok && ut.isRunning() {
 		return ut
 	}
+	if ct, ok := a.castTargets[devID]; ok && ct.isRunning() {
+		return ct
+	}
 	return &noopTarget{}
+}
+
+func isSingleLoadTarget(t playbackTarget) bool {
+	switch t.(type) {
+	case *upnpTarget, *castTarget:
+		return true
+	default:
+		return false
+	}
 }
 
 // noopTarget is returned when no playback device is available.
@@ -1664,6 +1679,8 @@ func (a *app) switchDevice(newID string) error {
 		oldTarget = wt
 	} else if ut, ok := a.upnpTargets[oldID]; ok && ut.isRunning() {
 		oldTarget = ut
+	} else if ct, ok := a.castTargets[oldID]; ok && ct.isRunning() {
+		oldTarget = ct
 	}
 
 	// Build new target
@@ -1674,6 +1691,8 @@ func (a *app) switchDevice(newID string) error {
 		newTarget = wt
 	} else if ut, ok := a.upnpTargets[newID]; ok && ut.isRunning() {
 		newTarget = ut
+	} else if ct, ok := a.castTargets[newID]; ok && ct.isRunning() {
+		newTarget = ct
 	} else {
 		a.devicesMu.Unlock()
 		return fmt.Errorf("device %s not connected", newID)

@@ -104,6 +104,8 @@ It shows up as an output device in the TUI (press `D`) and the Android app.
 
 melodyd also discovers UPnP MediaRenderer speakers on the local network and exposes them as output devices. For remote speakers, set `server.base_url` in `~/.config/melody/melodyd.toml` if the automatically generated stream URL is not reachable from the speaker.
 
+Chromecast and Google Cast targets are discovered automatically and exposed as output devices too. They use the same `server.base_url` stream URL path as UPnP outputs.
+
 ### Android
 
 ```sh
