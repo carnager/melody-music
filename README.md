@@ -102,6 +102,8 @@ master = "192.168.1.10:6600"
 
 It shows up as an output device in the TUI (press `D`) and the Android app.
 
+melodyd also discovers UPnP MediaRenderer speakers on the local network and exposes them as output devices. For remote speakers, set `server.base_url` in `~/.config/melody/melodyd.toml` if the automatically generated stream URL is not reachable from the speaker.
+
 ### Android
 
 ```sh

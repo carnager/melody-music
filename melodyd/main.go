@@ -16,11 +16,11 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"syscall"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -90,11 +90,11 @@ type device struct {
 	Name       string    `json:"name"`
 	Address    string    `json:"address"`
 	IsLocal    bool      `json:"is_local"`
-	Type       string    `json:"type"` // "local", "agent"
+	Type       string    `json:"type"` // "local", "agent", "web", "upnp"
 	Format     string    `json:"format"`
-	MaxBitRate    int       `json:"max_bitrate"`
-	ReplayGain    string    `json:"replaygain,omitempty"` // "off", "track", "album"
-	LastSeen      time.Time `json:"last_seen"`
+	MaxBitRate int       `json:"max_bitrate"`
+	ReplayGain string    `json:"replaygain,omitempty"` // "off", "track", "album"
+	LastSeen   time.Time `json:"last_seen"`
 }
 
 // ---------------------------------------------------------------------------
@@ -102,10 +102,10 @@ type device struct {
 // ---------------------------------------------------------------------------
 
 type app struct {
-	cfg    config
-	paths  paths
-	logger *log.Logger
-	db     *musicDB
+	cfg     config
+	paths   paths
+	logger  *log.Logger
+	db      *musicDB
 	scanner *scanner
 	// playQueue tracks song IDs (SQLite track IDs as strings) in current mpv playlist order
 	playQueue      []string
@@ -132,6 +132,7 @@ type app struct {
 	devices      map[string]*device
 	agentTargets map[string]*agentTarget // keyed by device ID
 	webTargets   map[string]*webTarget   // keyed by device ID
+	upnpTargets  map[string]*upnpTarget  // keyed by device ID
 	devicesMu    sync.RWMutex
 	activeDevice string // device ID, "" = local
 }
@@ -162,6 +163,7 @@ func main() {
 		devices:       make(map[string]*device),
 		agentTargets:  make(map[string]*agentTarget),
 		webTargets:    make(map[string]*webTarget),
+		upnpTargets:   make(map[string]*upnpTarget),
 		prioReturnPos: -1,
 		mpdHub:        newNotifyHub(),
 	}
@@ -203,6 +205,7 @@ func main() {
 	go a.scanner.watchForChanges()
 
 	go a.startLocalAgent()
+	go a.upnpDiscoveryLoop()
 	go a.watchPlayState()
 	go a.deviceCleanup()
 	if a.cfg.MPD.Port > 0 {
@@ -614,7 +617,6 @@ func (a *app) restoreActiveDevice() {
 	}
 }
 
-
 // generateShuffle creates a shuffled order for the queue.
 // The current track is placed at shufflePos (position 0), and only the
 // remaining (unplayed) tracks after it are shuffled — matching MPD behavior
@@ -943,6 +945,7 @@ func (a *app) advanceTrack() {
 		}
 
 		// Compute next preload under lock
+		currentURL := a.streamURLForActiveDevice(a.playQueue[a.curQueuePos])
 		a.pendingNextPos = a.nextQueuePos()
 		nextPreloadPos := a.pendingNextPos
 		var nextURL string
@@ -957,6 +960,10 @@ func (a *app) advanceTrack() {
 			// Agent: just tell it about the next track to preload
 			if nextPreloadPos >= 0 {
 				_ = at.agentPreload(nextPreloadPos)
+			}
+		} else if _, ok := t.(*upnpTarget); ok {
+			if currentURL != "" {
+				_ = t.loadFile(currentURL, "replace", nil)
 			}
 		} else {
 			_ = t.playlistRemove(0)
@@ -991,6 +998,7 @@ func (a *app) advanceTrack() {
 	}
 
 	// Compute next preload under lock
+	currentURL := a.streamURLForActiveDevice(a.playQueue[a.curQueuePos])
 	a.pendingNextPos = a.nextQueuePos()
 	nextPreloadPos := a.pendingNextPos
 	var nextURL string
@@ -1005,6 +1013,10 @@ func (a *app) advanceTrack() {
 		// Agent: just tell it about the next track to preload
 		if nextPreloadPos >= 0 {
 			_ = at.agentPreload(nextPreloadPos)
+		}
+	} else if _, ok := t.(*upnpTarget); ok {
+		if currentURL != "" {
+			_ = t.loadFile(currentURL, "replace", nil)
 		}
 	} else {
 		_ = t.playlistRemove(0)
@@ -1045,6 +1057,9 @@ func (a *app) target() playbackTarget {
 	}
 	if wt, ok := a.webTargets[devID]; ok && wt.isRunning() {
 		return wt
+	}
+	if ut, ok := a.upnpTargets[devID]; ok && ut.isRunning() {
+		return ut
 	}
 	return &noopTarget{}
 }
@@ -1420,7 +1435,6 @@ func (a *app) currentPlayingSongID() string {
 	return a.playQueue[a.curQueuePos]
 }
 
-
 func (a *app) handleStream(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
@@ -1626,7 +1640,6 @@ func (a *app) handleCoverArt(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "no cover art", http.StatusNotFound)
 }
 
-
 // switchDevice performs a full device handoff: captures playback state from old device,
 // loads the queue into the new device, seeks to the same position, and resumes.
 func (a *app) switchDevice(newID string) error {
@@ -1649,6 +1662,8 @@ func (a *app) switchDevice(newID string) error {
 		oldTarget = at
 	} else if wt, ok := a.webTargets[oldID]; ok && wt.isRunning() {
 		oldTarget = wt
+	} else if ut, ok := a.upnpTargets[oldID]; ok && ut.isRunning() {
+		oldTarget = ut
 	}
 
 	// Build new target
@@ -1657,6 +1672,8 @@ func (a *app) switchDevice(newID string) error {
 		newTarget = at
 	} else if wt, ok := a.webTargets[newID]; ok && wt.isRunning() {
 		newTarget = wt
+	} else if ut, ok := a.upnpTargets[newID]; ok && ut.isRunning() {
+		newTarget = ut
 	} else {
 		a.devicesMu.Unlock()
 		return fmt.Errorf("device %s not connected", newID)
@@ -1747,7 +1764,6 @@ func (a *app) switchDevice(newID string) error {
 	return nil
 }
 
-
 // reloadQueueIntoAgent loads the 2-track window into a reconnected agent.
 // Called when an agent re-registers and was already the active device.
 func (a *app) reloadQueueIntoAgent(at *agentTarget, dev *device) {
@@ -1773,7 +1789,6 @@ func (a *app) deviceCleanup() {
 	// is automatic. This goroutine is kept for future non-agent device types.
 	select {}
 }
-
 
 // ---------------------------------------------------------------------------
 // Generic helpers
@@ -1809,7 +1824,6 @@ func stringSlice(value any) []string {
 		return nil
 	}
 }
-
 
 func stringify(value any) string {
 	return shared.Stringify(value)
