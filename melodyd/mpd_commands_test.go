@@ -105,6 +105,61 @@ func TestAgentPlaySendsNegativeNext(t *testing.T) {
 	}
 }
 
+func TestAgentFreshPropertyQueriesAgent(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	})
+
+	at := &agentTarget{
+		writer: bufio.NewWriter(clientConn),
+		conn:   clientConn,
+		alive:  true,
+		done:   make(chan struct{}),
+		app:    &app{},
+		respCh: make(chan agentResp, 1),
+	}
+	go at.readLoop(bufio.NewReader(clientConn))
+
+	cmdCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		r := bufio.NewReader(serverConn)
+		line, err := r.ReadString('\n')
+		if err != nil {
+			errCh <- err
+			return
+		}
+		cmdCh <- strings.TrimRight(line, "\r\n")
+		if _, err := fmt.Fprintln(serverConn, "value: 12.500000"); err != nil {
+			errCh <- err
+			return
+		}
+		_, err = fmt.Fprintln(serverConn, "OK")
+		errCh <- err
+	}()
+
+	got, err := at.getFreshProperty("time-pos")
+	if err != nil {
+		t.Fatalf("getFreshProperty: %v", err)
+	}
+	if got != 12.5 {
+		t.Fatalf("fresh time-pos = %v, want 12.5", got)
+	}
+	if at.agElapsed != 12.5 {
+		t.Fatalf("cached elapsed = %v, want 12.5", at.agElapsed)
+	}
+	at.close()
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("server side property response: %v", err)
+	}
+	if cmd := <-cmdCh; cmd != "get_property time-pos" {
+		t.Fatalf("command = %q, want get_property time-pos", cmd)
+	}
+}
+
 func TestIdleNotificationPreservesFollowingCommandList(t *testing.T) {
 	c, rw, closeFn := newTestMPDConn(t)
 	defer closeFn()

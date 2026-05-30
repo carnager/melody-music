@@ -830,6 +830,52 @@ func (at *agentTarget) getProperty(name string) (any, error) {
 	}
 }
 
+func (at *agentTarget) getFreshProperty(name string) (any, error) {
+	lines, err := at.sendCommand(fmt.Sprintf("get_property %s", name))
+	if err != nil {
+		return nil, err
+	}
+	for _, line := range lines {
+		key, raw, ok := strings.Cut(line, ": ")
+		if !ok || key != "value" {
+			continue
+		}
+		switch name {
+		case "pause":
+			v := raw == "true" || raw == "1" || raw == "yes"
+			at.stateMu.Lock()
+			if v {
+				at.agState = "pause"
+			} else if at.agState == "pause" {
+				at.agState = "play"
+			}
+			at.agStateTime = time.Now()
+			at.stateMu.Unlock()
+			return v, nil
+		case "time-pos", "duration", "volume":
+			v, err := strconv.ParseFloat(raw, 64)
+			if err != nil {
+				return nil, err
+			}
+			at.stateMu.Lock()
+			switch name {
+			case "time-pos":
+				at.agElapsed = v
+				at.agStateTime = time.Now()
+			case "duration":
+				at.agDuration = v
+			case "volume":
+				at.agVolume = v
+			}
+			at.stateMu.Unlock()
+			return v, nil
+		default:
+			return raw, nil
+		}
+	}
+	return nil, fmt.Errorf("agent property %s missing value", name)
+}
+
 func (at *agentTarget) setProperty(name string, value any) error {
 	switch name {
 	case "pause":

@@ -92,6 +92,33 @@ func TestPlayPairLoadsCurrentAndNext(t *testing.T) {
 	}
 }
 
+func TestPlayPairSeekLoadsPausedThenUnpauses(t *testing.T) {
+	f := &fakeMPV{}
+	p := newTestPlayer(f)
+
+	if err := p.PlayPair(TrackSpec{Path: "current.flac"}, nil, 42.5); err != nil {
+		t.Fatalf("PlayPair: %v", err)
+	}
+
+	joined := strings.Join(f.commands, "\n")
+	for _, want := range []string{
+		"set_property pause true",
+		"loadfile current.flac replace",
+		"seek 42.5 absolute exact",
+		"set_property pause false",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("commands missing %q:\n%s", want, joined)
+		}
+	}
+	if strings.Index(joined, "set_property pause true") > strings.Index(joined, "loadfile current.flac replace") {
+		t.Fatalf("pause true should happen before loadfile:\n%s", joined)
+	}
+	if strings.Index(joined, "seek 42.5 absolute exact") > strings.Index(joined, "set_property pause false") {
+		t.Fatalf("seek should happen before unpause:\n%s", joined)
+	}
+}
+
 func TestPreloadReplacesOnlySlotOne(t *testing.T) {
 	f := &fakeMPV{}
 	p := newTestPlayer(f)

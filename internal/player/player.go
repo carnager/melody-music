@@ -402,6 +402,7 @@ func (p *Player) PlayPair(current TrackSpec, next *TrackSpec, seek float64) erro
 	}
 
 	p.generation++
+	_, _ = p.commandLocked("set_property", "pause", true)
 	if err := p.clearPlaylistLocked(); err != nil {
 		return err
 	}
@@ -435,7 +436,9 @@ func (p *Player) PlayPair(current TrackSpec, next *TrackSpec, seek float64) erro
 	_ = p.setReplayGainLocked(p.replayGain)
 	_, _ = p.commandLocked("set_property", "volume", p.volume)
 	if seek > 0 {
-		_, _ = p.commandLocked("seek", seek, "absolute", "exact")
+		if _, err := p.commandLocked("seek", seek, "absolute", "exact"); err != nil {
+			return err
+		}
 	}
 	if _, err := p.commandLocked("set_property", "pause", false); err != nil {
 		return err

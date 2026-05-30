@@ -1691,17 +1691,22 @@ func (a *app) switchDevice(newID string) error {
 	var wasPaused bool
 
 	if oldTarget != nil {
-		if tpRaw, err := oldTarget.getProperty("time-pos"); err == nil {
+		getOldProperty := oldTarget.getProperty
+		if at, ok := oldTarget.(*agentTarget); ok {
+			getOldProperty = at.getFreshProperty
+		}
+
+		if tpRaw, err := getOldProperty("time-pos"); err == nil {
 			if f, ok := tpRaw.(float64); ok {
 				timePos = f
 			}
 		}
-		if pauseRaw, err := oldTarget.getProperty("pause"); err == nil {
+		if pauseRaw, err := getOldProperty("pause"); err == nil {
 			if p, ok := pauseRaw.(bool); ok {
 				wasPaused = p
 			}
 		}
-		if volRaw, err := oldTarget.getProperty("volume"); err == nil {
+		if volRaw, err := getOldProperty("volume"); err == nil {
 			if f, ok := volRaw.(float64); ok {
 				volume = f
 			}
