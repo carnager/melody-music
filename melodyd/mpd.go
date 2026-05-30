@@ -497,7 +497,7 @@ func (c *mpdConn) handleAgentRegister(args []string) {
 
 	c.app.devicesMu.Lock()
 	// Close old agent with same name if it exists
-	wasActive := c.app.activeDevice == devID
+	wasActive := c.app.activeDevice == devID || (isLocal && strings.HasPrefix(c.app.activeDevice, coreAudioDevicePrefix))
 	if oldAt, ok := c.app.agentTargets[devID]; ok {
 		oldAt.close()
 		c.app.logger.Printf("agent replaced: %s (old connection closed)", name)
@@ -596,7 +596,7 @@ type agentTarget struct {
 
 	// Cached state from periodic agent_state messages
 	stateMu     sync.RWMutex
-	agState     string  // "play", "pause", "stop"
+	agState     string // "play", "pause", "stop"
 	agPos       int
 	agElapsed   float64
 	agDuration  float64

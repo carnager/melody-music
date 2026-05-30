@@ -34,6 +34,10 @@ static int mpv_set_double(mpv_handle *ctx, const char *name, double value) {
 	return mpv_set_property(ctx, name, MPV_FORMAT_DOUBLE, &value);
 }
 
+static int mpv_set_string(mpv_handle *ctx, const char *name, const char *value) {
+	return mpv_set_property_string(ctx, name, value);
+}
+
 static int mpv_get_double(mpv_handle *ctx, const char *name, double *value) {
 	return mpv_get_property(ctx, name, MPV_FORMAT_DOUBLE, value);
 }
@@ -212,6 +216,28 @@ func (p *Player) SetReplayGain(mode string) {
 	defer p.mu.Unlock()
 	p.rgMode = mode
 	_ = p.applyVolumeLocked()
+}
+
+// SetAudioDevice changes the libmpv output device. Use "auto" for mpv's default.
+func (p *Player) SetAudioDevice(device string) error {
+	if device == "" {
+		device = "auto"
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.ctx == nil {
+		return fmt.Errorf("player closed")
+	}
+
+	name := C.CString("audio-device")
+	value := C.CString(device)
+	defer C.free(unsafe.Pointer(name))
+	defer C.free(unsafe.Pointer(value))
+	if rc := C.mpv_set_string(p.ctx, name, value); rc < 0 {
+		return fmt.Errorf("mpv set audio-device: %s", mpvError(rc))
+	}
+	return nil
 }
 
 // State returns the current playback state.

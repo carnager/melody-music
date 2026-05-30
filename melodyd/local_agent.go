@@ -24,6 +24,8 @@ type localAgent struct {
 	queue   []queueItem
 	curPos  int
 
+	audioDevice string
+
 	// Control connection to server (via net.Pipe)
 	ctrlMu sync.Mutex
 	ctrlW  *bufio.Writer
@@ -205,6 +207,21 @@ func (la *localAgent) handleCommand(w *bufio.Writer, line string) {
 			return
 		}
 		la.player.SetReplayGain(args[0])
+		fmt.Fprintln(w, "OK")
+
+	case "audio_device":
+		if len(args) < 1 {
+			fmt.Fprintln(w, "ACK [2@0] {audio_device} missing device")
+			return
+		}
+		if err := la.player.SetAudioDevice(args[0]); err != nil {
+			fmt.Fprintf(w, "ACK [56@0] {audio_device} %s\n", err)
+			return
+		}
+		if la.audioDevice != args[0] {
+			la.audioDevice = args[0]
+			la.app.logger.Printf("local-agent: selected audio output %s", args[0])
+		}
 		fmt.Fprintln(w, "OK")
 
 	case "queue_changed":

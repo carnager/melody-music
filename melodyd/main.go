@@ -81,6 +81,14 @@ type playbackTarget interface {
 	isRunning() bool
 }
 
+type queuePlaybackTarget interface {
+	playbackTarget
+	ensureQueueSync()
+	agentPlay(curPos, nextPos int) error
+	agentPlayAt(curPos, nextPos int, seekPos float64) error
+	agentPreload(nextPos int) error
+}
+
 // ---------------------------------------------------------------------------
 // Device management
 // ---------------------------------------------------------------------------
@@ -134,6 +142,7 @@ type app struct {
 	webTargets   map[string]*webTarget   // keyed by device ID
 	upnpTargets  map[string]*upnpTarget  // keyed by device ID
 	castTargets  map[string]*castTarget  // keyed by device ID
+	coreTargets  map[string]*coreAudioTarget
 	devicesMu    sync.RWMutex
 	activeDevice string // device ID, "" = local
 }
@@ -166,6 +175,7 @@ func main() {
 		webTargets:    make(map[string]*webTarget),
 		upnpTargets:   make(map[string]*upnpTarget),
 		castTargets:   make(map[string]*castTarget),
+		coreTargets:   make(map[string]*coreAudioTarget),
 		prioReturnPos: -1,
 		mpdHub:        newNotifyHub(),
 	}
@@ -207,6 +217,7 @@ func main() {
 	go a.scanner.watchForChanges()
 
 	go a.startLocalAgent()
+	go a.coreAudioOutputLoop()
 	go a.upnpDiscoveryLoop()
 	go a.castDiscoveryLoop()
 	go a.watchPlayState()
@@ -788,7 +799,7 @@ func (a *app) execSyncPlan(plan syncPlan) {
 	t := a.target()
 
 	// Agent targets use position-based commands
-	if at, ok := t.(*agentTarget); ok {
+	if at, ok := t.(queuePlaybackTarget); ok {
 		if plan.currentURL == "" {
 			_ = at.playlistClear()
 			return
@@ -847,7 +858,7 @@ func (a *app) execNextTrackPlan(plan nextTrackPlan) {
 	t := a.target()
 
 	// Agent targets use position-based preload
-	if at, ok := t.(*agentTarget); ok {
+	if at, ok := t.(queuePlaybackTarget); ok {
 		if plan.nextPos >= 0 {
 			if err := at.agentPreload(plan.nextPos); err != nil {
 				a.logger.Printf("execNextTrackPlan(agent): preload %d failed: %v", plan.nextPos, err)
@@ -959,7 +970,7 @@ func (a *app) advanceTrack() {
 
 		// IPC calls outside lock
 		t := a.target()
-		if at, ok := t.(*agentTarget); ok {
+		if at, ok := t.(queuePlaybackTarget); ok {
 			// Agent: just tell it about the next track to preload
 			if nextPreloadPos >= 0 {
 				_ = at.agentPreload(nextPreloadPos)
@@ -1012,7 +1023,7 @@ func (a *app) advanceTrack() {
 
 	// IPC calls outside lock — clients can query status while these run
 	t := a.target()
-	if at, ok := t.(*agentTarget); ok {
+	if at, ok := t.(queuePlaybackTarget); ok {
 		// Agent: just tell it about the next track to preload
 		if nextPreloadPos >= 0 {
 			_ = at.agentPreload(nextPreloadPos)
@@ -1066,6 +1077,9 @@ func (a *app) target() playbackTarget {
 	}
 	if ct, ok := a.castTargets[devID]; ok && ct.isRunning() {
 		return ct
+	}
+	if mt, ok := a.coreTargets[devID]; ok && mt.isRunning() {
+		return mt
 	}
 	return &noopTarget{}
 }
@@ -1685,6 +1699,8 @@ func (a *app) switchDevice(newID string) error {
 		oldTarget = ut
 	} else if ct, ok := a.castTargets[oldID]; ok && ct.isRunning() {
 		oldTarget = ct
+	} else if mt, ok := a.coreTargets[oldID]; ok && mt.isRunning() {
+		oldTarget = mt
 	}
 
 	// Build new target
@@ -1697,6 +1713,8 @@ func (a *app) switchDevice(newID string) error {
 		newTarget = ut
 	} else if ct, ok := a.castTargets[newID]; ok && ct.isRunning() {
 		newTarget = ct
+	} else if mt, ok := a.coreTargets[newID]; ok && mt.isRunning() {
+		newTarget = mt
 	} else {
 		a.devicesMu.Unlock()
 		return fmt.Errorf("device %s not connected", newID)
@@ -1757,7 +1775,7 @@ func (a *app) switchDevice(newID string) error {
 
 	if qLen > 0 {
 		// For agent targets, use agentPlayAt to seek atomically before audio starts
-		if at, ok := newTarget.(*agentTarget); ok {
+		if at, ok := newTarget.(queuePlaybackTarget); ok {
 			at.ensureQueueSync()
 			if err := at.agentPlayAt(plan.curPos, plan.nextPos, timePos); err != nil {
 				a.logger.Printf("switchDevice: agentPlayAt failed: %v", err)
