@@ -431,6 +431,7 @@ type albumEntry struct {
 type deviceInfo struct {
 	ID      string
 	Name    string
+	Plugin  string
 	Enabled bool
 }
 
@@ -1494,6 +1495,7 @@ func fetchDevices() tea.Msg {
 		d := deviceInfo{
 			ID:      g["outputid"],
 			Name:    g["outputname"],
+			Plugin:  g["plugin"],
 			Enabled: g["outputenabled"] == "1",
 		}
 		if d.Enabled {
@@ -4871,12 +4873,15 @@ func (m model) deviceView() string {
 		}
 
 		name := d.Name
+		if d.Plugin != "" {
+			name += " " + dimStyle.Render("["+d.Plugin+"]")
+		}
 
 		isCursor := i == m.devCursor
 		s := lipgloss.NewStyle()
 		if isCursor {
 			s = s.Background(selectedBg).Foreground(lipgloss.Color("#ffffff")).Bold(true)
-			line := " " + active + status + " " + d.Name
+			line := " " + active + status + " " + name
 			items = append(items, s.Render(line))
 		} else {
 			items = append(items, " "+active+status+" "+name)

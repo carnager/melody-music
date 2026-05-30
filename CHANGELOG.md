@@ -4,13 +4,14 @@
 
 ### Features
 
-- Add macOS CoreAudio output discovery in `melodyd` for AirPlay-backed local outputs.
+- Add macOS CoreAudio output discovery in `melodyd` for local output routing.
 - Add automatic Chromecast/Google Cast output discovery and playback.
 
 ### Improvements
 
 - Add `chromecast.format` config for choosing MP3 or FLAC Cast streams.
 - Add TUI +/- hotkeys for MPD software volume changes.
+- Show each output backend in the TUI device picker.
 
 ### Bug Fixes
 

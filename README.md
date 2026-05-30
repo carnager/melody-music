@@ -104,6 +104,8 @@ It shows up as an output device in the TUI (press `D`) and the Android app.
 
 Chromecast and Google Cast targets are discovered automatically and exposed as output devices. For remote speakers, set `server.base_url` in `~/.config/melody/melodyd.toml` if the automatically generated stream URL is not reachable from the speaker.
 
+On macOS, melodyd also exposes CoreAudio outputs. This is local macOS audio routing, not AirPlay network discovery; AirPlay endpoints only appear if macOS exposes them as CoreAudio devices.
+
 ### Android
 
 ```sh
