@@ -31,14 +31,15 @@ class MelodyApp : Application() {
 
     fun applyServerForCurrentNetwork() {
         val prefs = getSharedPreferences("melody", Context.MODE_PRIVATE)
-        val onHome = isOnHomeWifi()
+        val ssid = getCurrentSSID()
+        val onHome = isOnHomeWifi(ssid)
         val server = if (onHome) {
             prefs.getString("server", "") ?: ""
         } else {
             val ext = prefs.getString("external_server", "") ?: ""
             ext.ifBlank { prefs.getString("server", "") ?: "" }
         }
-        android.util.Log.d("MelodyApp", "Network: onHome=$onHome server=$server ssid=${getCurrentSSID()}")
+        android.util.Log.d("MelodyApp", "Network: onHome=$onHome server=$server ssid=$ssid")
 
         // Parse host:port — handle plain "host:port" and URLs like "https://host:port"
         val addr = parseServerAddress(server)
@@ -46,8 +47,9 @@ class MelodyApp : Application() {
         if (::mpd.isInitialized) {
             val oldHost = mpd.serverHost
             val oldPort = mpd.serverPort
-            if (addr.host != oldHost || addr.port != oldPort) {
-                android.util.Log.d("MelodyApp", "Switching MPD: $oldHost:$oldPort -> ${addr.host}:${addr.port}")
+            val oldSSL = mpd.useSSL
+            if (addr.host != oldHost || addr.port != oldPort || addr.ssl != oldSSL) {
+                android.util.Log.d("MelodyApp", "Switching MPD: ${schemeName(oldSSL)}://$oldHost:$oldPort -> ${schemeName(addr.ssl)}://${addr.host}:${addr.port}")
                 mpd.disconnect()
                 mpd = MpdClient(addr.host, addr.port, addr.ssl)
                 if (addr.host.isNotBlank()) mpd.connect()
@@ -59,6 +61,8 @@ class MelodyApp : Application() {
             android.util.Log.d("MelodyApp", "Initial MPD: ${addr.host}:${addr.port}")
         }
     }
+
+    private fun schemeName(ssl: Boolean) = if (ssl) "https" else "http"
 
     private data class ServerAddress(val host: String, val port: Int, val ssl: Boolean)
 
@@ -86,18 +90,31 @@ class MelodyApp : Application() {
         return caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
     }
 
-    fun isOnHomeWifi(): Boolean {
+    fun isOnHomeWifi(): Boolean = isOnHomeWifi(getCurrentSSID())
+
+    private fun isOnHomeWifi(currentSSID: String?): Boolean {
         val prefs = getSharedPreferences("melody", Context.MODE_PRIVATE)
         val homeSSID = prefs.getString("home_wifi_ssid", "") ?: ""
+        val onWifi = isOnWifi()
         if (homeSSID.isBlank()) {
             // No home SSID configured — assume any WiFi connection is home
-            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            val network = cm.activeNetwork ?: return false
-            val caps = cm.getNetworkCapabilities(network) ?: return false
-            return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+            return onWifi
         }
-        val currentSSID = getCurrentSSID() ?: return false
+        if (currentSSID == null) {
+            if (onWifi) {
+                android.util.Log.d("MelodyApp", "SSID unavailable on WiFi; keeping local server preference")
+                return true
+            }
+            return false
+        }
         return currentSSID == homeSSID
+    }
+
+    private fun isOnWifi(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val network = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(network) ?: return false
+        return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
     }
 
     fun getCurrentSSID(): String? {
@@ -134,6 +151,7 @@ class MelodyApp : Application() {
             .build()
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) { scheduleNetworkApply() }
+            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) { scheduleNetworkApply() }
             override fun onLost(network: Network) { scheduleNetworkApply() }
         }
         networkCallback = callback

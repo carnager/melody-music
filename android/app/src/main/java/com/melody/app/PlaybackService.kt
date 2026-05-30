@@ -208,6 +208,7 @@ class PlaybackService : Service() {
         val port = app.mpd.serverPort
         val wsScheme = if (app.mpd.useSSL) "wss" else "ws"
         val wsUrl = "$wsScheme://$host:$port/mpd"
+        android.util.Log.d("PlaybackService", "Connecting agent WebSocket to $wsUrl")
 
         val lineChannel = Channel<String>(Channel.UNLIMITED)
         val connected = CompletableDeferred<Boolean>()
@@ -228,7 +229,8 @@ class PlaybackService : Service() {
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                android.util.Log.e("PlaybackService", "Agent WebSocket error: ${t.message}")
+                val code = response?.code?.let { " response=$it" } ?: ""
+                android.util.Log.e("PlaybackService", "Agent WebSocket error for $wsUrl:$code ${t.message}")
                 connected.complete(false)
                 lineChannel.close()
             }
@@ -565,6 +567,7 @@ class PlaybackService : Service() {
         val port = app.mpd.serverPort
         val wsScheme = if (app.mpd.useSSL) "wss" else "ws"
         val wsUrl = "$wsScheme://$host:$port/mpd"
+        android.util.Log.d("PlaybackService", "Syncing queue via $wsUrl")
 
         val linesCh = Channel<String>(Channel.UNLIMITED)
         val client = OkHttpClient.Builder()

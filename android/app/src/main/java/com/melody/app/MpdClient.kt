@@ -63,7 +63,9 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
         startReconnectLoop()
     }
 
-    private suspend fun doConnect() = mutex.withLock {
+    private suspend fun doConnect(force: Boolean = false) = mutex.withLock {
+        if (!force && connected && ws != null) return@withLock
+
         ws?.close(1000, "reconnecting")
         ws = null
         connected = false
@@ -71,6 +73,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
         partialLine.clear()
 
         val wsUrl = "$wsScheme://$serverHost:$serverPort/mpd"
+        android.util.Log.d("MpdClient", "Connecting command WebSocket to $wsUrl")
         val request = Request.Builder().url(wsUrl).build()
         ws = cmdClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -96,7 +99,8 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                android.util.Log.e("MpdClient", "WebSocket error: ${t.message}")
+                val code = response?.code?.let { " response=$it" } ?: ""
+                android.util.Log.e("MpdClient", "WebSocket error for $wsUrl:$code ${t.message}")
                 connected = false
                 ws = null
                 // Close lines channel so any blocked cmd() call fails immediately
@@ -149,7 +153,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
         ws?.close(1000, "force reconnect")
         ws = null
         connected = false
-        doConnect()
+        doConnect(force = true)
         if (connected) onReconnected?.invoke()
     }
 
@@ -200,6 +204,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
         idlePartialLine.clear()
 
         val wsUrl = "$wsScheme://$serverHost:$serverPort/mpd"
+        android.util.Log.d("MpdClient", "Connecting idle WebSocket to $wsUrl")
         val request = Request.Builder().url(wsUrl).build()
         val latch = CompletableDeferred<Boolean>()
 
@@ -217,6 +222,8 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
                 if (last.isNotEmpty()) idlePartialLine.append(last)
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                val code = response?.code?.let { " response=$it" } ?: ""
+                android.util.Log.e("MpdClient", "Idle WebSocket error for $wsUrl:$code ${t.message}")
                 latch.complete(false)
                 idleWs = null
                 idleLines.close()
@@ -311,6 +318,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
             return block()
         } catch (e: Exception) {
             if (e is CancellationException && e !is TimeoutCancellationException) throw e
+            if (e is MpdAckException) throw e
             markCommandConnectionDead(e.message ?: e.javaClass.simpleName)
         }
 
@@ -321,6 +329,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
             block()
         } catch (e: Exception) {
             if (e is CancellationException && e !is TimeoutCancellationException) throw e
+            if (e is MpdAckException) throw e
             markCommandConnectionDead(e.message ?: e.javaClass.simpleName)
             throw e
         }
@@ -331,7 +340,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
         while (true) {
             val line = lines.receive()
             if (line == "OK") return result
-            if (line.startsWith("ACK")) throw MpdException(line)
+            if (line.startsWith("ACK")) throw MpdAckException(line)
             result.add(line)
         }
     }
@@ -350,7 +359,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
                     results.add(current)
                     return results
                 }
-                line.startsWith("ACK") -> throw MpdException(line)
+                line.startsWith("ACK") -> throw MpdAckException(line)
                 else -> current.add(line)
             }
         }
@@ -860,4 +869,5 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     }
 }
 
-class MpdException(message: String) : Exception(message)
+open class MpdException(message: String) : Exception(message)
+class MpdAckException(message: String) : MpdException(message)
