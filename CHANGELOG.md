@@ -7,10 +7,6 @@
 - Add automatic Chromecast/Google Cast output discovery and playback.
 - Add automatic UPnP MediaRenderer output discovery and playback.
 
-### Improvements
-
-- Use FLAC streams for Chromecast outputs instead of MP3.
-
 ## 1.1 (2026-05-30)
 
 ### Features
