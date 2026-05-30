@@ -171,8 +171,10 @@ func (a *app) registerUPnPRenderer(location string) error {
 
 	a.devicesMu.Lock()
 	target, existed := a.upnpTargets[id]
+	changed := false
 	if existed {
 		target.mu.Lock()
+		changed = target.location != location || target.avURL != avURL || target.rcURL != rcURL
 		target.name = name
 		target.location = location
 		target.baseURL = base
@@ -207,8 +209,10 @@ func (a *app) registerUPnPRenderer(location string) error {
 	a.devicesMu.Unlock()
 
 	if !existed {
-		a.logger.Printf("upnp renderer discovered: %s (%s)", name, locURL.Host)
+		a.logger.Printf("upnp renderer discovered: %s id=%s addr=%s av=%s rc=%t", name, id, locURL.Host, avURL, rcURL != "")
 		a.mpdHub.notify(SubOutput)
+	} else if changed {
+		a.logger.Printf("upnp renderer updated: %s id=%s addr=%s av=%s rc=%t", name, id, locURL.Host, avURL, rcURL != "")
 	}
 	return nil
 }
@@ -278,6 +282,7 @@ func (t *upnpTarget) loadFile(url, mode string, meta map[string]any) error {
 	if mode == "append" {
 		return nil
 	}
+	t.app.logger.Printf("upnp %s: load mode=%s url=%s", t.name, mode, url)
 	t.mu.Lock()
 	t.current = url
 	t.playing = false
@@ -292,9 +297,11 @@ func (t *upnpTarget) loadFile(url, mode string, meta map[string]any) error {
 		"CurrentURI":         url,
 		"CurrentURIMetaData": "",
 	}, nil); err != nil {
+		t.app.logger.Printf("upnp %s: SetAVTransportURI failed: %v", t.name, err)
 		return err
 	}
 	if err := t.setProperty("pause", false); err != nil {
+		t.app.logger.Printf("upnp %s: Play failed: %v", t.name, err)
 		return err
 	}
 	t.mu.Lock()
@@ -313,6 +320,7 @@ func (t *upnpTarget) loadFileBatch(urls []string, mode string) error {
 }
 
 func (t *upnpTarget) playlistClear() error {
+	t.app.logger.Printf("upnp %s: stop", t.name)
 	t.mu.Lock()
 	t.monitorID++
 	t.current = ""
@@ -331,7 +339,10 @@ func (t *upnpTarget) playlistMove(from, to int) error { return nil }
 func (t *upnpTarget) getProperty(name string) (any, error) {
 	switch name {
 	case "pause":
-		state := t.transportState()
+		state, err := t.transportState()
+		if err != nil {
+			return nil, err
+		}
 		return state != "PLAYING" && state != "TRANSITIONING", nil
 	case "time-pos":
 		pos, _, err := t.positionInfo()
@@ -435,6 +446,7 @@ func (t *upnpTarget) monitorPlayback(id int) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	wasPlaying := false
+	lastState := ""
 	for range ticker.C {
 		t.mu.Lock()
 		active := id == t.monitorID
@@ -442,26 +454,35 @@ func (t *upnpTarget) monitorPlayback(id int) {
 		if !active {
 			return
 		}
-		state := t.transportState()
+		state, err := t.transportState()
+		if err != nil {
+			t.app.logger.Printf("upnp %s: transport poll failed: %v", t.name, err)
+			continue
+		}
+		if state != lastState {
+			t.app.logger.Printf("upnp %s: transport state=%s", t.name, state)
+			lastState = state
+		}
 		if state == "PLAYING" || state == "TRANSITIONING" {
 			wasPlaying = true
 			continue
 		}
 		if wasPlaying && (state == "STOPPED" || state == "NO_MEDIA_PRESENT") {
+			t.app.logger.Printf("upnp %s: track ended, advancing queue", t.name)
 			t.app.advanceTrack()
 			return
 		}
 	}
 }
 
-func (t *upnpTarget) transportState() string {
+func (t *upnpTarget) transportState() (string, error) {
 	var out map[string]string
 	if err := t.soap(t.avURL, upnpAVTransportService, "GetTransportInfo", map[string]string{
 		"InstanceID": "0",
 	}, &out); err != nil {
-		return ""
+		return "", err
 	}
-	return out["CurrentTransportState"]
+	return out["CurrentTransportState"], nil
 }
 
 func (t *upnpTarget) positionInfo() (float64, float64, error) {
