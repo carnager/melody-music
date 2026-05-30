@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Improvements
+
+- Add TUI +/- hotkeys for MPD software volume changes.
+
 ## 1.1 (2026-05-30)
 
 ### Features
