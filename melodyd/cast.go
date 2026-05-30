@@ -179,7 +179,7 @@ func (a *app) registerCastDevice(entry *zeroconf.ServiceEntry, info map[string]s
 		Address:  net.JoinHostPort(addr, strconv.Itoa(entry.Port)),
 		IsLocal:  false,
 		Type:     "cast",
-		Format:   "mp3",
+		Format:   a.cfg.Chromecast.Format,
 		LastSeen: time.Now(),
 	}
 	a.devicesMu.Unlock()
@@ -215,7 +215,7 @@ func (t *castTarget) loadFileAt(url, mode string, startTime float64) error {
 	t.monitorID++
 	t.mu.Unlock()
 
-	if err := t.loadURL(url, "audio/mpeg", startTime); err != nil {
+	if err := t.loadURL(url, t.contentType(), startTime); err != nil {
 		t.app.logger.Printf("cast %s: load failed: %v", t.name, err)
 		return err
 	}
@@ -381,6 +381,15 @@ func (t *castTarget) loadURL(url, mimeType string, startTime float64) error {
 		startTime = 0
 	}
 	return t.device.Load(url, int(startTime+0.5), mimeType, false, true, true)
+}
+
+func (t *castTarget) contentType() string {
+	switch t.app.cfg.Chromecast.Format {
+	case "flac":
+		return "audio/flac"
+	default:
+		return "audio/mpeg"
+	}
 }
 
 func (t *castTarget) stop() error {

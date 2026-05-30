@@ -7,6 +7,10 @@
 - Add macOS CoreAudio output discovery in `melodyd` for AirPlay-backed local outputs.
 - Add automatic Chromecast/Google Cast output discovery and playback.
 
+### Improvements
+
+- Add `chromecast.format` config for choosing MP3 or FLAC Cast streams.
+
 ## 1.1 (2026-05-30)
 
 ### Features

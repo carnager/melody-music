@@ -54,6 +54,9 @@ type config struct {
 	MPD struct {
 		Port int `toml:"port"`
 	} `toml:"mpd"`
+	Chromecast struct {
+		Format string `toml:"format"` // "mp3" or "flac"
+	} `toml:"chromecast"`
 }
 
 type paths struct {
@@ -293,6 +296,7 @@ func loadConfig() (config, paths, error) {
 	library, _ := raw["library"].(map[string]any)
 	playerSection, _ := raw["player"].(map[string]any)
 	random, _ := raw["random"].(map[string]any)
+	chromecast, _ := raw["chromecast"].(map[string]any)
 	cfg.Server.Name = stringify(server["name"])
 	cfg.Server.BindToAddress = stringSlice(server["bind_to_address"])
 	cfg.Server.APISecret = stringify(server["api_secret"])
@@ -305,6 +309,7 @@ func loadConfig() (config, paths, error) {
 	cfg.Random.Tracks = intFromAny(random["tracks"], 20)
 	mpdSection, _ := raw["mpd"].(map[string]any)
 	cfg.MPD.Port = intFromAny(mpdSection["port"], 6600)
+	cfg.Chromecast.Format = stringify(chromecast["format"])
 	applyDefaults(&cfg)
 	return cfg, pathCfg, nil
 }
@@ -322,6 +327,9 @@ replaygain = ""
 [random]
 tracks = 20
 
+[chromecast]
+format = "mp3"
+
 `
 }
 
@@ -337,11 +345,21 @@ func applyDefaults(cfg *config) {
 	if cfg.Random.Tracks <= 0 {
 		cfg.Random.Tracks = 20
 	}
+	cfg.Chromecast.Format = normalizeChromecastFormat(cfg.Chromecast.Format)
 	if envBind := os.Getenv("MELODYD_BIND_TO_ADDRESS"); envBind != "" {
 		cfg.Server.BindToAddress = splitAndTrim(envBind, ",")
 	}
 	if len(cfg.Server.BindToAddress) == 0 {
 		cfg.Server.BindToAddress = defaultBindToAddress()
+	}
+}
+
+func normalizeChromecastFormat(format string) string {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "flac":
+		return "flac"
+	default:
+		return "mp3"
 	}
 }
 
