@@ -1704,6 +1704,16 @@ func (a *app) switchDevice(newID string) error {
 
 	a.devicesMu.Unlock()
 
+	// Publish the selected output before the potentially slow handoff work below.
+	// Cast/UPnP receivers can take seconds to answer status or load requests, and
+	// MPD clients expect outputs to reflect the user's selection immediately.
+	a.devicesMu.Lock()
+	a.activeDevice = newID
+	a.devicesMu.Unlock()
+	_ = os.WriteFile(a.paths.ActiveDeviceFile, []byte(newID), 0o644)
+	a.logger.Printf("active device switched: %s -> %s", oldID, newID)
+	a.mpdHub.notify(SubOutput)
+
 	// Capture state from old target
 	var timePos float64
 	var volume float64 = -1
@@ -1731,12 +1741,6 @@ func (a *app) switchDevice(newID string) error {
 		_ = oldTarget.playlistClear()
 	}
 
-	// Update active device before syncing so target() returns the new one
-	a.devicesMu.Lock()
-	a.activeDevice = newID
-	a.devicesMu.Unlock()
-	_ = os.WriteFile(a.paths.ActiveDeviceFile, []byte(newID), 0o644)
-
 	// Transfer volume and replaygain to new target
 	if volume >= 0 {
 		_ = newTarget.setProperty("volume", volume)
@@ -1757,6 +1761,18 @@ func (a *app) switchDevice(newID string) error {
 			at.ensureQueueSync()
 			if err := at.agentPlayAt(plan.curPos, plan.nextPos, timePos); err != nil {
 				a.logger.Printf("switchDevice: agentPlayAt failed: %v", err)
+			}
+			if wasPaused {
+				_ = newTarget.setProperty("pause", true)
+			}
+		} else if ct, ok := newTarget.(*castTarget); ok {
+			if plan.doClear {
+				_ = ct.playlistClear()
+			}
+			if plan.currentURL != "" {
+				if err := ct.loadFileAt(plan.currentURL, "replace", timePos); err != nil {
+					a.logger.Printf("switchDevice: cast load failed: %v", err)
+				}
 			}
 			if wasPaused {
 				_ = newTarget.setProperty("pause", true)
@@ -1782,8 +1798,7 @@ func (a *app) switchDevice(newID string) error {
 		}
 	}
 
-	a.logger.Printf("active device switched: %s -> %s", oldID, newID)
-	a.mpdHub.notify(SubOutput, SubPlayer, SubMixer)
+	a.mpdHub.notify(SubPlayer, SubMixer)
 	return nil
 }
 

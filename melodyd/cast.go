@@ -193,10 +193,14 @@ func (a *app) registerCastDevice(entry *zeroconf.ServiceEntry, info map[string]s
 }
 
 func (t *castTarget) loadFile(url, mode string, meta map[string]any) error {
+	return t.loadFileAt(url, mode, 0)
+}
+
+func (t *castTarget) loadFileAt(url, mode string, startTime float64) error {
 	if mode == "append" {
 		return nil
 	}
-	t.app.logger.Printf("cast %s: load mode=%s url=%s", t.name, mode, url)
+	t.app.logger.Printf("cast %s: load mode=%s start=%.3f url=%s", t.name, mode, startTime, url)
 	if err := t.ensureConnected(); err != nil {
 		return err
 	}
@@ -205,13 +209,13 @@ func (t *castTarget) loadFile(url, mode string, meta map[string]any) error {
 	}
 	t.mu.Lock()
 	t.current = url
-	t.timePos = 0
+	t.timePos = startTime
 	t.duration = 0
 	t.paused = false
 	t.monitorID++
 	t.mu.Unlock()
 
-	if err := t.loadURL(url, "audio/flac"); err != nil {
+	if err := t.loadURL(url, "audio/flac", startTime); err != nil {
 		t.app.logger.Printf("cast %s: load failed: %v", t.name, err)
 		return err
 	}
@@ -372,8 +376,11 @@ func (t *castTarget) ensureConnected() error {
 	return nil
 }
 
-func (t *castTarget) loadURL(url, mimeType string) error {
-	return t.device.Load(url, 0, mimeType, false, true, true)
+func (t *castTarget) loadURL(url, mimeType string, startTime float64) error {
+	if startTime < 0 {
+		startTime = 0
+	}
+	return t.device.Load(url, int(startTime+0.5), mimeType, false, true, true)
 }
 
 func (t *castTarget) stop() error {
