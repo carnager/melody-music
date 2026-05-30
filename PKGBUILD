@@ -5,7 +5,7 @@ pkgrel=1
 arch=('x86_64' 'aarch64')
 url="https://github.com/carnager/melody-music"
 license=('MIT')
-makedepends=('go')
+makedepends=('go' 'mpv')
 source=("git+https://github.com/carnager/melody-music.git#tag=v${pkgver}")
 sha256sums=('SKIP')
 
@@ -20,6 +20,7 @@ build() {
 
 package_melodyd() {
   pkgdesc="Melody music server daemon"
+  depends=('mpv')
   install -Dm755 "$srcdir/melody-music/bin/melodyd" \
                   "$pkgdir/usr/bin/melodyd"
   install -Dm644 "$srcdir/melody-music/melodyd/melodyd.service" \
@@ -28,12 +29,14 @@ package_melodyd() {
 
 package_melody-agent() {
   pkgdesc="Remote playback agent for Melody"
+  depends=('mpv')
   install -Dm755 "$srcdir/melody-music/bin/melody-agent" \
                   "$pkgdir/usr/bin/melody-agent"
 }
 
 package_melody-airplay() {
   pkgdesc="AirPlay/CoreAudio playback agent for Melody"
+  depends=('mpv')
   install -Dm755 "$srcdir/melody-music/bin/melody-airplay" \
                   "$pkgdir/usr/bin/melody-airplay"
 }

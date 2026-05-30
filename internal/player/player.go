@@ -1,297 +1,192 @@
 package player
 
+/*
+#cgo pkg-config: mpv
+#include <stdlib.h>
+#include <mpv/client.h>
+
+static int mpv_cmd1(mpv_handle *ctx, const char *a0) {
+	const char *args[] = {a0, NULL};
+	return mpv_command(ctx, args);
+}
+
+static int mpv_cmd3(mpv_handle *ctx, const char *a0, const char *a1, const char *a2) {
+	const char *args[] = {a0, a1, a2, NULL};
+	return mpv_command(ctx, args);
+}
+
+static int mpv_cmd4(mpv_handle *ctx, const char *a0, const char *a1, const char *a2, const char *a3) {
+	const char *args[] = {a0, a1, a2, a3, NULL};
+	return mpv_command(ctx, args);
+}
+
+static int mpv_set_flag(mpv_handle *ctx, const char *name, int value) {
+	return mpv_set_property(ctx, name, MPV_FORMAT_FLAG, &value);
+}
+
+static int mpv_get_flag(mpv_handle *ctx, const char *name, int *value) {
+	return mpv_get_property(ctx, name, MPV_FORMAT_FLAG, value);
+}
+
+static int mpv_set_double(mpv_handle *ctx, const char *name, double value) {
+	return mpv_set_property(ctx, name, MPV_FORMAT_DOUBLE, &value);
+}
+
+static int mpv_get_double(mpv_handle *ctx, const char *name, double *value) {
+	return mpv_get_property(ctx, name, MPV_FORMAT_DOUBLE, value);
+}
+
+static mpv_event_end_file *mpv_event_end_file_data(mpv_event *event) {
+	return (mpv_event_end_file *)event->data;
+}
+*/
+import "C"
+
 import (
 	"fmt"
-	"io"
 	"math"
-	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 	"time"
-
-	"github.com/gopxl/beep/v2"
-	"github.com/gopxl/beep/v2/flac"
-	"github.com/gopxl/beep/v2/mp3"
-	"github.com/gopxl/beep/v2/speaker"
-	"github.com/gopxl/beep/v2/vorbis"
-	"github.com/gopxl/beep/v2/wav"
+	"unsafe"
 )
 
-const (
-	OutputSampleRate = beep.SampleRate(48000)
-	bufferSize       = 4800 // 100ms at 48kHz
-)
+const OutputSampleRate = 48000
 
-// Player handles audio decoding, gapless playback, ReplayGain, and output.
+// Player wraps libmpv behind the playback API used by Melody agents.
 type Player struct {
 	mu sync.Mutex
 
-	// Current playback state
-	current    beep.StreamSeekCloser
-	currentFmt beep.Format
-	currentSrc io.Closer // underlying file/http body
+	ctx  *C.mpv_handle
+	done chan struct{}
 
-	// Preloaded next track for gapless
-	next    beep.StreamSeekCloser
-	nextFmt beep.Format
-	nextSrc io.Closer
+	volume   float64
+	rgMode   string
+	rgTrack  float64
+	rgAlbum  float64
+	nrgTrack float64
+	nrgAlbum float64
 
-	// The mixer streamer registered with the speaker
-	mixer *gaplessMixer
-
-	// State
-	paused   bool
-	volume   float64 // 0-100
-	rgMode   string  // "track", "album", "off"
-	rgTrack  float64 // ReplayGain track gain in dB
-	rgAlbum  float64 // ReplayGain album gain in dB
-	nrgTrack float64 // next track RG
-	nrgAlbum float64 // next track RG
-
-	// Callbacks
-	OnTrackEnd func() // called when current track ends naturally
-}
-
-// gaplessMixer is the streamer registered with the speaker. It wraps the
-// current decoded stream and handles gapless transition to the next track.
-type gaplessMixer struct {
-	p *Player
-}
-
-func (g *gaplessMixer) Stream(samples [][2]float64) (int, bool) {
-	g.p.mu.Lock()
-	defer g.p.mu.Unlock()
-
-	if g.p.current == nil {
-		for i := range samples {
-			samples[i] = [2]float64{}
-		}
-		return len(samples), true
-	}
-
-	if g.p.paused {
-		for i := range samples {
-			samples[i] = [2]float64{}
-		}
-		return len(samples), true
-	}
-
-	gain := g.p.currentGain()
-	filled := 0
-
-	for filled < len(samples) {
-		n, ok := g.p.current.Stream(samples[filled:])
-		for i := filled; i < filled+n; i++ {
-			samples[i][0] *= gain
-			samples[i][1] *= gain
-		}
-		filled += n
-
-		if !ok {
-			g.p.current.Close()
-			if g.p.currentSrc != nil {
-				g.p.currentSrc.Close()
-				g.p.currentSrc = nil
-			}
-
-			if g.p.next != nil {
-				// Gapless transition
-				g.p.current = g.p.next
-				g.p.currentFmt = g.p.nextFmt
-				g.p.currentSrc = g.p.nextSrc
-				g.p.rgTrack = g.p.nrgTrack
-				g.p.rgAlbum = g.p.nrgAlbum
-				g.p.next = nil
-				g.p.nextSrc = nil
-				gain = g.p.currentGain()
-
-				if g.p.OnTrackEnd != nil {
-					go g.p.OnTrackEnd()
-				}
-				continue
-			}
-
-			// No next track — playback stops
-			g.p.current = nil
-			if g.p.OnTrackEnd != nil {
-				go g.p.OnTrackEnd()
-			}
-
-			for i := filled; i < len(samples); i++ {
-				samples[i] = [2]float64{}
-			}
-			return len(samples), true
-		}
-	}
-	return filled, true
-}
-
-func (*gaplessMixer) Err() error { return nil }
-
-// currentGain returns the linear gain factor for the current track.
-func (p *Player) currentGain() float64 {
-	vol := p.volume / 100.0
-	var rgDB float64
-	switch p.rgMode {
-	case "track":
-		rgDB = p.rgTrack
-	case "album":
-		rgDB = p.rgAlbum
-	default:
-		rgDB = 0
-	}
-	rg := math.Pow(10, rgDB/20)
-	return vol * rg
+	OnTrackEnd func()
 }
 
 // New creates and initializes a new Player.
 func New() *Player {
+	ctx := C.mpv_create()
+	if ctx == nil {
+		panic("mpv_create failed")
+	}
+
 	p := &Player{
+		ctx:    ctx,
+		done:   make(chan struct{}),
 		volume: 100,
 		rgMode: "off",
 	}
-	p.mixer = &gaplessMixer{p: p}
 
-	speaker.Init(OutputSampleRate, bufferSize)
-	speaker.Play(p.mixer)
+	mustSetOption(ctx, "terminal", "no")
+	mustSetOption(ctx, "msg-level", "all=no")
+	mustSetOption(ctx, "vid", "no")
+	mustSetOption(ctx, "audio-display", "no")
+	mustSetOption(ctx, "idle", "yes")
+	mustSetOption(ctx, "keep-open", "no")
+	mustSetOption(ctx, "gapless-audio", "yes")
+	mustSetOption(ctx, "replaygain", "no")
 
+	if rc := C.mpv_initialize(ctx); rc < 0 {
+		C.mpv_terminate_destroy(ctx)
+		panic(fmt.Sprintf("mpv_initialize failed: %s", mpvError(rc)))
+	}
+
+	go p.eventLoop(ctx)
 	return p
 }
 
-// Play loads and starts playing a track. Stops any current playback.
-// formatHint is an optional filename used for format detection when path has no extension (e.g. HTTP URLs).
-func (p *Player) Play(path, formatHint string, rgTrack, rgAlbum float64) error {
-	stream, format, src, err := openAudio(path, formatHint)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
+func mustSetOption(ctx *C.mpv_handle, name, value string) {
+	cName := C.CString(name)
+	cValue := C.CString(value)
+	defer C.free(unsafe.Pointer(cName))
+	defer C.free(unsafe.Pointer(cValue))
+	if rc := C.mpv_set_option_string(ctx, cName, cValue); rc < 0 {
+		C.mpv_terminate_destroy(ctx)
+		panic(fmt.Sprintf("mpv option %s=%s failed: %s", name, value, mpvError(rc)))
 	}
-
-	resampled := resampleStream(stream, format)
-
-	speaker.Lock()
-	p.mu.Lock()
-	if p.current != nil {
-		p.current.Close()
-	}
-	if p.currentSrc != nil {
-		p.currentSrc.Close()
-	}
-	if p.next != nil {
-		p.next.Close()
-	}
-	if p.nextSrc != nil {
-		p.nextSrc.Close()
-	}
-	p.current = resampled
-	p.currentFmt = format
-	p.currentSrc = src
-	p.rgTrack = rgTrack
-	p.rgAlbum = rgAlbum
-	p.next = nil
-	p.nextSrc = nil
-	p.paused = false
-	p.mu.Unlock()
-	speaker.Unlock()
-
-	return nil
 }
 
-// Preload prepares the next track for gapless playback.
-// formatHint is an optional filename used for format detection when path has no extension.
-func (p *Player) Preload(path, formatHint string, rgTrack, rgAlbum float64) error {
-	stream, format, src, err := openAudio(path, formatHint)
-	if err != nil {
-		return fmt.Errorf("preload %s: %w", path, err)
-	}
-
-	resampled := resampleStream(stream, format)
-
-	speaker.Lock()
+// Play loads and starts playing a track. Stops any current playback.
+func (p *Player) Play(path, _ string, rgTrack, rgAlbum float64) error {
 	p.mu.Lock()
-	if p.next != nil {
-		p.next.Close()
+	defer p.mu.Unlock()
+	if p.ctx == nil {
+		return fmt.Errorf("player closed")
 	}
-	if p.nextSrc != nil {
-		p.nextSrc.Close()
+
+	p.rgTrack = rgTrack
+	p.rgAlbum = rgAlbum
+	p.nrgTrack = 0
+	p.nrgAlbum = 0
+
+	if err := p.command3Locked("loadfile", path, "replace"); err != nil {
+		return err
 	}
-	p.next = resampled
-	p.nextFmt = format
-	p.nextSrc = src
+	if err := p.setPauseLocked(false); err != nil {
+		return err
+	}
+	return p.applyVolumeLocked()
+}
+
+// Preload prepares the next track for mpv playlist auto-advance.
+func (p *Player) Preload(path, _ string, rgTrack, rgAlbum float64) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.ctx == nil {
+		return fmt.Errorf("player closed")
+	}
+
 	p.nrgTrack = rgTrack
 	p.nrgAlbum = rgAlbum
-	p.mu.Unlock()
-	speaker.Unlock()
 
-	return nil
+	// Keep only the current entry and the requested next entry.
+	_ = p.command1Locked("playlist-clear")
+	return p.command3Locked("loadfile", path, "append")
 }
 
 // Pause pauses playback.
 func (p *Player) Pause() {
-	speaker.Lock()
 	p.mu.Lock()
-	p.paused = true
-	p.mu.Unlock()
-	speaker.Unlock()
+	defer p.mu.Unlock()
+	_ = p.setPauseLocked(true)
 }
 
 // Resume resumes playback.
 func (p *Player) Resume() {
-	speaker.Lock()
 	p.mu.Lock()
-	p.paused = false
-	p.mu.Unlock()
-	speaker.Unlock()
+	defer p.mu.Unlock()
+	_ = p.setPauseLocked(false)
 }
 
-// Stop stops playback and clears all streams.
+// Stop stops playback and clears all playlist entries.
 func (p *Player) Stop() {
-	speaker.Lock()
 	p.mu.Lock()
-	if p.current != nil {
-		p.current.Close()
-		p.current = nil
+	defer p.mu.Unlock()
+	if p.ctx == nil {
+		return
 	}
-	if p.currentSrc != nil {
-		p.currentSrc.Close()
-		p.currentSrc = nil
-	}
-	if p.next != nil {
-		p.next.Close()
-		p.next = nil
-	}
-	if p.nextSrc != nil {
-		p.nextSrc.Close()
-		p.nextSrc = nil
-	}
-	p.paused = false
-	p.mu.Unlock()
-	speaker.Unlock()
+	_ = p.command1Locked("stop")
+	_ = p.command1Locked("playlist-clear")
 }
 
 // Seek seeks to the given position in seconds.
 func (p *Player) Seek(seconds float64) error {
-	speaker.Lock()
+	if seconds < 0 {
+		seconds = 0
+	}
+
 	p.mu.Lock()
-	defer func() {
-		p.mu.Unlock()
-		speaker.Unlock()
-	}()
-
-	if p.current == nil {
-		return nil
+	defer p.mu.Unlock()
+	if p.ctx == nil {
+		return fmt.Errorf("player closed")
 	}
-
-	samplePos := int(seconds * float64(OutputSampleRate))
-	total := p.current.Len()
-	if samplePos < 0 {
-		samplePos = 0
-	}
-	if samplePos > total {
-		samplePos = total
-	}
-	return p.current.Seek(samplePos)
+	return p.command4Locked("seek", fmt.Sprintf("%.3f", seconds), "absolute", "exact")
 }
 
 // SetVolume sets the volume (0-100).
@@ -302,20 +197,19 @@ func (p *Player) SetVolume(level float64) {
 	if level > 100 {
 		level = 100
 	}
-	speaker.Lock()
+
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.volume = level
-	p.mu.Unlock()
-	speaker.Unlock()
+	_ = p.applyVolumeLocked()
 }
 
 // SetReplayGain sets the ReplayGain mode ("track", "album", "off").
 func (p *Player) SetReplayGain(mode string) {
-	speaker.Lock()
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.rgMode = mode
-	p.mu.Unlock()
-	speaker.Unlock()
+	_ = p.applyVolumeLocked()
 }
 
 // State returns the current playback state.
@@ -324,26 +218,40 @@ func (p *Player) State() (state string, elapsed, duration float64, vol float64) 
 	defer p.mu.Unlock()
 
 	vol = p.volume
-
-	if p.current == nil {
+	if p.ctx == nil {
 		return "stop", 0, 0, vol
 	}
-	if p.paused {
+
+	if p.getFlagLocked("idle-active") {
+		return "stop", 0, 0, vol
+	}
+
+	if p.getFlagLocked("pause") {
 		state = "pause"
 	} else {
 		state = "play"
 	}
-
-	elapsed = float64(p.current.Position()) / float64(OutputSampleRate)
-	duration = float64(p.current.Len()) / float64(OutputSampleRate)
-
+	elapsed = p.getDoubleLocked("time-pos")
+	duration = p.getDoubleLocked("duration")
 	return state, elapsed, duration, vol
 }
 
 // Close shuts down the player.
 func (p *Player) Close() {
-	p.Stop()
-	speaker.Close()
+	p.mu.Lock()
+	ctx := p.ctx
+	if ctx == nil {
+		p.mu.Unlock()
+		return
+	}
+	p.ctx = nil
+	p.mu.Unlock()
+
+	command := C.CString("quit")
+	C.mpv_command_string(ctx, command)
+	C.free(unsafe.Pointer(command))
+	C.mpv_wakeup(ctx)
+	<-p.done
 }
 
 // StartPositionReporter calls fn every interval with the current state.
@@ -357,126 +265,141 @@ func (p *Player) StartPositionReporter(interval time.Duration, fn func(state str
 	}()
 }
 
-// ---------------------------------------------------------------------------
-// Audio file opening and format detection
-// ---------------------------------------------------------------------------
+func (p *Player) eventLoop(ctx *C.mpv_handle) {
+	defer func() {
+		C.mpv_destroy(ctx)
+		close(p.done)
+	}()
 
-func openAudio(path, formatHint string) (beep.StreamSeekCloser, beep.Format, io.Closer, error) {
-	var src io.ReadSeekCloser
-	var closer io.Closer
-
-	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
-		resp, err := http.Get(path)
-		if err != nil {
-			return nil, beep.Format{}, nil, err
+	for {
+		event := C.mpv_wait_event(ctx, -1)
+		if event == nil {
+			return
 		}
-		tmp, err := os.CreateTemp("", "melody-stream-*"+filepath.Ext(path))
-		if err != nil {
-			resp.Body.Close()
-			return nil, beep.Format{}, nil, err
+		switch event.event_id {
+		case C.MPV_EVENT_SHUTDOWN:
+			return
+		case C.MPV_EVENT_END_FILE:
+			data := C.mpv_event_end_file_data(event)
+			if data == nil || data.reason != C.MPV_END_FILE_REASON_EOF {
+				continue
+			}
+			p.promoteNextReplayGain()
+			if p.OnTrackEnd != nil {
+				go p.OnTrackEnd()
+			}
 		}
-		if _, err := io.Copy(tmp, resp.Body); err != nil {
-			resp.Body.Close()
-			tmp.Close()
-			os.Remove(tmp.Name())
-			return nil, beep.Format{}, nil, err
-		}
-		resp.Body.Close()
-		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-			tmp.Close()
-			os.Remove(tmp.Name())
-			return nil, beep.Format{}, nil, err
-		}
-		src = tmp
-		closer = &tempFileCloser{f: tmp}
-	} else {
-		f, err := os.Open(path)
-		if err != nil {
-			return nil, beep.Format{}, nil, err
-		}
-		src = f
-		closer = f
-	}
-
-	fmtPath := path
-	if formatHint != "" {
-		fmtPath = formatHint
-	}
-	stream, format, err := decodeAudio(src, fmtPath)
-	if err != nil {
-		closer.Close()
-		return nil, beep.Format{}, nil, err
-	}
-
-	return stream, format, closer, nil
-}
-
-type tempFileCloser struct {
-	f *os.File
-}
-
-func (t *tempFileCloser) Close() error {
-	name := t.f.Name()
-	t.f.Close()
-	return os.Remove(name)
-}
-
-func decodeAudio(src io.ReadSeekCloser, path string) (beep.StreamSeekCloser, beep.Format, error) {
-	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
-	case ".flac":
-		return flac.Decode(src)
-	case ".mp3":
-		return mp3.Decode(src)
-	case ".ogg", ".oga":
-		return vorbis.Decode(src)
-	case ".wav":
-		return wav.Decode(src)
-	case ".opus":
-		return decodeOpus(src)
-	default:
-		return nil, beep.Format{}, fmt.Errorf("unsupported format: %s", ext)
 	}
 }
 
-func resampleStream(s beep.StreamSeekCloser, format beep.Format) beep.StreamSeekCloser {
-	if format.SampleRate == OutputSampleRate {
-		return s
+func (p *Player) promoteNextReplayGain() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.rgTrack = p.nrgTrack
+	p.rgAlbum = p.nrgAlbum
+	p.nrgTrack = 0
+	p.nrgAlbum = 0
+	_ = p.applyVolumeLocked()
+}
+
+func (p *Player) setPauseLocked(paused bool) error {
+	value := C.int(0)
+	if paused {
+		value = 1
 	}
-	return &resampledStream{
-		resampled: beep.Resample(4, format.SampleRate, OutputSampleRate, s),
-		inner:     s,
-		ratio:     float64(OutputSampleRate) / float64(format.SampleRate),
+	name := C.CString("pause")
+	defer C.free(unsafe.Pointer(name))
+	if rc := C.mpv_set_flag(p.ctx, name, value); rc < 0 {
+		return fmt.Errorf("mpv set pause: %s", mpvError(rc))
 	}
+	return nil
 }
 
-type resampledStream struct {
-	resampled beep.Streamer
-	inner     beep.StreamSeekCloser
-	ratio     float64
+func (p *Player) applyVolumeLocked() error {
+	if p.ctx == nil {
+		return nil
+	}
+
+	gainDB := 0.0
+	switch p.rgMode {
+	case "track":
+		gainDB = p.rgTrack
+	case "album":
+		gainDB = p.rgAlbum
+	}
+	level := p.volume * math.Pow(10, gainDB/20)
+	if level < 0 {
+		level = 0
+	}
+	if level > 100 {
+		level = 100
+	}
+
+	name := C.CString("volume")
+	defer C.free(unsafe.Pointer(name))
+	if rc := C.mpv_set_double(p.ctx, name, C.double(level)); rc < 0 {
+		return fmt.Errorf("mpv set volume: %s", mpvError(rc))
+	}
+	return nil
 }
 
-func (r *resampledStream) Stream(samples [][2]float64) (int, bool) {
-	return r.resampled.Stream(samples)
+func (p *Player) command1Locked(a0 string) error {
+	c0 := C.CString(a0)
+	defer C.free(unsafe.Pointer(c0))
+	if rc := C.mpv_cmd1(p.ctx, c0); rc < 0 {
+		return fmt.Errorf("mpv %s: %s", a0, mpvError(rc))
+	}
+	return nil
 }
 
-func (r *resampledStream) Err() error {
-	return r.inner.Err()
+func (p *Player) command3Locked(a0, a1, a2 string) error {
+	c0 := C.CString(a0)
+	c1 := C.CString(a1)
+	c2 := C.CString(a2)
+	defer C.free(unsafe.Pointer(c0))
+	defer C.free(unsafe.Pointer(c1))
+	defer C.free(unsafe.Pointer(c2))
+	if rc := C.mpv_cmd3(p.ctx, c0, c1, c2); rc < 0 {
+		return fmt.Errorf("mpv %s: %s", a0, mpvError(rc))
+	}
+	return nil
 }
 
-func (r *resampledStream) Len() int {
-	return int(float64(r.inner.Len()) * r.ratio)
+func (p *Player) command4Locked(a0, a1, a2, a3 string) error {
+	c0 := C.CString(a0)
+	c1 := C.CString(a1)
+	c2 := C.CString(a2)
+	c3 := C.CString(a3)
+	defer C.free(unsafe.Pointer(c0))
+	defer C.free(unsafe.Pointer(c1))
+	defer C.free(unsafe.Pointer(c2))
+	defer C.free(unsafe.Pointer(c3))
+	if rc := C.mpv_cmd4(p.ctx, c0, c1, c2, c3); rc < 0 {
+		return fmt.Errorf("mpv %s: %s", a0, mpvError(rc))
+	}
+	return nil
 }
 
-func (r *resampledStream) Position() int {
-	return int(float64(r.inner.Position()) * r.ratio)
+func (p *Player) getFlagLocked(prop string) bool {
+	name := C.CString(prop)
+	defer C.free(unsafe.Pointer(name))
+	var value C.int
+	if rc := C.mpv_get_flag(p.ctx, name, &value); rc < 0 {
+		return false
+	}
+	return value != 0
 }
 
-func (r *resampledStream) Seek(p int) error {
-	innerPos := int(float64(p) / r.ratio)
-	return r.inner.Seek(innerPos)
+func (p *Player) getDoubleLocked(prop string) float64 {
+	name := C.CString(prop)
+	defer C.free(unsafe.Pointer(name))
+	var value C.double
+	if rc := C.mpv_get_double(p.ctx, name, &value); rc < 0 {
+		return 0
+	}
+	return float64(value)
 }
 
-func (r *resampledStream) Close() error {
-	return r.inner.Close()
+func mpvError(rc C.int) string {
+	return C.GoString(C.mpv_error_string(rc))
 }
