@@ -98,7 +98,7 @@ type device struct {
 	Name       string    `json:"name"`
 	Address    string    `json:"address"`
 	IsLocal    bool      `json:"is_local"`
-	Type       string    `json:"type"` // "local", "agent", "web", "upnp", "cast"
+	Type       string    `json:"type"` // "local", "agent", "web", "cast", "coreaudio"
 	Format     string    `json:"format"`
 	MaxBitRate int       `json:"max_bitrate"`
 	ReplayGain string    `json:"replaygain,omitempty"` // "off", "track", "album"
@@ -140,7 +140,6 @@ type app struct {
 	devices      map[string]*device
 	agentTargets map[string]*agentTarget // keyed by device ID
 	webTargets   map[string]*webTarget   // keyed by device ID
-	upnpTargets  map[string]*upnpTarget  // keyed by device ID
 	castTargets  map[string]*castTarget  // keyed by device ID
 	coreTargets  map[string]*coreAudioTarget
 	devicesMu    sync.RWMutex
@@ -173,7 +172,6 @@ func main() {
 		devices:       make(map[string]*device),
 		agentTargets:  make(map[string]*agentTarget),
 		webTargets:    make(map[string]*webTarget),
-		upnpTargets:   make(map[string]*upnpTarget),
 		castTargets:   make(map[string]*castTarget),
 		coreTargets:   make(map[string]*coreAudioTarget),
 		prioReturnPos: -1,
@@ -218,7 +216,6 @@ func main() {
 
 	go a.startLocalAgent()
 	go a.coreAudioOutputLoop()
-	go a.upnpDiscoveryLoop()
 	go a.castDiscoveryLoop()
 	go a.watchPlayState()
 	go a.deviceCleanup()
@@ -1072,9 +1069,6 @@ func (a *app) target() playbackTarget {
 	if wt, ok := a.webTargets[devID]; ok && wt.isRunning() {
 		return wt
 	}
-	if ut, ok := a.upnpTargets[devID]; ok && ut.isRunning() {
-		return ut
-	}
 	if ct, ok := a.castTargets[devID]; ok && ct.isRunning() {
 		return ct
 	}
@@ -1086,7 +1080,7 @@ func (a *app) target() playbackTarget {
 
 func isSingleLoadTarget(t playbackTarget) bool {
 	switch t.(type) {
-	case *upnpTarget, *castTarget:
+	case *castTarget:
 		return true
 	default:
 		return false
@@ -1695,8 +1689,6 @@ func (a *app) switchDevice(newID string) error {
 		oldTarget = at
 	} else if wt, ok := a.webTargets[oldID]; ok && wt.isRunning() {
 		oldTarget = wt
-	} else if ut, ok := a.upnpTargets[oldID]; ok && ut.isRunning() {
-		oldTarget = ut
 	} else if ct, ok := a.castTargets[oldID]; ok && ct.isRunning() {
 		oldTarget = ct
 	} else if mt, ok := a.coreTargets[oldID]; ok && mt.isRunning() {
@@ -1709,8 +1701,6 @@ func (a *app) switchDevice(newID string) error {
 		newTarget = at
 	} else if wt, ok := a.webTargets[newID]; ok && wt.isRunning() {
 		newTarget = wt
-	} else if ut, ok := a.upnpTargets[newID]; ok && ut.isRunning() {
-		newTarget = ut
 	} else if ct, ok := a.castTargets[newID]; ok && ct.isRunning() {
 		newTarget = ct
 	} else if mt, ok := a.coreTargets[newID]; ok && mt.isRunning() {
@@ -1723,7 +1713,7 @@ func (a *app) switchDevice(newID string) error {
 	a.devicesMu.Unlock()
 
 	// Publish the selected output before the potentially slow handoff work below.
-	// Cast/UPnP receivers can take seconds to answer status or load requests, and
+	// Cast receivers can take seconds to answer status or load requests, and
 	// MPD clients expect outputs to reflect the user's selection immediately.
 	a.devicesMu.Lock()
 	a.activeDevice = newID

@@ -6,7 +6,6 @@
 
 - Add macOS CoreAudio output discovery in `melodyd` for AirPlay-backed local outputs.
 - Add automatic Chromecast/Google Cast output discovery and playback.
-- Add automatic UPnP MediaRenderer output discovery and playback.
 
 ## 1.1 (2026-05-30)
 
