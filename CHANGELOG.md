@@ -1,10 +1,11 @@
 # Changelog
 
-## Unreleased
+## 1.1.1 (2026-05-30)
 
 ### Improvements
 
 - Add TUI +/- hotkeys for MPD software volume changes.
+- Add Android release signing configuration.
 
 ## 1.1 (2026-05-30)
 

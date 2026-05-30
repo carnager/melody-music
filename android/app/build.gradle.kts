@@ -1,8 +1,32 @@
+import java.io.File
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+val releaseSigningProperties = Properties()
+val releaseSigningPropertiesFile = file(
+    System.getenv("MELODY_ANDROID_SIGNING_PROPERTIES")
+        ?: "${System.getProperty("user.home")}/.local/android/release-keys/melody.properties"
+)
+if (releaseSigningPropertiesFile.isFile) {
+    releaseSigningPropertiesFile.inputStream().use(releaseSigningProperties::load)
+}
+
+fun signingValue(name: String): String? =
+    providers.gradleProperty(name).orNull
+        ?: System.getenv(name)
+        ?: releaseSigningProperties.getProperty(name)
+
+fun signingFile(path: String): File =
+    if (path.startsWith("~/")) {
+        File(System.getProperty("user.home"), path.removePrefix("~/"))
+    } else {
+        file(path)
+    }
 
 android {
     namespace = "com.melody.app"
@@ -13,13 +37,28 @@ android {
         applicationId = "com.melody.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "1.1"
+        versionCode = 12
+        versionName = "1.1.1"
+    }
+
+    signingConfigs {
+        create("release") {
+            val storePath = signingValue("MELODY_ANDROID_STORE_FILE")
+            if (storePath != null) {
+                storeFile = signingFile(storePath)
+                storePassword = signingValue("MELODY_ANDROID_STORE_PASSWORD")
+                keyAlias = signingValue("MELODY_ANDROID_KEY_ALIAS")
+                keyPassword = signingValue("MELODY_ANDROID_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = true
+            if (signingValue("MELODY_ANDROID_STORE_FILE") != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
