@@ -153,6 +153,14 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
         if (connected) onReconnected?.invoke()
     }
 
+    private fun markCommandConnectionDead(reason: String) {
+        android.util.Log.d("MpdClient", "Command WebSocket dead: $reason")
+        connected = false
+        ws?.close(1000, reason)
+        ws = null
+        lines.close()
+    }
+
     fun disconnect() {
         reconnectJob?.cancel()
         reconnectJob = null
@@ -251,7 +259,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
 
             val changed = mutableSetOf<String>()
             while (true) {
-                val line = withTimeout(300_000) { idleLines.receive() }
+                val line = idleLines.receive()
                 if (line == "OK") break
                 if (line.startsWith("changed: ")) {
                     changed.add(line.removePrefix("changed: "))
@@ -271,26 +279,50 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
         return w
     }
 
-    suspend fun cmd(command: String): List<String> = mutex.withLock {
-        // NonCancellable wraps the entire send+read to prevent cancellation
-        // from leaving stale response data in the channel
-        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
-            val w = ensureConnected()
-            w.send("$command\n")
-            withTimeout(10000) { readUntilOK() }
+    suspend fun cmd(command: String): List<String> = withCommandRetry {
+        mutex.withLock {
+            // NonCancellable wraps the entire send+read to prevent cancellation
+            // from leaving stale response data in the channel
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                val w = ensureConnected()
+                if (!w.send("$command\n")) throw MpdException("send failed")
+                withTimeout(10000) { readUntilOK() }
+            }
         }
     }
 
-    suspend fun cmdBatch(commands: List<String>): List<List<String>> = mutex.withLock {
-        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
-            val w = ensureConnected()
-            val batch = buildString {
-                appendLine("command_list_ok_begin")
-                commands.forEach { appendLine(it) }
-                appendLine("command_list_end")
+    suspend fun cmdBatch(commands: List<String>): List<List<String>> = withCommandRetry {
+        mutex.withLock {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                val w = ensureConnected()
+                val batch = buildString {
+                    appendLine("command_list_ok_begin")
+                    commands.forEach { appendLine(it) }
+                    appendLine("command_list_end")
+                }
+                if (!w.send(batch)) throw MpdException("send failed")
+                withTimeout(10000) { readBatchResponse() }
             }
-            w.send(batch)
-            withTimeout(10000) { readBatchResponse() }
+        }
+    }
+
+    private suspend fun <T> withCommandRetry(block: suspend () -> T): T {
+        try {
+            return block()
+        } catch (e: Exception) {
+            if (e is CancellationException && e !is TimeoutCancellationException) throw e
+            markCommandConnectionDead(e.message ?: e.javaClass.simpleName)
+        }
+
+        doConnect()
+        if (!connected) throw MpdException("reconnect failed")
+        onReconnected?.invoke()
+        return try {
+            block()
+        } catch (e: Exception) {
+            if (e is CancellationException && e !is TimeoutCancellationException) throw e
+            markCommandConnectionDead(e.message ?: e.javaClass.simpleName)
+            throw e
         }
     }
 
@@ -318,10 +350,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
                     results.add(current)
                     return results
                 }
-                line.startsWith("ACK") -> {
-                    results.add(current)
-                    return results
-                }
+                line.startsWith("ACK") -> throw MpdException(line)
                 else -> current.add(line)
             }
         }
