@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+
+- Fix MPD idle handling after playlist changes so clients can safely send command lists immediately after an idle notification.
+
 ## 1.1.1 (2026-05-30)
 
 ### Improvements

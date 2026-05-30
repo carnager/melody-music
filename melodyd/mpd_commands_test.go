@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bufio"
+	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -42,4 +45,128 @@ func TestBumpQueueVersionLocked(t *testing.T) {
 	if a.queueVersion != after+101 {
 		t.Fatalf("future queueVersion = %d, want %d", a.queueVersion, after+101)
 	}
+}
+
+func TestIdleNotificationPreservesFollowingCommandList(t *testing.T) {
+	c, rw, closeFn := newTestMPDConn(t)
+	defer closeFn()
+
+	if got := readLine(t, rw); !strings.HasPrefix(got, "OK MPD") {
+		t.Fatalf("greeting = %q", got)
+	}
+
+	writeLine(t, rw, "idle playlist")
+	waitForIdle(t, c)
+	c.app.mpdHub.notify(SubPlaylist)
+
+	if got := readLine(t, rw); got != "changed: playlist" {
+		t.Fatalf("idle changed line = %q", got)
+	}
+	if got := readLine(t, rw); got != "OK" {
+		t.Fatalf("idle OK = %q", got)
+	}
+
+	writeLine(t, rw, "command_list_begin")
+	writeLine(t, rw, "ping")
+	writeLine(t, rw, "command_list_end")
+	if got := readLine(t, rw); got != "OK" {
+		t.Fatalf("command list response = %q", got)
+	}
+}
+
+func TestIdleAllowsCommandInsteadOfNoidle(t *testing.T) {
+	_, rw, closeFn := newTestMPDConn(t)
+	defer closeFn()
+
+	if got := readLine(t, rw); !strings.HasPrefix(got, "OK MPD") {
+		t.Fatalf("greeting = %q", got)
+	}
+
+	writeLine(t, rw, "idle playlist")
+	writeLine(t, rw, "ping")
+
+	if got := readLine(t, rw); got != "OK" {
+		t.Fatalf("idle end response = %q", got)
+	}
+	if got := readLine(t, rw); got != "OK" {
+		t.Fatalf("ping response = %q", got)
+	}
+}
+
+func TestIdleDeliversPendingNotificationBeforeReadingNextCommand(t *testing.T) {
+	c, rw, closeFn := newTestMPDConn(t)
+	defer closeFn()
+
+	if got := readLine(t, rw); !strings.HasPrefix(got, "OK MPD") {
+		t.Fatalf("greeting = %q", got)
+	}
+
+	c.app.mpdHub.notify(SubPlaylist)
+	writeLine(t, rw, "idle playlist")
+	if got := readLine(t, rw); got != "changed: playlist" {
+		t.Fatalf("pending idle changed line = %q", got)
+	}
+	if got := readLine(t, rw); got != "OK" {
+		t.Fatalf("pending idle OK = %q", got)
+	}
+
+	writeLine(t, rw, "ping")
+	if got := readLine(t, rw); got != "OK" {
+		t.Fatalf("post-pending ping response = %q", got)
+	}
+}
+
+func newTestMPDConn(t *testing.T) (*mpdConn, *bufio.ReadWriter, func()) {
+	t.Helper()
+
+	server, client := net.Pipe()
+	a := &app{mpdHub: newNotifyHub()}
+	c := &mpdConn{
+		conn:   server,
+		reader: bufio.NewReader(server),
+		writer: bufio.NewWriter(server),
+		app:    a,
+	}
+	go c.serve()
+
+	rw := bufio.NewReadWriter(bufio.NewReader(client), bufio.NewWriter(client))
+	return c, rw, func() {
+		_ = client.Close()
+		_ = server.Close()
+	}
+}
+
+func waitForIdle(t *testing.T, c *mpdConn) {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		c.idleMu.Lock()
+		idling := c.idling
+		c.idleMu.Unlock()
+		if idling {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("MPD connection did not enter idle")
+}
+
+func writeLine(t *testing.T, rw *bufio.ReadWriter, line string) {
+	t.Helper()
+	if _, err := rw.WriteString(line + "\n"); err != nil {
+		t.Fatalf("write %q: %v", line, err)
+	}
+	if err := rw.Flush(); err != nil {
+		t.Fatalf("flush %q: %v", line, err)
+	}
+}
+
+func readLine(t *testing.T, rw *bufio.ReadWriter) string {
+	t.Helper()
+	line, err := rw.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read line: %v", err)
+	}
+	return strings.TrimRight(line, "\r\n")
 }

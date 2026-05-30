@@ -182,41 +182,76 @@ func (c *mpdConn) serve() {
 			return
 		}
 		line = strings.TrimRight(line, "\r\n")
-		if line == "" {
-			continue
-		}
-
-		if line == "command_list_begin" || line == "command_list_ok_begin" {
-			c.handleCommandList(line == "command_list_ok_begin")
-			continue
-		}
-
-		cmd, args := parseCommand(line)
-
-		if cmd == "idle" {
-			c.handleIdle(args)
-			continue
-		}
-		if cmd == "close" {
+		if !c.handleLine(line) {
 			return
 		}
-		if cmd == "agent_register" {
-			if len(args) < 1 {
-				c.writeACK(mpdErr(errArg, "agent_register", "name required"))
-				c.flush()
-				continue
-			}
-			c.handleAgentRegister(args)
-			return // connection taken over by agentTarget
-		}
-
-		if err := c.dispatch(cmd, args); err != nil {
-			c.writeACK(err)
-		} else {
-			c.writeLine("OK")
-		}
-		c.flush()
 	}
+}
+
+func (c *mpdConn) handleLine(line string) bool {
+	if line == "" {
+		return true
+	}
+
+	if line == "command_list_begin" || line == "command_list_ok_begin" {
+		c.handleCommandList(line == "command_list_ok_begin")
+		return true
+	}
+
+	cmd, args := parseCommand(line)
+
+	if cmd == "idle" {
+		return c.handleIdle(args)
+	}
+	if cmd == "close" {
+		return false
+	}
+	if cmd == "agent_register" {
+		if len(args) < 1 {
+			c.writeACK(mpdErr(errArg, "agent_register", "name required"))
+			c.flush()
+			return true
+		}
+		c.handleAgentRegister(args)
+		return false // connection taken over by agentTarget
+	}
+
+	if err := c.dispatch(cmd, args); err != nil {
+		c.writeACK(err)
+	} else {
+		c.writeLine("OK")
+	}
+	c.flush()
+	return true
+}
+
+func (c *mpdConn) setIdle(active bool) {
+	c.idleMu.Lock()
+	c.idling = active
+	c.idleMu.Unlock()
+}
+
+func (c *mpdConn) finishIdle() {
+	c.setIdle(false)
+}
+
+func (c *mpdConn) endIdleWithOK() {
+	c.finishIdle()
+	c.writeLine("OK")
+	c.flush()
+}
+
+func (c *mpdConn) writeIdleChanges(changed []string) {
+	c.finishIdle()
+	seen := map[string]bool{}
+	for _, s := range changed {
+		if !seen[s] {
+			seen[s] = true
+			c.writef("changed: %s\n", s)
+		}
+	}
+	c.writeLine("OK")
+	c.flush()
 }
 
 func (c *mpdConn) dispatch(cmd string, args []string) *mpdError {
@@ -262,48 +297,16 @@ func (c *mpdConn) handleCommandList(withOK bool) {
 	c.flush()
 }
 
-func (c *mpdConn) handleIdle(subs []string) {
+func (c *mpdConn) handleIdle(subs []string) bool {
 	// Loop instead of recursing to prevent unbounded stack growth when
-	// clients rapidly re-enter idle (e.g. on rapid track changes).
+	// clients rapidly re-enter idle after every notification.
 	for {
-		c.idleMu.Lock()
-
-		// Check for pending events that arrived while we were not idle.
-		var pendingMatch []string
-		if len(c.pendingSubs) > 0 {
-			watchAll := len(subs) == 0
-			for s := range c.pendingSubs {
-				if watchAll {
-					pendingMatch = append(pendingMatch, s)
-				} else {
-					for _, sub := range subs {
-						if s == sub {
-							pendingMatch = append(pendingMatch, s)
-							break
-						}
-					}
-				}
-			}
-			if len(pendingMatch) > 0 {
-				c.pendingSubs = nil
-			}
-		}
-
-		c.idling = true
-		c.idleSubs = make(map[string]struct{})
-		for _, s := range subs {
-			c.idleSubs[s] = struct{}{}
-		}
-		c.idleCh = make(chan []string, 1)
-		c.idleMu.Unlock()
-
-		// Deliver pending events through the normal channel so the select
-		// below handles them like any other notification.
+		pendingMatch := c.beginIdle(subs)
 		if len(pendingMatch) > 0 {
-			c.idleCh <- pendingMatch
+			c.writeIdleChanges(pendingMatch)
+			return true
 		}
 
-		// Read next line in a goroutine so we can select between notification and noidle
 		lineCh := make(chan string, 1)
 		go func() {
 			line, err := c.reader.ReadString('\n')
@@ -314,73 +317,69 @@ func (c *mpdConn) handleIdle(subs []string) {
 			lineCh <- strings.TrimRight(line, "\r\n")
 		}()
 
-		continueIdle := false
-
 		select {
 		case changed := <-c.idleCh:
-			// Immediately mark as non-idle so any notifications that arrive
-			// while we wait for the reader goroutine go to pendingSubs instead
-			// of being sent to idleCh (which nobody reads from here).
-			c.idleMu.Lock()
-			c.idling = false
-			c.idleMu.Unlock()
+			c.writeIdleChanges(changed)
 
-			// Deduplicate subsystems
-			seen := map[string]bool{}
-			for _, s := range changed {
-				if !seen[s] {
-					seen[s] = true
-					c.writef("changed: %s\n", s)
-				}
-			}
-			c.writeLine("OK")
-			c.flush()
-			// Wait for the reader goroutine to finish — it may have already
-			// consumed the next line from the connection.
+			// The reader goroutine owns the socket read while idle is active.
+			// If it consumed the client's next command, route that line through
+			// the same dispatcher as the main serve loop so command lists,
+			// close, and agent registration keep their normal semantics.
 			nextLine := <-lineCh
-			if nextLine != "" && nextLine != "noidle" {
-				cmd, args := parseCommand(nextLine)
-				if cmd == "idle" {
-					// Instead of recursing, loop with new subs
-					subs = args
-					continueIdle = true
-				} else if err := c.dispatch(cmd, args); err != nil {
-					c.writeACK(err)
-					c.flush()
-				} else {
-					c.writeLine("OK")
-					c.flush()
-				}
+			if nextLine == "" || nextLine == "noidle" {
+				return nextLine != ""
 			}
+			cmd, args := parseCommand(nextLine)
+			if cmd == "idle" {
+				subs = args
+				continue
+			}
+			return c.handleLine(nextLine)
 
 		case line := <-lineCh:
-			c.idleMu.Lock()
-			c.idling = false
-			c.idleMu.Unlock()
-
+			c.endIdleWithOK()
 			if line == "" {
-				return // connection closed
+				return false
 			}
 			if line == "noidle" {
-				c.writeLine("OK")
-				c.flush()
-				return
+				return true
 			}
-			// Client sent a real command instead of noidle — handle it
-			c.writeLine("OK") // end idle with no changes
-			cmd, args := parseCommand(line)
-			if err := c.dispatch(cmd, args); err != nil {
-				c.writeACK(err)
-			} else {
-				c.writeLine("OK")
-			}
-			c.flush()
-		}
-
-		if !continueIdle {
-			return
+			return c.handleLine(line)
 		}
 	}
+}
+
+func (c *mpdConn) beginIdle(subs []string) []string {
+	c.idleMu.Lock()
+	defer c.idleMu.Unlock()
+
+	var pendingMatch []string
+	if len(c.pendingSubs) > 0 {
+		watchAll := len(subs) == 0
+		for s := range c.pendingSubs {
+			if watchAll {
+				pendingMatch = append(pendingMatch, s)
+				continue
+			}
+			for _, sub := range subs {
+				if s == sub {
+					pendingMatch = append(pendingMatch, s)
+					break
+				}
+			}
+		}
+		if len(pendingMatch) > 0 {
+			c.pendingSubs = nil
+		}
+	}
+
+	c.idling = true
+	c.idleSubs = make(map[string]struct{}, len(subs))
+	for _, s := range subs {
+		c.idleSubs[s] = struct{}{}
+	}
+	c.idleCh = make(chan []string, 1)
+	return pendingMatch
 }
 
 // ---------------------------------------------------------------------------
