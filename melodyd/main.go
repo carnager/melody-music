@@ -235,12 +235,17 @@ func main() {
 	go func() {
 		<-sigCh
 		logger.Println("shutting down...")
-		a.savePlayState()
-		a.devicesMu.Lock()
-		for _, at := range a.agentTargets {
-			at.close()
+		done := make(chan struct{})
+		go func() {
+			a.savePlayState()
+			a.closePlaybackTargets()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(750 * time.Millisecond):
+			logger.Println("shutdown cleanup timed out")
 		}
-		a.devicesMu.Unlock()
 		os.Exit(0)
 	}()
 
@@ -1402,6 +1407,26 @@ func (a *app) savePlayState() {
 	_ = os.WriteFile(a.paths.PlayStateFile, data, 0o644)
 }
 
+func (a *app) closePlaybackTargets() {
+	a.devicesMu.RLock()
+	agents := make([]*agentTarget, 0, len(a.agentTargets))
+	for _, at := range a.agentTargets {
+		agents = append(agents, at)
+	}
+	casts := make([]*castTarget, 0, len(a.castTargets))
+	for _, ct := range a.castTargets {
+		casts = append(casts, ct)
+	}
+	a.devicesMu.RUnlock()
+
+	for _, at := range agents {
+		at.close()
+	}
+	for _, ct := range casts {
+		ct.close()
+	}
+}
+
 // restorePlayStatePos reads saved play state and sets curQueuePos.
 // Called before syncTarget during startup.
 func (a *app) restorePlayStatePos() {
@@ -1492,9 +1517,10 @@ func (a *app) handleStream(w http.ResponseWriter, r *http.Request) {
 	format := r.URL.Query().Get("format")
 	maxBitrate := intFromAny(r.URL.Query().Get("max_bitrate"), 0)
 	startTime, _ := strconv.ParseFloat(r.URL.Query().Get("start"), 64)
+	volume := clampVolume(floatFromAny(r.URL.Query().Get("volume"), 100))
 
 	if format != "" || maxBitrate > 0 {
-		a.streamTranscoded(w, r, idStr, path, format, maxBitrate, startTime)
+		a.streamTranscoded(w, r, idStr, path, format, maxBitrate, startTime, volume)
 		return
 	}
 
@@ -1554,15 +1580,16 @@ func transcodeContentType(format string) string {
 	}
 }
 
-func (a *app) streamTranscoded(w http.ResponseWriter, r *http.Request, songID, path, format string, maxBitrate int, startTime float64) {
+func (a *app) streamTranscoded(w http.ResponseWriter, r *http.Request, songID, path, format string, maxBitrate int, startTime, volume float64) {
 	if format == "" {
 		format = "mp3"
 	}
+	volume = clampVolume(volume)
 
 	cachePath := a.transcodeCachePath(songID, format, maxBitrate)
 
 	// Serve from cache if available and fresh (only for full-file requests)
-	if startTime == 0 {
+	if startTime == 0 && volume == 100 {
 		if cInfo, err := os.Stat(cachePath); err == nil {
 			if sInfo, err := os.Stat(path); err == nil && !sInfo.ModTime().After(cInfo.ModTime()) {
 				w.Header().Set("Content-Type", transcodeContentType(format))
@@ -1594,6 +1621,9 @@ func (a *app) streamTranscoded(w http.ResponseWriter, r *http.Request, songID, p
 	if maxBitrate > 0 {
 		args = append(args, "-b:a", strconv.Itoa(maxBitrate*1000))
 	}
+	if volume != 100 {
+		args = append(args, "-filter:a", fmt.Sprintf("volume=%.3f", volume/100))
+	}
 	args = append(args, "pipe:1")
 
 	cmd := exec.Command("ffmpeg", args...)
@@ -1614,7 +1644,7 @@ func (a *app) streamTranscoded(w http.ResponseWriter, r *http.Request, songID, p
 
 	// Tee to cache file for full-file requests (skip cache for offset seeks)
 	tmpFile, tmpErr := os.CreateTemp(a.paths.TranscodeCacheDir, "transcode_*.tmp")
-	if tmpErr == nil && startTime == 0 {
+	if tmpErr == nil && startTime == 0 && volume == 100 {
 		reader := io.TeeReader(stdout, tmpFile)
 		io.Copy(w, reader)
 		tmpFile.Close()
@@ -1914,6 +1944,32 @@ func intFromAny(value any, fallback int) int {
 
 func boolFromAny(value any, fallback bool) bool {
 	return shared.BoolFromAny(value, fallback)
+}
+
+func floatFromAny(value any, fallback float64) float64 {
+	switch v := value.(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int:
+		return float64(v)
+	case string:
+		if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
+			return f
+		}
+	}
+	return fallback
+}
+
+func clampVolume(volume float64) float64 {
+	if volume < 0 {
+		return 0
+	}
+	if volume > 100 {
+		return 100
+	}
+	return volume
 }
 
 func splitAndTrim(value, sep string) []string {

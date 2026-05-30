@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -274,9 +275,6 @@ func (t *castTarget) getProperty(name string) (any, error) {
 		defer t.mu.Unlock()
 		return t.duration, nil
 	case "volume":
-		if err := t.refreshStatus(); err != nil {
-			return nil, err
-		}
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		return t.volume, nil
@@ -318,19 +316,7 @@ func (t *castTarget) setProperty(name string, value any) error {
 		if !ok {
 			return fmt.Errorf("invalid volume value")
 		}
-		if vol < 0 {
-			vol = 0
-		}
-		if vol > 100 {
-			vol = 100
-		}
-		err := t.device.SetVolume(float32(vol / 100))
-		if err == nil {
-			t.mu.Lock()
-			t.volume = vol
-			t.mu.Unlock()
-		}
-		return err
+		return t.setSoftwareVolume(vol)
 	case "replaygain":
 		return nil
 	default:
@@ -380,7 +366,7 @@ func (t *castTarget) loadURL(url, mimeType string, startTime float64) error {
 	if startTime < 0 {
 		startTime = 0
 	}
-	return t.device.Load(url, int(startTime+0.5), mimeType, false, true, true)
+	return t.device.Load(t.urlWithVolume(url), int(startTime+0.5), mimeType, false, true, true)
 }
 
 func (t *castTarget) contentType() string {
@@ -403,6 +389,83 @@ func (t *castTarget) stop() error {
 	return err
 }
 
+func (t *castTarget) setSoftwareVolume(volume float64) error {
+	volume = clampVolume(volume)
+
+	t.mu.Lock()
+	t.volume = volume
+	current := t.current
+	timePos := t.timePos
+	paused := t.paused
+	t.mu.Unlock()
+
+	if current == "" {
+		return nil
+	}
+	if err := t.refreshStatus(); err == nil {
+		t.mu.Lock()
+		timePos = t.timePos
+		paused = t.paused
+		t.mu.Unlock()
+	}
+	if err := t.ensureConnected(); err != nil {
+		return err
+	}
+	if err := t.loadURL(current, t.contentType(), timePos); err != nil {
+		return err
+	}
+	if paused {
+		err := t.device.Pause()
+		if isCastNoMediaError(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (t *castTarget) urlWithVolume(raw string) string {
+	t.mu.Lock()
+	volume := t.volume
+	t.mu.Unlock()
+	if volume == 100 {
+		return raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	q := u.Query()
+	q.Set("volume", strconv.FormatFloat(volume, 'f', 3, 64))
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+func (t *castTarget) close() {
+	t.mu.Lock()
+	t.monitorID++
+	t.current = ""
+	t.paused = true
+	dev := t.device
+	t.device = nil
+	t.mu.Unlock()
+	if dev == nil {
+		return
+	}
+	_ = dev.StopMedia()
+	_ = dev.Close(false)
+}
+
+func (t *castTarget) resetConnection() {
+	t.mu.Lock()
+	dev := t.device
+	t.device = nil
+	t.mu.Unlock()
+	if dev != nil {
+		_ = dev.Close(false)
+	}
+}
+
 func isCastNoMediaError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "media not yet initialised")
 }
@@ -412,15 +475,11 @@ func (t *castTarget) refreshStatus() error {
 		return err
 	}
 	if err := t.device.Update(); err != nil {
+		t.resetConnection()
 		return err
 	}
-	_, media, volume := t.device.Status()
+	_, media, _ := t.device.Status()
 	t.applyMediaStatus(media)
-	if volume != nil {
-		t.mu.Lock()
-		t.volume = float64(volume.Level) * 100
-		t.mu.Unlock()
-	}
 	return nil
 }
 
@@ -432,9 +491,6 @@ func (t *castTarget) applyMediaStatus(st *cast.Media) (state, idle string) {
 	t.timePos = float64(st.CurrentTime)
 	t.duration = float64(st.Media.Duration)
 	t.paused = st.PlayerState != "PLAYING" && st.PlayerState != "BUFFERING"
-	if st.Volume.Level > 0 {
-		t.volume = float64(st.Volume.Level) * 100
-	}
 	t.mu.Unlock()
 	return st.PlayerState, st.IdleReason
 }
@@ -444,6 +500,7 @@ func (t *castTarget) monitorPlayback(id int) {
 	defer ticker.Stop()
 	wasPlaying := false
 	lastState := ""
+	statusFailures := 0
 	for range ticker.C {
 		t.mu.Lock()
 		active := id == t.monitorID
@@ -457,8 +514,15 @@ func (t *castTarget) monitorPlayback(id int) {
 		}
 		if err := t.device.Update(); err != nil {
 			t.app.logger.Printf("cast %s: status poll failed: %v", t.name, err)
+			statusFailures++
+			if statusFailures >= 3 {
+				t.app.logger.Printf("cast %s: resetting control connection after repeated status failures", t.name)
+				t.resetConnection()
+				statusFailures = 0
+			}
 			continue
 		}
+		statusFailures = 0
 		_, media, _ := t.device.Status()
 		state, idle := t.applyMediaStatus(media)
 		stateLog := state

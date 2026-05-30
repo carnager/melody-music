@@ -10,6 +10,12 @@
 ### Improvements
 
 - Add `chromecast.format` config for choosing MP3 or FLAC Cast streams.
+- Add TUI +/- hotkeys for MPD software volume changes.
+
+### Bug Fixes
+
+- Avoid slow Cast status calls blocking Ctrl+C shutdown.
+- Recover Chromecast control connections after repeated status poll timeouts.
 
 ## 1.1 (2026-05-30)
 

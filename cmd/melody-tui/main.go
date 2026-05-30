@@ -343,9 +343,9 @@ func mpdFilterEq(tag, value string) string {
 }
 
 var mpd *mpdClient
-var fetchConn *mpdClient // dedicated connection for album art, lyrics, etc.
-var idleConn *mpdClient  // dedicated connection for MPD idle
-var lastQueueVersion int // tracks MPD playlist version to skip redundant queue fetches
+var fetchConn *mpdClient   // dedicated connection for album art, lyrics, etc.
+var idleConn *mpdClient    // dedicated connection for MPD idle
+var lastQueueVersion int   // tracks MPD playlist version to skip redundant queue fetches
 var forceQueueRefresh bool // set when ratings change to bypass version check
 
 // Track last transmitted art to avoid re-transmitting on every render
@@ -565,21 +565,21 @@ type model struct {
 	queue  []queueItem
 
 	// library
-	libMode      libView
-	libSortLatest bool
-	artists      []string
-	albums       []albumEntry
-	tracks       []trackEntry
-	curArtist          string
-	curAlbum           *albumEntry
-	albumRating        int
-	npAlbumRating      int // album rating for currently playing track
+	libMode             libView
+	libSortLatest       bool
+	artists             []string
+	albums              []albumEntry
+	tracks              []trackEntry
+	curArtist           string
+	curAlbum            *albumEntry
+	albumRating         int
+	npAlbumRating       int // album rating for currently playing track
 	albumComputedRating float64
-	libCursor    int
-	libOffset    int
-	libFiltering bool  // true when filter input is active
-	libFilter    string // fzf-style filter text
-	libFiltered  []int  // indices into the source list matching filter
+	libCursor           int
+	libOffset           int
+	libFiltering        bool   // true when filter input is active
+	libFilter           string // fzf-style filter text
+	libFiltered         []int  // indices into the source list matching filter
 	// saved positions for back navigation
 	savedArtistCursor int
 	savedArtistOffset int
@@ -597,9 +597,9 @@ type model struct {
 	queueVersion int // MPD playlist version, used to skip redundant queue fetches
 
 	// playlists
-	playlists        []playlistEntry
-	playlistTracks   []trackEntry
-	curPlaylist      string
+	playlists      []playlistEntry
+	playlistTracks []trackEntry
+	curPlaylist    string
 
 	// search
 	searching      bool
@@ -640,12 +640,12 @@ type model struct {
 	lyricsFile     string       // file URI whose lyrics are loaded
 
 	// go-to menu
-	showGoto      bool
-	gotoCursor    int
-	gotoArtist    string
+	showGoto        bool
+	gotoCursor      int
+	gotoArtist      string
 	gotoAlbumArtist string
-	gotoAlbum     string
-	gotoDate      string
+	gotoAlbum       string
+	gotoDate        string
 
 	// rating popup
 	showRating    bool
@@ -2147,6 +2147,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, mpdCommand("previous")
 	case "s":
 		return m, mpdCommand("stop")
+	case "+", "=":
+		return m, mpdCommand("volume +5")
+	case "-":
+		return m, mpdCommand("volume -5")
 	case "r":
 		return m, doRandomAlbum()
 	case "R":
@@ -4219,6 +4223,7 @@ func (m model) helpView() string {
 			"  >          Next track",
 			"  <          Previous track",
 			"  s          Stop",
+			"  +/-        Volume up/down",
 			"  r          Random album",
 			"  R          Random tracks",
 			"  u          Update library",

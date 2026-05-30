@@ -16,111 +16,111 @@ var commandTable map[string]func(*mpdConn, []string) *mpdError
 
 func init() {
 	commandTable = map[string]func(*mpdConn, []string) *mpdError{
-	// Status
-	"status":      cmdStatus,
-	"currentsong": cmdCurrentSong,
-	"stats":       cmdStats,
+		// Status
+		"status":      cmdStatus,
+		"currentsong": cmdCurrentSong,
+		"stats":       cmdStats,
 
-	// Playback control
-	"play":     cmdPlay,
-	"playid":   cmdPlayID,
-	"pause":    cmdPause,
-	"stop":     cmdStop,
-	"next":     cmdNext,
-	"previous": cmdPrevious,
-	"seekcur":  cmdSeekCur,
-	"seek":     cmdSeek,
-	"seekid":   cmdSeekID,
+		// Playback control
+		"play":     cmdPlay,
+		"playid":   cmdPlayID,
+		"pause":    cmdPause,
+		"stop":     cmdStop,
+		"next":     cmdNext,
+		"previous": cmdPrevious,
+		"seekcur":  cmdSeekCur,
+		"seek":     cmdSeek,
+		"seekid":   cmdSeekID,
 
-	// Queue
-	"playlistinfo":   cmdPlaylistInfo,
-	"playlistid":     cmdPlaylistID,
-	"plchanges":      cmdPlChanges,
-	"plchangesposid": cmdPlChangesPosID,
-	"add":            cmdAdd,
-	"addid":          cmdAddID,
-	"delete":         cmdDelete,
-	"deleteid":       cmdDeleteID,
-	"clear":          cmdClear,
-	"move":           cmdMove,
-	"moveid":         cmdMoveID,
-	"shuffle":        cmdShuffle,
-	"prio":           cmdPrio,
-	"prioid":         cmdPrioID,
-	"addidprio":      cmdAddIDPrio,
+		// Queue
+		"playlistinfo":   cmdPlaylistInfo,
+		"playlistid":     cmdPlaylistID,
+		"plchanges":      cmdPlChanges,
+		"plchangesposid": cmdPlChangesPosID,
+		"add":            cmdAdd,
+		"addid":          cmdAddID,
+		"delete":         cmdDelete,
+		"deleteid":       cmdDeleteID,
+		"clear":          cmdClear,
+		"move":           cmdMove,
+		"moveid":         cmdMoveID,
+		"shuffle":        cmdShuffle,
+		"prio":           cmdPrio,
+		"prioid":         cmdPrioID,
+		"addidprio":      cmdAddIDPrio,
 
-	// Database
-	"lsinfo":  cmdLsInfo,
-	"list":    cmdList,
-	"find":    cmdFind,
-	"search":  cmdSearch,
-	"count":   cmdCount,
-	"listall": cmdListAll,
-	"listallinfo": cmdListAllInfo,
-	"findadd":     cmdFindAdd,
-	"searchadd":   cmdSearchAdd,
+		// Database
+		"lsinfo":      cmdLsInfo,
+		"list":        cmdList,
+		"find":        cmdFind,
+		"search":      cmdSearch,
+		"count":       cmdCount,
+		"listall":     cmdListAll,
+		"listallinfo": cmdListAllInfo,
+		"findadd":     cmdFindAdd,
+		"searchadd":   cmdSearchAdd,
 
-	// Stored playlists
-	"listplaylists":     cmdListPlaylists,
-	"listplaylistinfo":  cmdListPlaylistInfo,
-	"load":              cmdLoad,
-	"save":              cmdSave,
-	"rm":                cmdRm,
-	"playlistadd":       cmdPlaylistAdd,
+		// Stored playlists
+		"listplaylists":    cmdListPlaylists,
+		"listplaylistinfo": cmdListPlaylistInfo,
+		"load":             cmdLoad,
+		"save":             cmdSave,
+		"rm":               cmdRm,
+		"playlistadd":      cmdPlaylistAdd,
 
-	// Outputs (devices)
-	"outputs":       cmdOutputs,
-	"enableoutput":  cmdEnableOutput,
-	"disableoutput": cmdDisableOutput,
+		// Outputs (devices)
+		"outputs":       cmdOutputs,
+		"enableoutput":  cmdEnableOutput,
+		"disableoutput": cmdDisableOutput,
 
-	// Volume
-	"setvol":   cmdSetVol,
-	"volume":   cmdVolume,
+		// Volume
+		"setvol": cmdSetVol,
+		"volume": cmdVolume,
 
-	// Options
-	"replay_gain_mode":   cmdReplayGainMode,
-	"replay_gain_status": cmdReplayGainStatus,
-	"repeat":             cmdRepeat,
-	"random":             cmdRandom,
-	"single":             cmdSingle,
-	"consume":            cmdConsume,
-	"crossfade":          cmdIgnore,
-	"trackended":         cmdTrackEnded,
+		// Options
+		"replay_gain_mode":   cmdReplayGainMode,
+		"replay_gain_status": cmdReplayGainStatus,
+		"repeat":             cmdRepeat,
+		"random":             cmdRandom,
+		"single":             cmdSingle,
+		"consume":            cmdConsume,
+		"crossfade":          cmdIgnore,
+		"trackended":         cmdTrackEnded,
 
-	// Ratings (custom extension)
-	"rate":           cmdRate,
-	"albumrate":      cmdAlbumRate,
-	"getrating":      cmdGetRating,
-	"getalbumrating": cmdGetAlbumRating,
+		// Ratings (custom extension)
+		"rate":           cmdRate,
+		"albumrate":      cmdAlbumRate,
+		"getrating":      cmdGetRating,
+		"getalbumrating": cmdGetAlbumRating,
 
-	// Web client
-	"web_register":   cmdWebRegister,
-	"web_unregister": cmdWebUnregister,
+		// Web client
+		"web_register":   cmdWebRegister,
+		"web_unregister": cmdWebUnregister,
 
-	// Cover art
-	"albumart":    cmdAlbumArt,
-	"readpicture": cmdReadPicture,
+		// Cover art
+		"albumart":    cmdAlbumArt,
+		"readpicture": cmdReadPicture,
 
-	// Lyrics
-	"readlyrics": cmdReadLyrics,
+		// Lyrics
+		"readlyrics": cmdReadLyrics,
 
-	// Connection
-	"ping":         cmdPing,
-	"commands":     cmdCommands,
-	"notcommands":  cmdNotCommands,
-	"tagtypes":     cmdTagTypes,
-	"decoders":     cmdDecoders,
-	"binarylimit":  cmdIgnore,
-	"password":     cmdIgnore,
-	"config":       cmdIgnore,
-	"urlhandlers":  cmdIgnore,
-	"protocols":    cmdIgnore,
-	"subscribe":    cmdIgnore,
-	"unsubscribe":  cmdIgnore,
-	"channels":     cmdChannels,
-	"readmessages": cmdEmpty,
-	"mixrampdb":    cmdIgnore,
-	"mixrampdelay": cmdIgnore,
+		// Connection
+		"ping":         cmdPing,
+		"commands":     cmdCommands,
+		"notcommands":  cmdNotCommands,
+		"tagtypes":     cmdTagTypes,
+		"decoders":     cmdDecoders,
+		"binarylimit":  cmdIgnore,
+		"password":     cmdIgnore,
+		"config":       cmdIgnore,
+		"urlhandlers":  cmdIgnore,
+		"protocols":    cmdIgnore,
+		"subscribe":    cmdIgnore,
+		"unsubscribe":  cmdIgnore,
+		"channels":     cmdChannels,
+		"readmessages": cmdEmpty,
+		"mixrampdb":    cmdIgnore,
+		"mixrampdelay": cmdIgnore,
 	}
 }
 
@@ -2072,7 +2072,7 @@ func cmdSetVol(c *mpdConn, args []string) *mpdError {
 		return mpdErr(errArg, "setvol", "invalid volume")
 	}
 	t := c.app.target()
-	if err := t.setProperty("volume", vol); err != nil {
+	if err := t.setProperty("volume", float64(vol)); err != nil {
 		return mpdErr(errSystem, "setvol", err.Error())
 	}
 	c.app.mpdHub.notify(SubMixer)
@@ -2097,7 +2097,7 @@ func cmdVolume(c *mpdConn, args []string) *mpdError {
 	if newVol > 100 {
 		newVol = 100
 	}
-	if err := t.setProperty("volume", newVol); err != nil {
+	if err := t.setProperty("volume", float64(newVol)); err != nil {
 		return mpdErr(errSystem, "volume", err.Error())
 	}
 	c.app.mpdHub.notify(SubMixer)
