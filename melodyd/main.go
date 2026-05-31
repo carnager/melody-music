@@ -301,10 +301,16 @@ func loadConfig() (config, paths, error) {
 
 func defaultDaemonConfig() string {
 	return `[server]
+name = ""
 bind_to_address = ["0.0.0.0:6701", "` + shared.DefaultSocketPath() + `"]
+api_secret = ""
+base_url = ""
+web_secret = ""
 
 [library]
 music_dir = ""
+embed_lyrics = false
+save_lrc = false
 
 [player]
 replaygain = ""
@@ -314,6 +320,9 @@ mpv_socket = ""
 
 [random]
 tracks = 20
+
+[mpd]
+port = 6600
 
 `
 }

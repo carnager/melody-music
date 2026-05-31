@@ -16,15 +16,62 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	_ "modernc.org/sqlite"
 )
 
+type config struct {
+	MelodyDB string `toml:"melody_db"`
+	LRCLibDB string `toml:"lrclib_db"`
+	NetEase  bool   `toml:"netease"`
+	DryRun   bool   `toml:"dry_run"`
+	Verbose  bool   `toml:"verbose"`
+}
+
+func loadConfig() config {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return config{}
+	}
+	xdgConfig := os.Getenv("XDG_CONFIG_HOME")
+	if xdgConfig == "" {
+		xdgConfig = filepath.Join(home, ".config")
+	}
+	configPath := filepath.Join(xdgConfig, "melody", "melody-lrcmatch.toml")
+	_ = os.MkdirAll(filepath.Dir(configPath), 0o755)
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		_ = os.WriteFile(configPath, []byte(defaultConfig()), 0o644)
+	}
+	var cfg config
+	_, _ = toml.DecodeFile(configPath, &cfg)
+	return cfg
+}
+
+func defaultConfig() string {
+	return `# Path to melodyd's SQLite database.
+melody_db = ""
+
+# Path to an lrclib SQLite dump. Optional when netease = true.
+lrclib_db = ""
+
+# Fetch missing lyrics from NetEase Cloud Music.
+netease = false
+
+# Print matches without writing .lrc files.
+dry_run = false
+
+# Show detailed NetEase matching diagnostics.
+verbose = false
+`
+}
+
 func main() {
-	melodyDB := flag.String("db", "", "path to melodyd's melody.db")
-	lrclibDB := flag.String("lrclib", "", "path to lrclib SQLite dump (optional with -netease)")
-	netease := flag.Bool("netease", false, "fetch missing lyrics from NetEase Cloud Music")
-	dryRun := flag.Bool("dry-run", false, "print matches without writing files")
-	verbose := flag.Bool("verbose", false, "show detailed match/mismatch info for NetEase queries")
+	cfg := loadConfig()
+	melodyDB := flag.String("db", cfg.MelodyDB, "path to melodyd's melody.db")
+	lrclibDB := flag.String("lrclib", cfg.LRCLibDB, "path to lrclib SQLite dump (optional with -netease)")
+	netease := flag.Bool("netease", cfg.NetEase, "fetch missing lyrics from NetEase Cloud Music")
+	dryRun := flag.Bool("dry-run", cfg.DryRun, "print matches without writing files")
+	verbose := flag.Bool("verbose", cfg.Verbose, "show detailed match/mismatch info for NetEase queries")
 	flag.Parse()
 
 	if *melodyDB == "" {

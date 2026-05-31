@@ -117,6 +117,195 @@ Enter your server address in the app settings.
 makepkg -si
 ```
 
+## Configuration Reference
+
+Melody follows XDG paths. Config files live under
+`$XDG_CONFIG_HOME/melody` or `~/.config/melody`; daemon state lives under
+`$XDG_DATA_HOME/melody` or `~/.local/share/melody`.
+
+### melodyd
+
+`melodyd` reads `~/.config/melody/melodyd.toml` and creates it on first
+start.
+
+```toml
+[server]
+name = ""
+bind_to_address = ["0.0.0.0:6701", "/run/user/1000/melody/melodyd.sock"]
+api_secret = ""
+base_url = ""
+web_secret = ""
+
+[library]
+music_dir = ""
+embed_lyrics = false
+save_lrc = false
+
+[player]
+replaygain = "" # "off", "track", "album", or empty
+volume = 100
+mpv_path = "mpv"
+mpv_socket = ""
+
+[random]
+tracks = 20
+
+[mpd]
+port = 6600
+```
+
+Notes:
+
+- `server.name` is the display name for the local server output. Empty uses the hostname.
+- `server.bind_to_address` accepts TCP addresses and Unix socket paths.
+- `MELODYD_BIND_TO_ADDRESS` overrides `server.bind_to_address` with a comma-separated list.
+- `server.base_url` should be set when clients need externally reachable stream URLs.
+- `player.mpv_socket = ""` lets Melody create a runtime socket automatically.
+- Go playback targets require `mpv` on the experimental mpv agent branch.
+
+Daemon state files:
+
+- `~/.local/share/melody/melody.db`
+- `~/.local/share/melody/playqueue.json`
+- `~/.local/share/melody/playstate.json`
+- `~/.local/share/melody/active_device`
+- `~/.local/share/melody/transcode_cache/`
+
+### melody-agent
+
+`melody-agent` reads `~/.config/melody/melody-agent.toml` and creates it on
+first start.
+
+```toml
+[agent]
+name = "living-room"
+master = "192.168.1.10:6600"
+music_dir = ""
+format = ""
+max_bitrate = 0
+
+[player]
+replaygain = "track"
+volume = 100
+mpv_path = "mpv"
+mpv_socket = ""
+```
+
+Notes:
+
+- `music_dir` enables direct file access when the agent can see the same library path.
+- Empty `music_dir` streams audio from the daemon.
+- `format` and `max_bitrate` advertise the agent's preferred stream/transcode format; empty/zero means original or unrestricted.
+- Go agents require `mpv` on the experimental mpv agent branch.
+
+### melody-tui
+
+`melody-tui` reads `~/.config/melody/melody-tui.toml` and creates it on first
+start.
+
+```toml
+mpd_host = "localhost"
+mpd_port = 6600
+```
+
+`MPD_HOST` and `MPD_PORT` override the config. `MPD_HOST` may include a port,
+for example `MPD_HOST=192.168.1.10:6600`.
+
+### melody-cli
+
+`melody-cli` reads `~/.config/melody/melody-cli.toml` and creates it on first
+start.
+
+```toml
+mpd_host = "localhost"
+mpd_port = 6600
+```
+
+`MPD_HOST` and `MPD_PORT` override the config. `melody-cli raw <command>`
+sends an arbitrary MPD command.
+
+Useful commands:
+
+```sh
+melody-cli current
+melody-cli lyrics
+melody-cli rate <songid> <rating>
+melody-cli albumrate <artist> <album> <date> <rating>
+melody-cli raw status
+```
+
+### melody-musiclist
+
+`melody-musiclist` reads `~/.config/melody/melody-musiclist.toml` and creates
+it on first start.
+
+```toml
+[mpd]
+host = "localhost"
+port = 6600
+
+[upload]
+host = "proteus"
+path = "/srv/http/list"
+
+[output]
+temp_file = "/tmp/musiclist.html"
+```
+
+### melody-lrcmatch
+
+`melody-lrcmatch` reads `~/.config/melody/melody-lrcmatch.toml` and creates
+it on first start. Command-line flags override the config.
+
+```toml
+melody_db = ""
+lrclib_db = ""
+netease = false
+dry_run = false
+verbose = false
+```
+
+The same options are available as flags:
+
+```sh
+melody-lrcmatch -db ~/.local/share/melody/melody.db \
+  -lrclib ~/lrclib.sqlite3 \
+  -netease \
+  -dry-run \
+  -verbose
+```
+
+- `-db`: path to Melody's SQLite database.
+- `-lrclib`: path to an lrclib SQLite dump.
+- `-netease`: fetch missing lyrics from NetEase Cloud Music.
+- `-dry-run`: print matches without writing files.
+- `-verbose`: show detailed match/mismatch information for NetEase queries.
+
+### Android App
+
+The Android app stores settings in app preferences:
+
+- Local server address, e.g. `192.168.1.10:6701`.
+- External server address, e.g. `https://music.example.com`.
+- Home WiFi SSID for automatic local/external server switching.
+- Device name.
+- Device secret.
+- Audio format: original, Opus, MP3, AAC, or FLAC.
+- Audio bitrate: max, 64k, 128k, 192k, 256k, or 320k.
+- ReplayGain mode: off, track, or album.
+- Resume on connect.
+
+Release signing reads properties from
+`$MELODY_ANDROID_SIGNING_PROPERTIES` or
+`~/.local/android/release-keys/melody.properties`:
+
+```properties
+MELODY_ANDROID_STORE_FILE=/path/to/keystore
+MELODY_ANDROID_STORE_PASSWORD=...
+MELODY_ANDROID_KEY_ALIAS=...
+MELODY_ANDROID_KEY_PASSWORD=...
+```
+
 ## Lyrics
 
 Melody supports synced and plain lyrics. When you view lyrics, the server checks for a `.lrc` sidecar file next to the audio file first, then embedded tags, and falls back to fetching from [lrclib.net](https://lrclib.net) (saving the result as a `.lrc` sidecar for next time).

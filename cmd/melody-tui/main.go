@@ -57,7 +57,7 @@ func loadTUIConfig() tuiConfig {
 	_ = os.MkdirAll(filepath.Dir(configPath), 0o755)
 
 	if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
-		_ = os.WriteFile(configPath, []byte("mpd_host = \"localhost\"\nmpd_port = 6600\n"), 0o644)
+		_ = os.WriteFile(configPath, []byte(defaultTUIConfig()), 0o644)
 	}
 
 	var c tuiConfig
@@ -72,6 +72,14 @@ func loadTUIConfig() tuiConfig {
 		c.MPDPort = 6600
 	}
 	return c
+}
+
+func defaultTUIConfig() string {
+	return `# MPD server exposed by melodyd.
+# MPD_HOST and MPD_PORT environment variables override these values.
+mpd_host = "localhost"
+mpd_port = 6600
+`
 }
 
 func applyMPDEnv(c *tuiConfig) {

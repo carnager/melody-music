@@ -25,6 +25,11 @@ func loadConfig() config {
 	}
 	configPath := filepath.Join(xdgConfig, "melody", "melody-cli.toml")
 
+	_ = os.MkdirAll(filepath.Dir(configPath), 0o755)
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		_ = os.WriteFile(configPath, []byte(defaultCLIConfig()), 0o644)
+	}
+
 	var c config
 	toml.DecodeFile(configPath, &c)
 	applyMPDEnv(&c)
@@ -35,6 +40,14 @@ func loadConfig() config {
 		c.MPDPort = 6600
 	}
 	return c
+}
+
+func defaultCLIConfig() string {
+	return `# MPD server exposed by melodyd.
+# MPD_HOST and MPD_PORT environment variables override these values.
+mpd_host = "localhost"
+mpd_port = 6600
+`
 }
 
 func applyMPDEnv(c *config) {
@@ -52,6 +65,7 @@ func applyMPDEnv(c *config) {
 }
 
 func main() {
+	cfg := loadConfig()
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "Usage: melody-cli <command> [args...]")
 		fmt.Fprintln(os.Stderr, "")
@@ -70,7 +84,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	cfg := loadConfig()
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", cfg.MPDHost, cfg.MPDPort), 3*time.Second)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: cannot connect to %s:%d: %v\n", cfg.MPDHost, cfg.MPDPort, err)
