@@ -105,6 +105,40 @@ func TestAgentPlaySendsNegativeNext(t *testing.T) {
 	}
 }
 
+func TestTranscodeSpecForSupportedFormats(t *testing.T) {
+	tests := []struct {
+		format      string
+		wantFormat  string
+		wantExt     string
+		contentType string
+	}{
+		{"", "mp3", "mp3", "audio/mpeg"},
+		{"mp3", "mp3", "mp3", "audio/mpeg"},
+		{"opus", "opus", "opus", "audio/opus"},
+		{"ogg", "ogg", "ogg", "audio/ogg"},
+		{"aac", "aac", "aac", "audio/aac"},
+		{"flac", "flac", "flac", "audio/flac"},
+		{"MP3", "mp3", "mp3", "audio/mpeg"},
+	}
+
+	for _, tt := range tests {
+		spec, ok := transcodeSpecFor(tt.format)
+		if !ok {
+			t.Fatalf("transcodeSpecFor(%q) unsupported", tt.format)
+		}
+		if spec.format != tt.wantFormat || spec.fileExt != tt.wantExt || spec.contentType != tt.contentType {
+			t.Fatalf("transcodeSpecFor(%q) = format=%q ext=%q content=%q, want %q/%q/%q",
+				tt.format, spec.format, spec.fileExt, spec.contentType, tt.wantFormat, tt.wantExt, tt.contentType)
+		}
+	}
+}
+
+func TestTranscodeSpecRejectsUnsupportedFormats(t *testing.T) {
+	if _, ok := transcodeSpecFor("wav"); ok {
+		t.Fatal("transcodeSpecFor(wav) supported unexpectedly")
+	}
+}
+
 func TestAgentFreshPropertyQueriesAgent(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
 	t.Cleanup(func() {

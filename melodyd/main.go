@@ -167,6 +167,7 @@ func main() {
 		prioReturnPos: -1,
 		mpdHub:        newNotifyHub(),
 	}
+	a.logConfigWarnings()
 
 	a.scanner.onScanComplete = func() {
 		db.invalidateCache()
@@ -347,6 +348,26 @@ func applyDefaults(cfg *config) {
 	}
 	if len(cfg.Server.BindToAddress) == 0 {
 		cfg.Server.BindToAddress = defaultBindToAddress()
+	}
+}
+
+func (a *app) logConfigWarnings() {
+	if strings.TrimSpace(a.cfg.Server.WebSecret) == "" {
+		a.logger.Printf("warning: server.web_secret is empty; /mpd, streams, cover art, and web API are unauthenticated")
+	}
+
+	if strings.TrimSpace(a.cfg.Server.BaseURL) == "" {
+		fallback := fallbackStreamBaseURL(a.cfg.Server.BindToAddress)
+		if fallback == "" {
+			fallback = "http://127.0.0.1:6701"
+		}
+		a.logger.Printf("warning: server.base_url is empty; remote stream URLs will fall back to %s (set base_url for VPN/reverse proxy clients)", fallback)
+		return
+	}
+
+	u, err := url.Parse(a.cfg.Server.BaseURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		a.logger.Printf("warning: server.base_url %q is not an absolute http(s) URL", a.cfg.Server.BaseURL)
 	}
 }
 
@@ -590,17 +611,7 @@ func (a *app) streamURLForActiveDevice(songID string) string {
 func (a *app) buildStreamURL(songID, format string, maxBitRate int) string {
 	baseURL := strings.TrimRight(a.cfg.Server.BaseURL, "/")
 	if baseURL == "" {
-		// Fall back to first TCP bind address
-		for _, bind := range a.cfg.Server.BindToAddress {
-			if !strings.Contains(bind, "/") { // Not a unix socket
-				host, port, _ := net.SplitHostPort(bind)
-				if host == "" || host == "0.0.0.0" {
-					host = outboundIP()
-				}
-				baseURL = "http://" + net.JoinHostPort(host, port)
-				break
-			}
-		}
+		baseURL = fallbackStreamBaseURL(a.cfg.Server.BindToAddress)
 	}
 	if baseURL == "" {
 		baseURL = "http://127.0.0.1:6701"
@@ -617,6 +628,23 @@ func (a *app) buildStreamURL(songID, format string, maxBitRate int) string {
 		u += "?" + params.Encode()
 	}
 	return u
+}
+
+func fallbackStreamBaseURL(bindAddresses []string) string {
+	for _, bind := range bindAddresses {
+		if strings.Contains(bind, "/") {
+			continue
+		}
+		host, port, err := net.SplitHostPort(bind)
+		if err != nil {
+			continue
+		}
+		if host == "" || host == "0.0.0.0" || host == "::" {
+			host = outboundIP()
+		}
+		return "http://" + net.JoinHostPort(host, port)
+	}
+	return ""
 }
 
 func (a *app) restoreActiveDevice() {
@@ -1462,6 +1490,10 @@ func (a *app) handleStream(w http.ResponseWriter, r *http.Request) {
 	format := r.URL.Query().Get("format")
 	maxBitrate := intFromAny(r.URL.Query().Get("max_bitrate"), 0)
 	startTime, _ := strconv.ParseFloat(r.URL.Query().Get("start"), 64)
+	if maxBitrate < 0 {
+		http.Error(w, "max_bitrate must be >= 0", http.StatusBadRequest)
+		return
+	}
 
 	if format != "" || maxBitrate > 0 {
 		a.streamTranscoded(w, r, idStr, path, format, maxBitrate, startTime)
@@ -1501,31 +1533,90 @@ func (a *app) handleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) transcodeCachePath(songID, format string, maxBitrate int) string {
-	ext := format
-	if ext == "" {
-		ext = "mp3"
-	}
+	ext := transcodeFileExt(format)
 	name := fmt.Sprintf("%s_%s_%d.%s", songID, ext, maxBitrate, ext)
 	return filepath.Join(a.paths.TranscodeCacheDir, name)
 }
 
 func transcodeContentType(format string) string {
-	switch format {
-	case "mp3":
-		return "audio/mpeg"
-	case "opus":
-		return "audio/opus"
-	case "ogg":
-		return "audio/ogg"
-	default:
+	spec, ok := transcodeSpecFor(format)
+	if !ok {
 		return "application/octet-stream"
 	}
+	return spec.contentType
+}
+
+type transcodeSpec struct {
+	format      string
+	fileExt     string
+	contentType string
+	args        []string
+}
+
+func normalizeTranscodeFormat(format string) string {
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format == "" {
+		return "mp3"
+	}
+	return format
+}
+
+func transcodeFileExt(format string) string {
+	spec, ok := transcodeSpecFor(format)
+	if !ok {
+		return normalizeTranscodeFormat(format)
+	}
+	return spec.fileExt
+}
+
+func transcodeSpecFor(format string) (transcodeSpec, bool) {
+	switch normalizeTranscodeFormat(format) {
+	case "mp3":
+		return transcodeSpec{
+			format:      "mp3",
+			fileExt:     "mp3",
+			contentType: "audio/mpeg",
+			args:        []string{"-f", "mp3", "-codec:a", "libmp3lame"},
+		}, true
+	case "opus":
+		return transcodeSpec{
+			format:      "opus",
+			fileExt:     "opus",
+			contentType: "audio/opus",
+			args:        []string{"-f", "opus", "-codec:a", "libopus"},
+		}, true
+	case "ogg":
+		return transcodeSpec{
+			format:      "ogg",
+			fileExt:     "ogg",
+			contentType: "audio/ogg",
+			args:        []string{"-f", "ogg", "-codec:a", "libvorbis"},
+		}, true
+	case "aac":
+		return transcodeSpec{
+			format:      "aac",
+			fileExt:     "aac",
+			contentType: "audio/aac",
+			args:        []string{"-f", "adts", "-codec:a", "aac"},
+		}, true
+	case "flac":
+		return transcodeSpec{
+			format:      "flac",
+			fileExt:     "flac",
+			contentType: "audio/flac",
+			args:        []string{"-f", "flac", "-codec:a", "flac"},
+		}, true
+	}
+	return transcodeSpec{}, false
 }
 
 func (a *app) streamTranscoded(w http.ResponseWriter, r *http.Request, songID, path, format string, maxBitrate int, startTime float64) {
-	if format == "" {
-		format = "mp3"
+	spec, ok := transcodeSpecFor(format)
+	if !ok {
+		http.Error(w, fmt.Sprintf("unsupported transcode format: %s", format), http.StatusBadRequest)
+		return
 	}
+	format = spec.format
 
 	cachePath := a.transcodeCachePath(songID, format, maxBitrate)
 
@@ -1547,16 +1638,7 @@ func (a *app) streamTranscoded(w http.ResponseWriter, r *http.Request, songID, p
 	} else {
 		args = []string{"-i", path, "-v", "quiet", "-vn"}
 	}
-	switch format {
-	case "mp3":
-		args = append(args, "-f", "mp3", "-codec:a", "libmp3lame")
-	case "opus":
-		args = append(args, "-f", "opus", "-codec:a", "libopus")
-	case "ogg":
-		args = append(args, "-f", "ogg", "-codec:a", "libvorbis")
-	default:
-		args = append(args, "-f", format)
-	}
+	args = append(args, spec.args...)
 	if maxBitrate > 0 {
 		args = append(args, "-b:a", strconv.Itoa(maxBitrate*1000))
 	}

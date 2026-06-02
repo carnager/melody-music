@@ -159,6 +159,7 @@ Notes:
 - `server.bind_to_address` accepts TCP addresses and Unix socket paths.
 - `MELODYD_BIND_TO_ADDRESS` overrides `server.bind_to_address` with a comma-separated list.
 - `server.base_url` should be set when clients need externally reachable stream URLs.
+- Remote stream transcoding accepts `mp3`, `opus`, `ogg`, `aac`, and `flac`.
 - `player.mpv_socket = ""` lets Melody create a runtime socket automatically.
 - Go playback targets require `mpv` on the experimental mpv agent branch.
 
