@@ -2439,7 +2439,6 @@ fun SettingsScreen(onDismiss: () -> Unit) {
     var format by remember { mutableStateOf(prefs.getString("audio_format", "") ?: "") }
     var bitrate by remember { mutableIntStateOf(prefs.getInt("audio_bitrate", 0)) }
     var replaygain by remember { mutableStateOf(prefs.getString("replaygain", "off") ?: "off") }
-    var deviceSecret by remember { mutableStateOf(prefs.getString("device_secret", "") ?: "") }
 
     // Dialog state
     var editingField by remember { mutableStateOf<String?>(null) }
@@ -2460,7 +2459,6 @@ fun SettingsScreen(onDismiss: () -> Unit) {
             .putString("audio_format", format)
             .putInt("audio_bitrate", bitrate)
             .putString("replaygain", replaygain)
-            .putString("device_secret", deviceSecret)
             .apply()
         MelodyApp.instance.applyServerForCurrentNetwork()
         if (agentChanged) {
@@ -2475,7 +2473,6 @@ fun SettingsScreen(onDismiss: () -> Unit) {
             "external_server" -> "External server address"
             "home_wifi_ssid" -> "Home WiFi SSID"
             "device_name" -> "Device name"
-            "device_secret" -> "Device secret"
             else -> ""
         }
         AlertDialog(
@@ -2524,7 +2521,6 @@ fun SettingsScreen(onDismiss: () -> Unit) {
                         "external_server" -> externalServer = editValue
                         "home_wifi_ssid" -> homeWifiSsid = editValue
                         "device_name" -> deviceName = editValue
-                        "device_secret" -> deviceSecret = editValue
                     }
                     editingField = null
                     saveAll()
@@ -2610,17 +2606,6 @@ fun SettingsScreen(onDismiss: () -> Unit) {
                         onClick = {
                             editValue = deviceName
                             editingField = "device_name"
-                        }
-                    )
-                }
-                item {
-                    SettingsTextItem(
-                        title = "Device secret",
-                        value = if (deviceSecret.isBlank()) "Not set" else "\u2022".repeat(deviceSecret.length.coerceAtMost(16)),
-                        subtitle = "Shared secret for authenticated communication",
-                        onClick = {
-                            editValue = deviceSecret
-                            editingField = "device_secret"
                         }
                     )
                 }

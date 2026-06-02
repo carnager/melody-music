@@ -36,7 +36,6 @@ type config struct {
 	Server struct {
 		Name          string   `toml:"name"` // display name for the local output device
 		BindToAddress []string `toml:"bind_to_address"`
-		APISecret     string   `toml:"api_secret"`
 		BaseURL       string   `toml:"base_url"` // externally reachable URL for stream URLs sent to remote devices
 		WebSecret     string   `toml:"web_secret"`
 	} `toml:"server"`
@@ -282,7 +281,6 @@ func loadConfig() (config, paths, error) {
 	random, _ := raw["random"].(map[string]any)
 	cfg.Server.Name = stringify(server["name"])
 	cfg.Server.BindToAddress = stringSlice(server["bind_to_address"])
-	cfg.Server.APISecret = stringify(server["api_secret"])
 	cfg.Server.BaseURL = stringify(server["base_url"])
 	cfg.Server.WebSecret = stringify(server["web_secret"])
 	cfg.Library.MusicDir = stringify(library["music_dir"])
@@ -303,7 +301,6 @@ func defaultDaemonConfig() string {
 	return `[server]
 name = ""
 bind_to_address = ["0.0.0.0:6701", "` + shared.DefaultSocketPath() + `"]
-api_secret = ""
 base_url = ""
 web_secret = ""
 
@@ -610,9 +607,6 @@ func (a *app) buildStreamURL(songID, format string, maxBitRate int) string {
 	}
 	u := baseURL + "/api/v1/stream/" + songID
 	params := url.Values{}
-	if a.cfg.Server.APISecret != "" {
-		params.Set("secret", a.cfg.Server.APISecret)
-	}
 	if format != "" {
 		params.Set("format", format)
 	}

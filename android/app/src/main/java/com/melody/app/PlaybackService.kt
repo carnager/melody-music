@@ -451,33 +451,53 @@ class PlaybackService : Service() {
         if (args.isEmpty()) return "ACK [2@0] {preload} missing queue position"
 
         val pos = args[0].toIntOrNull() ?: return "ACK [2@0] {preload} invalid position"
-        val q = queue
-        if (pos < 0 || pos >= q.size) return "ACK [50@0] {preload} position $pos out of range"
-
-        val item = q[pos]
-        val localPath = if (item.songId.isNotBlank()) MelodyApp.instance.offlineManager.getLocalPath(item.songId) else null
-        val url = localPath ?: resolveStreamUrl(item) ?: return "ACK [50@0] {preload} cannot resolve URL for position $pos"
 
         return withContext(Dispatchers.Main) {
             val p = player ?: return@withContext "ACK [56@0] {preload} player not initialized"
+            trimPlaylistToCurrent(p)
 
-            // Remove finished items before current and preloaded items after current
-            val cur = p.currentMediaItemIndex
-            // Remove items after current first
-            while (p.mediaItemCount > cur + 1) {
-                p.removeMediaItem(p.mediaItemCount - 1)
+            if (pos < 0) {
+                pendingNextPos = -1
+                return@withContext "OK"
             }
-            // Remove finished items before current
-            if (cur > 0) {
-                for (i in 0 until cur) {
-                    p.removeMediaItem(0)
-                }
-                offlineIndexes.clear()
-            }
+
+            val q = queue
+            if (pos >= q.size) return@withContext "ACK [50@0] {preload} position $pos out of range"
+
+            val item = q[pos]
+            val localPath = if (item.songId.isNotBlank()) MelodyApp.instance.offlineManager.getLocalPath(item.songId) else null
+            val url = localPath ?: resolveStreamUrl(item) ?: return@withContext "ACK [50@0] {preload} cannot resolve URL for position $pos"
 
             p.addMediaItem(mediaItemFor(item, url))
+            if (localPath != null) {
+                offlineIndexes.add(1)
+            }
+            pendingNextPos = pos
 
             "OK"
+        }
+    }
+
+    private fun trimPlaylistToCurrent(p: ExoPlayer) {
+        val cur = p.currentMediaItemIndex
+        if (p.mediaItemCount == 0 || cur < 0 || cur >= p.mediaItemCount) {
+            p.clearMediaItems()
+            offlineIndexes.clear()
+            return
+        }
+
+        while (p.mediaItemCount > cur + 1) {
+            p.removeMediaItem(p.mediaItemCount - 1)
+        }
+
+        val currentWasOffline = offlineIndexes.contains(cur)
+        repeat(cur) {
+            p.removeMediaItem(0)
+        }
+
+        offlineIndexes.clear()
+        if (currentWasOffline) {
+            offlineIndexes.add(0)
         }
     }
 

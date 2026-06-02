@@ -132,7 +132,6 @@ start.
 [server]
 name = ""
 bind_to_address = ["0.0.0.0:6701", "/run/user/1000/melody/melodyd.sock"]
-api_secret = ""
 base_url = ""
 web_secret = ""
 
@@ -289,7 +288,6 @@ The Android app stores settings in app preferences:
 - External server address, e.g. `https://music.example.com`.
 - Home WiFi SSID for automatic local/external server switching.
 - Device name.
-- Device secret.
 - Audio format: original, Opus, MP3, AAC, or FLAC.
 - Audio bitrate: max, 64k, 128k, 192k, 256k, or 320k.
 - ReplayGain mode: off, track, or album.
