@@ -56,6 +56,8 @@ class PlaybackService : Service() {
 
     @Volatile var codecInfo: String = ""
         private set
+    @Volatile private var streamFormat: String = ""
+    @Volatile private var streamBitrate: Int = 0
     @Volatile private var replaygainMode: String = "off"
     @Volatile private var rgTrackGain: Double = 0.0
     @Volatile private var rgAlbumGain: Double = 0.0
@@ -172,6 +174,8 @@ class PlaybackService : Service() {
                 ?: "android-${android.os.Build.MODEL}".replace(" ", "-").lowercase()
             val format = prefs.getString("audio_format", "") ?: ""
             val bitrate = prefs.getInt("audio_bitrate", 0)
+            streamFormat = format
+            streamBitrate = bitrate
 
             connectAgentLoop(name, format, bitrate)
         }
@@ -677,7 +681,7 @@ class PlaybackService : Service() {
 
         // Build HTTP stream URL
         val mpd = MelodyApp.instance.mpd
-        return "${mpd.httpBaseUrl}/stream/${item.songId}"
+        return mpd.streamUrl(item.songId, streamFormat.ifBlank { null }, streamBitrate)
     }
 
     private fun mediaItemFor(item: QueueEntry, url: String): MediaItem {

@@ -81,13 +81,28 @@ class MainViewModel : ViewModel() {
     private var pollJob: Job? = null
     private var playbackPollJob: Job? = null
     private var lastPlaylistVersion = 0
+    private val mpdClientChangedHandler: (MpdClient) -> Unit = {
+        attachMpdCallbacks()
+        viewModelScope.launch {
+            refresh(forceQueue = true)
+            loadDevicesNow()
+        }
+    }
 
     init {
         downloadedAlbums = offline.getDownloadedAlbumIds()
+        MelodyApp.instance.onMpdClientChanged = mpdClientChangedHandler
         startPolling()
-        startIdle()
+        attachMpdCallbacks()
         loadArtists()
         loadDevices()
+    }
+
+    override fun onCleared() {
+        if (MelodyApp.instance.onMpdClientChanged === mpdClientChangedHandler) {
+            MelodyApp.instance.onMpdClientChanged = null
+        }
+        super.onCleared()
     }
 
     private fun startPolling() {
@@ -102,8 +117,9 @@ class MainViewModel : ViewModel() {
 
     private var idleRefreshJob: Job? = null
 
-    private fun startIdle() {
-        mpd.onIdleNotification = { changed ->
+    private fun attachMpdCallbacks() {
+        val client = mpd
+        client.onIdleNotification = { changed ->
             if (idleRefreshJob?.isActive != true) {
                 idleRefreshJob = viewModelScope.launch { refresh(forceQueue = "rating" in changed) }
             }
@@ -111,22 +127,25 @@ class MainViewModel : ViewModel() {
                 viewModelScope.launch { loadDevices() }
             }
         }
-        mpd.onReconnected = {
+        client.onReconnected = {
             isConnected = true
             viewModelScope.launch {
                 refresh(forceQueue = true)
-                loadDevices()
+                loadDevicesNow()
             }
         }
-        mpd.startIdle()
+        client.startIdle()
     }
 
     fun onForeground() {
         viewModelScope.launch {
+            MelodyApp.instance.applyServerForCurrentNetwork()
+            attachMpdCallbacks()
             if (!mpd.connected) {
                 mpd.reconnectNow()
             }
             refresh(forceQueue = true)
+            loadDevicesNow()
         }
     }
 
@@ -684,14 +703,30 @@ class MainViewModel : ViewModel() {
 
     fun loadDevices() {
         viewModelScope.launch {
-            try {
-                val newDevices = mpd.getOutputs()
-                if (newDevices.isNotEmpty()) {
-                    devices = newDevices
+            loadDevicesNow()
+        }
+    }
+
+    private suspend fun loadDevicesNow() {
+        try {
+            val newDevices = mpd.getOutputs()
+            devices = newDevices
+            isConnected = true
+            android.util.Log.d("MainViewModel", "loadDevices: ${devices.size} devices: ${devices.map { "${it.name}(${it.type})" }}")
+        } catch (e: Exception) {
+            isConnected = mpd.connected
+            android.util.Log.e("MainViewModel", "loadDevices failed: ${e.message}")
+            if (devices.isEmpty()) {
+                try {
+                    mpd.reconnectNow()
+                    val retryDevices = mpd.getOutputs()
+                    devices = retryDevices
+                    isConnected = true
+                    android.util.Log.d("MainViewModel", "loadDevices retry: ${devices.size} devices")
+                } catch (retry: Exception) {
+                    isConnected = mpd.connected
+                    android.util.Log.e("MainViewModel", "loadDevices retry failed: ${retry.message}")
                 }
-                android.util.Log.d("MainViewModel", "loadDevices: ${devices.size} devices: ${devices.map { "${it.name}(${it.type})" }}")
-            } catch (e: Exception) {
-                android.util.Log.e("MainViewModel", "loadDevices failed: ${e.message}")
             }
         }
     }

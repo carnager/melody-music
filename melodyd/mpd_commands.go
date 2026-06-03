@@ -1937,6 +1937,12 @@ func cmdOutputs(c *mpdConn, args []string) *mpdError {
 		c.writeKV("outputname", dev.Name)
 		c.writeKV("outputenabled", enabled)
 		c.writeKV("plugin", dev.Type)
+		if dev.Format != "" {
+			c.writeKV("outputformat", dev.Format)
+		}
+		if dev.MaxBitRate > 0 {
+			c.writeKV("outputmaxbitrate", dev.MaxBitRate)
+		}
 	}
 	return nil
 }

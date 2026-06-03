@@ -20,6 +20,7 @@ class MelodyApp : Application() {
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private val handler = Handler(Looper.getMainLooper())
     private var pendingNetworkApply: Runnable? = null
+    var onMpdClientChanged: ((MpdClient) -> Unit)? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -52,6 +53,7 @@ class MelodyApp : Application() {
                 android.util.Log.d("MelodyApp", "Switching MPD: ${schemeName(oldSSL)}://$oldHost:$oldPort -> ${schemeName(addr.ssl)}://${addr.host}:${addr.port}")
                 mpd.disconnect()
                 mpd = MpdClient(addr.host, addr.port, addr.ssl)
+                onMpdClientChanged?.invoke(mpd)
                 if (addr.host.isNotBlank()) mpd.connect()
                 PlaybackService.instance?.reconnect()
             }

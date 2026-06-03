@@ -2240,6 +2240,9 @@ fun PlaylistTrackList(vm: MainViewModel) {
 @Composable
 fun DevicesSheet(vm: MainViewModel, onDismiss: () -> Unit) {
     val sheetState = rememberModalBottomSheetState()
+    LaunchedEffect(Unit) {
+        vm.loadDevices()
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
