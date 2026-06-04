@@ -2,12 +2,36 @@
 
 ## Unreleased
 
+## 1.2.0 (2026-06-04)
+
+### Breaking Changes
+
+- Go playback targets now require `mpv`; `melodyd`'s local agent and `melody-agent` use an mpv JSON IPC subprocess instead of the built-in Go decoder stack.
+
+### Features
+
+- Add mpv-backed two-slot playback for Go agents with gapless preloading, ReplayGain via mpv, seek, volume, and clear-preload support.
+- Add configurable mpv path/socket settings to generated `melodyd` and `melody-agent` configs.
+- Add complete generated config files and README documentation for all server, agent, player, Android, TUI, CLI, and lyrics matcher options.
+- Add Android support for clearing stale preloaded tracks.
+
 ### Bug Fixes
 
 - Fix MPD idle handling after playlist changes so clients can safely send command lists immediately after an idle notification.
 - Fix MPD `setvol` and relative `volume` commands not updating active playback targets.
 - Fix Android server recovery when WiFi SSID reporting is temporarily unavailable.
+- Fix Android playback ignoring selected remote stream format/bitrate settings.
+- Fix Android device discovery recovery after WiFi/mobile server switches.
+- Fix device handoff preserving playback position with mpv-backed agents.
+- Fix mpv subprocess cleanup when an agent exits.
+- Fix remote stream transcoding to reject unsupported formats instead of passing arbitrary values to ffmpeg.
 - Show the TUI volume hotkeys in the help screen.
+
+### Improvements
+
+- Remove unused/fake API and Android device secret settings.
+- Warn at startup when `server.web_secret` is empty or `server.base_url` is missing/invalid.
+- Expose agent stream format and bitrate in MPD `outputs`.
 
 ## 1.1.1 (2026-05-30)
 
