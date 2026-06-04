@@ -367,6 +367,12 @@ func resetArtTransmission() {
 	artTxRows = 0
 }
 
+func tuiDebugf(format string, args ...any) {
+	if os.Getenv("MELODY_TUI_DEBUG") == "1" {
+		fmt.Fprintf(os.Stderr, "melody-tui: "+format+"\n", args...)
+	}
+}
+
 func reconnectMPD() {
 	if mpd != nil {
 		mpd.close()
@@ -517,6 +523,7 @@ type albumArtMsg struct {
 	data []byte
 	file string
 	w, h int
+	err  string
 }
 
 type artTransmittedMsg struct{}
@@ -1049,17 +1056,20 @@ func fetchGotoMeta(file string) tea.Cmd {
 func fetchAlbumArt(file string) tea.Cmd {
 	return func() tea.Msg {
 		if fetchConn == nil || file == "" {
-			return albumArtMsg{}
+			return albumArtMsg{file: file, err: "no fetch connection or empty file"}
 		}
 		data, err := fetchConn.cmdBinary(fmt.Sprintf(`albumart "%s"`, file))
-		if err != nil || len(data) == 0 {
-			return albumArtMsg{}
+		if err != nil {
+			return albumArtMsg{file: file, err: err.Error()}
+		}
+		if len(data) == 0 {
+			return albumArtMsg{file: file, err: "empty albumart response"}
 		}
 		// Decode to get dimensions
 		r := bytes.NewReader(data)
 		cfg, _, err := image.DecodeConfig(r)
 		if err != nil {
-			return albumArtMsg{data: data, file: file, w: 300, h: 300}
+			return albumArtMsg{data: data, file: file, w: 300, h: 300, err: "decode config: " + err.Error()}
 		}
 		return albumArtMsg{data: data, file: file, w: cfg.Width, h: cfg.Height}
 	}
@@ -1861,14 +1871,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case albumArtMsg:
-		m.artFile = msg.file
-		m.artW = msg.w
-		m.artH = msg.h
 		resetArtTransmission()
 		if len(msg.data) > 0 {
 			m.artData = msg.data
-			m.artRGBA, m.artW, m.artH = prepareArtRGBA(msg.data, m.npAlbumRating)
+			rgba, w, h := prepareArtRGBA(msg.data, m.npAlbumRating)
+			if len(rgba) == 0 {
+				tuiDebugf("albumart decode failed file=%q bytes=%d err=%q", msg.file, len(msg.data), msg.err)
+				m.artFile = ""
+				m.artData = nil
+				m.artRGBA = nil
+				return m, nil
+			}
+			m.artFile = msg.file
+			m.artW = w
+			m.artH = h
+			m.artRGBA = rgba
+			tuiDebugf("albumart loaded file=%q bytes=%d size=%dx%d", msg.file, len(msg.data), m.artW, m.artH)
 		} else {
+			tuiDebugf("albumart empty file=%q err=%q", msg.file, msg.err)
+			m.artFile = ""
 			m.artData = nil
 			m.artRGBA = nil
 		}
@@ -5208,6 +5229,42 @@ func scrollOffset(cursor, offset, visible, total int) int {
 	return o
 }
 
+func debugCoverFetch() error {
+	c, err := newMPDClient(cfg.MPDHost, cfg.MPDPort)
+	if err != nil {
+		return err
+	}
+	defer c.close()
+
+	results, err := c.cmdBatch([]string{"currentsong"})
+	if err != nil {
+		return err
+	}
+	if len(results) == 0 {
+		return fmt.Errorf("empty currentsong response")
+	}
+	file := parseKV(results[0])["file"]
+	if file == "" {
+		return fmt.Errorf("currentsong has no file")
+	}
+
+	data, err := c.cmdBinary(fmt.Sprintf(`albumart "%s"`, file))
+	if err != nil {
+		return err
+	}
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("decode config: %w (bytes=%d file=%q)", err, len(data), file)
+	}
+	rgba, w, h := prepareArtRGBA(data, 0)
+	if len(rgba) == 0 {
+		return fmt.Errorf("prepare RGBA failed (bytes=%d file=%q)", len(data), file)
+	}
+	fmt.Printf("file=%s\nbytes=%d\nformat=%s\nsource_size=%dx%d\nrgba_size=%dx%d\ncompressed_rgba=%d\n",
+		file, len(data), format, cfg.Width, cfg.Height, w, h, len(rgba))
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -5215,10 +5272,22 @@ func scrollOffset(cursor, offset, visible, total int) int {
 func main() {
 	cfg = loadTUIConfig()
 
+	if os.Getenv("MELODY_TUI_DEBUG_COVER") == "1" {
+		if err := debugCoverFetch(); err != nil {
+			fmt.Fprintf(os.Stderr, "cover debug: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	mpd, _ = newMPDClient(cfg.MPDHost, cfg.MPDPort)
+	fetchConn, _ = newMPDClient(cfg.MPDHost, cfg.MPDPort)
 	defer func() {
 		if mpd != nil {
 			mpd.close()
+		}
+		if fetchConn != nil {
+			fetchConn.close()
 		}
 	}()
 
