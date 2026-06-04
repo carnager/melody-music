@@ -361,6 +361,12 @@ var artTxFile string
 var artTxCols, artTxRows int
 var statusFetchTime time.Time // when status was last fetched (for elapsed interpolation)
 
+func resetArtTransmission() {
+	artTxFile = ""
+	artTxCols = 0
+	artTxRows = 0
+}
+
 func reconnectMPD() {
 	if mpd != nil {
 		mpd.close()
@@ -1858,9 +1864,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.artFile = msg.file
 		m.artW = msg.w
 		m.artH = msg.h
-		artTxFile = ""
-		artTxCols = 0
-		artTxRows = 0
+		resetArtTransmission()
 		if len(msg.data) > 0 {
 			m.artData = msg.data
 			m.artRGBA, m.artW, m.artH = prepareArtRGBA(msg.data, m.npAlbumRating)
@@ -1887,6 +1891,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.libFiltering = false
 		m.libFilter = ""
 		m.libFiltered = nil
+		resetArtTransmission()
 		return m, tea.ClearScreen
 
 	case tracksMsg:
@@ -1897,6 +1902,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.libFiltering = false
 		m.libFilter = ""
 		m.libFiltered = nil
+		resetArtTransmission()
 		return m, tea.ClearScreen
 
 	case trackInfoMsg:
@@ -1924,9 +1930,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.npAlbumRating = msg.rating
 		// Re-prepare art with updated rating burned in
 		if m.artData != nil {
-			artTxFile = ""
-			artTxCols = 0
-			artTxRows = 0
+			resetArtTransmission()
 			m.artRGBA, m.artW, m.artH = prepareArtRGBA(m.artData, m.npAlbumRating)
 		}
 		return m, nil
@@ -1944,9 +1948,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if isNP {
 			m.npAlbumRating = msg.rating
 			if m.artData != nil {
-				artTxFile = ""
-				artTxCols = 0
-				artTxRows = 0
+				resetArtTransmission()
 				m.artRGBA, m.artW, m.artH = prepareArtRGBA(m.artData, m.npAlbumRating)
 			}
 		}
@@ -1988,6 +1990,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.libFiltering = false
 		m.libFilter = ""
 		m.libFiltered = nil
+		resetArtTransmission()
 		return m, tea.ClearScreen
 
 	case playlistTracksMsg:
@@ -1998,6 +2001,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.libFiltering = false
 		m.libFilter = ""
 		m.libFiltered = nil
+		resetArtTransmission()
 		return m, tea.ClearScreen
 
 	case plPickerReadyMsg:
@@ -2474,6 +2478,7 @@ func (m model) handleLibKey(key string) (tea.Model, tea.Cmd) {
 			m.libFiltering = false
 			m.libFilter = ""
 			m.libFiltered = nil
+			resetArtTransmission()
 			return m, tea.ClearScreen
 		}
 	}
@@ -2739,6 +2744,7 @@ func (m model) libBack() (tea.Model, tea.Cmd) {
 			m.libMode = libAlbums
 			m.libCursor = m.savedAlbumCursor
 			m.libOffset = m.savedAlbumOffset
+			resetArtTransmission()
 			return m, tea.ClearScreen
 		}
 		m.libMode = libAlbums
@@ -2756,6 +2762,7 @@ func (m model) libBack() (tea.Model, tea.Cmd) {
 		m.albumRating = 0
 		m.albumComputedRating = 0
 	}
+	resetArtTransmission()
 	return m, tea.ClearScreen
 }
 
@@ -4535,7 +4542,8 @@ func (m model) npHorizontal(w, h int, showArt bool, infoLines []string, seekLine
 
 	artStr := ""
 	if showArt {
-		if artCols != artTxCols || artRows != artTxRows {
+		if m.artFile != artTxFile || artCols != artTxCols || artRows != artTxRows {
+			artTxFile = m.artFile
 			artTxCols = artCols
 			artTxRows = artRows
 			transmitArtToTerminal(m.artRGBA, m.artW, m.artH, artCols, artRows)
@@ -4620,7 +4628,8 @@ func (m model) npVertical(w, h int, showArt bool, infoLines []string, seekLine, 
 		}
 		artRowsUsed = artRows
 
-		if artCols != artTxCols || artRows != artTxRows {
+		if m.artFile != artTxFile || artCols != artTxCols || artRows != artTxRows {
+			artTxFile = m.artFile
 			artTxCols = artCols
 			artTxRows = artRows
 			transmitArtToTerminal(m.artRGBA, m.artW, m.artH, artCols, artRows)
