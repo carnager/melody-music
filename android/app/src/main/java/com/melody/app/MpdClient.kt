@@ -21,13 +21,13 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     @Volatile var connected = false
         private set
     private var reconnectJob: Job? = null
-    private var partialLine = StringBuilder()
+    @Volatile private var connectGeneration = 0L
 
     // Idle connection for instant notifications
     private var idleWs: WebSocket? = null
     private var idleLines = Channel<String>(Channel.UNLIMITED)
-    private var idlePartialLine = StringBuilder()
     private var idleJob: Job? = null
+    @Volatile private var idleGeneration = 0L
     var onIdleNotification: ((Set<String>) -> Unit)? = null
     var onReconnected: (() -> Unit)? = null
 
@@ -66,21 +66,25 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     private suspend fun doConnect(force: Boolean = false) = mutex.withLock {
         if (!force && connected && ws != null) return@withLock
 
+        val generation = ++connectGeneration
         ws?.close(1000, "reconnecting")
         ws = null
         connected = false
-        lines = Channel(Channel.UNLIMITED)
-        partialLine.clear()
+        val connLines = Channel<String>(Channel.UNLIMITED)
+        val partialLine = StringBuilder()
+        lines = connLines
 
         val wsUrl = "$wsScheme://$serverHost:$serverPort/mpd"
         android.util.Log.d("MpdClient", "Connecting command WebSocket to $wsUrl")
         val request = Request.Builder().url(wsUrl).build()
-        ws = cmdClient.newWebSocket(request, object : WebSocketListener() {
+        val newWs = cmdClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                if (generation != connectGeneration) return
                 android.util.Log.d("MpdClient", "WebSocket connected to $wsUrl")
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                if (generation != connectGeneration) return
                 // Buffer partial lines across WebSocket messages.
                 // The server uses bufio.Writer which may split a line
                 // across multiple WebSocket frames.
@@ -90,7 +94,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
                 // Last element is either empty (text ended with \n) or a partial line
                 for (i in 0 until parts.size - 1) {
                     val line = parts[i]
-                    if (line.isNotEmpty()) lines.trySend(line)
+                    if (line.isNotEmpty()) connLines.trySend(line)
                 }
                 val last = parts.last()
                 if (last.isNotEmpty()) {
@@ -99,26 +103,29 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (generation != connectGeneration) return
                 val code = response?.code?.let { " response=$it" } ?: ""
                 android.util.Log.e("MpdClient", "WebSocket error for $wsUrl:$code ${t.message}")
                 connected = false
                 ws = null
                 // Close lines channel so any blocked cmd() call fails immediately
                 // instead of waiting for the full command timeout.
-                lines.close()
+                connLines.close()
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                if (generation != connectGeneration) return
                 android.util.Log.d("MpdClient", "WebSocket closed: $reason")
                 connected = false
                 ws = null
-                lines.close()
+                connLines.close()
             }
         })
+        ws = newWs
 
         // Consume the MPD greeting before releasing the mutex
         try {
-            val greeting = withTimeout(5000) { lines.receive() }
+            val greeting = withTimeout(10000) { connLines.receive() }
             if (greeting.startsWith("OK MPD")) {
                 connected = true
                 android.util.Log.d("MpdClient", "MPD greeting: $greeting")
@@ -149,17 +156,15 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     }
 
     suspend fun reconnectNow() {
-        android.util.Log.d("MpdClient", "Force reconnect")
-        ws?.close(1000, "force reconnect")
-        ws = null
-        connected = false
-        doConnect(force = true)
+        android.util.Log.d("MpdClient", "Reconnect requested")
+        doConnect()
         if (connected) onReconnected?.invoke()
     }
 
     private fun markCommandConnectionDead(reason: String) {
         android.util.Log.d("MpdClient", "Command WebSocket dead: $reason")
         connected = false
+        connectGeneration++
         ws?.close(1000, reason)
         ws = null
         lines.close()
@@ -170,8 +175,10 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
         reconnectJob = null
         idleJob?.cancel()
         idleJob = null
+        idleGeneration++
         idleWs?.close(1000, "bye")
         idleWs = null
+        connectGeneration++
         ws?.close(1000, "bye")
         ws = null
         connected = false
@@ -200,53 +207,60 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
 
     private suspend fun connectIdle() {
         idleWs?.close(1000, "reconnecting idle")
-        idleLines = Channel(Channel.UNLIMITED)
-        idlePartialLine.clear()
+        val generation = ++idleGeneration
+        val connLines = Channel<String>(Channel.UNLIMITED)
+        val partialLine = StringBuilder()
+        idleLines = connLines
 
         val wsUrl = "$wsScheme://$serverHost:$serverPort/mpd"
         android.util.Log.d("MpdClient", "Connecting idle WebSocket to $wsUrl")
         val request = Request.Builder().url(wsUrl).build()
         val latch = CompletableDeferred<Boolean>()
 
-        idleWs = idleClient.newWebSocket(request, object : WebSocketListener() {
+        val newIdleWs = idleClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {}
             override fun onMessage(webSocket: WebSocket, text: String) {
-                val data = idlePartialLine.toString() + text
-                idlePartialLine.clear()
+                if (generation != idleGeneration) return
+                val data = partialLine.toString() + text
+                partialLine.clear()
                 val parts = data.split('\n')
                 for (i in 0 until parts.size - 1) {
                     val line = parts[i]
-                    if (line.isNotEmpty()) idleLines.trySend(line)
+                    if (line.isNotEmpty()) connLines.trySend(line)
                 }
                 val last = parts.last()
-                if (last.isNotEmpty()) idlePartialLine.append(last)
+                if (last.isNotEmpty()) partialLine.append(last)
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (generation != idleGeneration) return
                 val code = response?.code?.let { " response=$it" } ?: ""
                 android.util.Log.e("MpdClient", "Idle WebSocket error for $wsUrl:$code ${t.message}")
                 latch.complete(false)
                 idleWs = null
-                idleLines.close()
+                connLines.close()
                 // If idle dies, the command connection is likely dead too
                 // (same network event). Proactively tear it down so the
                 // reconnect loop kicks in immediately.
                 if (connected) {
                     android.util.Log.d("MpdClient", "Idle died, closing command WS too")
                     connected = false
+                    connectGeneration++
                     ws?.close(1000, "idle failed")
                     ws = null
                 }
             }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                if (generation != idleGeneration) return
                 latch.complete(false)
                 idleWs = null
-                idleLines.close()
+                connLines.close()
             }
         })
+        idleWs = newIdleWs
 
         // Consume greeting
         try {
-            val greeting = withTimeout(5000) { idleLines.receive() }
+            val greeting = withTimeout(10000) { connLines.receive() }
             if (greeting.startsWith("OK MPD")) {
                 latch.complete(true)
             } else {

@@ -8,6 +8,7 @@ import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.TimeUnit
 
 class OfflineManager(private val context: Context) {
@@ -23,16 +24,18 @@ class OfflineManager(private val context: Context) {
     // --- Query ---
 
     fun isAlbumDownloaded(albumId: String): Boolean {
-        return prefs.getStringSet("downloaded_albums", emptySet())?.contains(albumId) == true
+        if (prefs.getStringSet("downloaded_albums", emptySet())?.contains(albumId) != true) return false
+        val meta = loadAlbumMeta(albumId) ?: return false
+        return meta.tracks.isNotEmpty() && meta.tracks.all { isSongDownloaded(it.songId) }
     }
 
     fun isSongDownloaded(songId: String): Boolean {
-        return audioFile(songId).exists()
+        return isCompleteAudioFile(songId)
     }
 
     fun getLocalPath(songId: String): String? {
         val file = audioFile(songId)
-        return if (file.exists()) file.absolutePath else null
+        return if (isCompleteAudioFile(songId)) file.absolutePath else null
     }
 
     fun getDownloadedAlbumIds(): Set<String> {
@@ -74,7 +77,7 @@ class OfflineManager(private val context: Context) {
     ): Boolean = withContext(Dispatchers.IO) {
         var success = true
         for ((i, track) in tracks.withIndex()) {
-            if (audioFile(track.songId).exists()) {
+            if (isCompleteAudioFile(track.songId)) {
                 onProgress(DownloadProgress(albumId, i + 1, tracks.size, track.title))
                 continue
             }
@@ -85,26 +88,17 @@ class OfflineManager(private val context: Context) {
             val url = mpd.streamUrl(track.songId, format, maxBitrate)
             onProgress(DownloadProgress(albumId, i + 1, tracks.size, track.title))
             try {
-                val req = Request.Builder().url(url).build()
-                client.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) {
-                        success = false
-                        return@use
-                    }
-                    val body = resp.body ?: return@use
-                    audioFile(track.songId).outputStream().use { out ->
-                        body.byteStream().copyTo(out)
-                    }
-                }
+                downloadTrack(track.songId, url)
             } catch (e: Exception) {
                 android.util.Log.e("OfflineManager", "Download failed: ${track.title}: ${e.message}")
                 success = false
             }
         }
 
-        // Save track metadata for this album
-        saveAlbumMeta(albumId, albumArtist, albumName, date, tracks)
-        markAlbumDownloaded(albumId)
+        if (success && tracks.all { isCompleteAudioFile(it.songId) }) {
+            saveAlbumMeta(albumId, albumArtist, albumName, date, tracks)
+            markAlbumDownloaded(albumId)
+        }
         success
     }
 
@@ -112,7 +106,11 @@ class OfflineManager(private val context: Context) {
 
     fun removeAlbum(albumId: String) {
         val meta = loadAlbumMeta(albumId)
-        meta?.tracks?.forEach { audioFile(it.songId).delete() }
+        meta?.tracks?.forEach {
+            audioFile(it.songId).delete()
+            partFile(it.songId).delete()
+            completeMarkerFile(it.songId).delete()
+        }
         removeAlbumMeta(albumId)
         val albums = prefs.getStringSet("downloaded_albums", emptySet())?.toMutableSet() ?: mutableSetOf()
         albums.remove(albumId)
@@ -123,6 +121,77 @@ class OfflineManager(private val context: Context) {
 
     private fun audioFile(songId: String): File {
         return File(offlineDir, "$songId.audio")
+    }
+
+    private fun partFile(songId: String): File {
+        return File(offlineDir, "$songId.audio.part")
+    }
+
+    private fun completeMarkerFile(songId: String): File {
+        return File(offlineDir, "$songId.audio.ok")
+    }
+
+    private fun isCompleteAudioFile(songId: String): Boolean {
+        if (songId.isBlank()) return false
+        val file = audioFile(songId)
+        if (!file.exists() || file.length() <= 0) return false
+        val marker = completeMarkerFile(songId)
+        if (!marker.exists()) return false
+        return try {
+            val obj = JSONObject(marker.readText())
+            obj.optLong("bytes", -1L) == file.length()
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun downloadTrack(songId: String, url: String) {
+        val target = audioFile(songId)
+        val part = partFile(songId)
+        val marker = completeMarkerFile(songId)
+        part.delete()
+
+        try {
+            val req = Request.Builder().url(url).build()
+            var bytesCopied = 0L
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
+                val body = resp.body ?: throw IllegalStateException("empty response body")
+                val expectedBytes = body.contentLength()
+                body.byteStream().use { input ->
+                    FileOutputStream(part).use { out ->
+                        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read == -1) break
+                            out.write(buffer, 0, read)
+                            bytesCopied += read.toLong()
+                        }
+                        out.flush()
+                        out.fd.sync()
+                    }
+                }
+                if (expectedBytes >= 0 && bytesCopied != expectedBytes) {
+                    throw IllegalStateException("incomplete download: got $bytesCopied of $expectedBytes bytes")
+                }
+                if (bytesCopied <= 0) {
+                    throw IllegalStateException("empty download")
+                }
+            }
+
+            marker.delete()
+            target.delete()
+            if (!part.renameTo(target)) {
+                throw IllegalStateException("could not finalize download")
+            }
+            val obj = JSONObject().apply {
+                put("bytes", bytesCopied)
+            }
+            marker.writeText(obj.toString())
+        } catch (e: Exception) {
+            part.delete()
+            throw e
+        }
     }
 
     private fun markAlbumDownloaded(albumId: String) {

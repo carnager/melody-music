@@ -8,6 +8,8 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 enum class LibView { Artists, Albums, Tracks }
 
@@ -58,6 +60,8 @@ class MainViewModel : ViewModel() {
 
     // Devices
     var devices by mutableStateOf<List<DeviceInfo>>(emptyList()); private set
+    private val devicesLoadMutex = Mutex()
+    private var callbacksClient: MpdClient? = null
 
     // "Play on phone?" prompt — shown when on mobile data and phone isn't the active device
     var showPhonePrompt by mutableStateOf(false); private set
@@ -86,6 +90,7 @@ class MainViewModel : ViewModel() {
         viewModelScope.launch {
             refresh(forceQueue = true)
             loadDevicesNow()
+            retryPendingDownloads()
         }
     }
 
@@ -119,6 +124,8 @@ class MainViewModel : ViewModel() {
 
     private fun attachMpdCallbacks() {
         val client = mpd
+        if (callbacksClient === client) return
+        callbacksClient = client
         client.onIdleNotification = { changed ->
             if (idleRefreshJob?.isActive != true) {
                 idleRefreshJob = viewModelScope.launch { refresh(forceQueue = "rating" in changed) }
@@ -132,6 +139,7 @@ class MainViewModel : ViewModel() {
             viewModelScope.launch {
                 refresh(forceQueue = true)
                 loadDevicesNow()
+                retryPendingDownloads()
             }
         }
         client.startIdle()
@@ -146,6 +154,7 @@ class MainViewModel : ViewModel() {
             }
             refresh(forceQueue = true)
             loadDevicesNow()
+            retryPendingDownloads()
         }
     }
 
@@ -578,32 +587,80 @@ class MainViewModel : ViewModel() {
     // --- Offline downloads ---
 
     private val downloadQueue = kotlinx.coroutines.channels.Channel<Album>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+    private val queuedDownloadAlbumIds = mutableSetOf<String>()
+    private val pendingDownloadRetries = linkedMapOf<String, Album>()
+    private val cancelledDownloadAlbumIds = mutableSetOf<String>()
+    private var pendingDownloadRetryJob: Job? = null
 
     init {
         // Process download queue sequentially
         viewModelScope.launch {
             for (album in downloadQueue) {
+                queuedDownloadAlbumIds.remove(album.id)
+                if (cancelledDownloadAlbumIds.remove(album.id)) continue
+                var completed = false
                 try {
                     val albumTracks = mpd.getTracks(album.albumArtist, album.album)
-                    if (albumTracks.isEmpty()) continue
+                    if (albumTracks.isEmpty()) {
+                        rememberDownloadRetry(album)
+                        continue
+                    }
                     val prefs = MelodyApp.instance.getSharedPreferences("melody", android.content.Context.MODE_PRIVATE)
                     val format = prefs.getString("audio_format", "")?.ifBlank { null }
                     val bitrate = prefs.getInt("audio_bitrate", 0)
-                    offline.downloadAlbum(album.id, album.albumArtist, album.album, album.date, albumTracks, mpd, format, bitrate) { progress ->
+                    completed = offline.downloadAlbum(album.id, album.albumArtist, album.album, album.date, albumTracks, mpd, format, bitrate) { progress ->
                         downloadProgress = progress
                     }
+                } catch (e: Exception) {
+                    android.util.Log.e("MainViewModel", "download failed for ${album.albumArtist} - ${album.album}: ${e.message}")
+                } finally {
                     downloadProgress = null
                     downloadedAlbums = offline.getDownloadedAlbumIds()
-                } catch (_: Exception) {}
+                    if (completed) {
+                        pendingDownloadRetries.remove(album.id)
+                    } else {
+                        rememberDownloadRetry(album)
+                    }
+                }
             }
         }
     }
 
     fun downloadAlbum(album: Album) {
-        downloadQueue.trySend(album)
+        cancelledDownloadAlbumIds.remove(album.id)
+        pendingDownloadRetries.remove(album.id)
+        enqueueDownload(album)
+    }
+
+    private fun enqueueDownload(album: Album) {
+        if (!queuedDownloadAlbumIds.add(album.id)) return
+        val result = downloadQueue.trySend(album)
+        if (result.isFailure) queuedDownloadAlbumIds.remove(album.id)
+    }
+
+    private fun rememberDownloadRetry(album: Album) {
+        pendingDownloadRetries[album.id] = album
+        if (mpd.connected) schedulePendingDownloadRetry()
+    }
+
+    private fun schedulePendingDownloadRetry() {
+        if (pendingDownloadRetryJob?.isActive == true) return
+        pendingDownloadRetryJob = viewModelScope.launch {
+            delay(5000)
+            retryPendingDownloads()
+        }
+    }
+
+    private fun retryPendingDownloads() {
+        if (!mpd.connected || pendingDownloadRetries.isEmpty()) return
+        val retryAlbums = pendingDownloadRetries.values.toList()
+        retryAlbums.forEach { enqueueDownload(it) }
     }
 
     fun removeOfflineAlbum(albumId: String) {
+        cancelledDownloadAlbumIds.add(albumId)
+        queuedDownloadAlbumIds.remove(albumId)
+        pendingDownloadRetries.remove(albumId)
         offline.removeAlbum(albumId)
         downloadedAlbums = offline.getDownloadedAlbumIds()
     }
@@ -708,25 +765,15 @@ class MainViewModel : ViewModel() {
     }
 
     private suspend fun loadDevicesNow() {
-        try {
-            val newDevices = mpd.getOutputs()
-            devices = newDevices
-            isConnected = true
-            android.util.Log.d("MainViewModel", "loadDevices: ${devices.size} devices: ${devices.map { "${it.name}(${it.type})" }}")
-        } catch (e: Exception) {
-            isConnected = mpd.connected
-            android.util.Log.e("MainViewModel", "loadDevices failed: ${e.message}")
-            if (devices.isEmpty()) {
-                try {
-                    mpd.reconnectNow()
-                    val retryDevices = mpd.getOutputs()
-                    devices = retryDevices
-                    isConnected = true
-                    android.util.Log.d("MainViewModel", "loadDevices retry: ${devices.size} devices")
-                } catch (retry: Exception) {
-                    isConnected = mpd.connected
-                    android.util.Log.e("MainViewModel", "loadDevices retry failed: ${retry.message}")
-                }
+        devicesLoadMutex.withLock {
+            try {
+                val newDevices = mpd.getOutputs()
+                devices = newDevices
+                isConnected = true
+                android.util.Log.d("MainViewModel", "loadDevices: ${devices.size} devices: ${devices.map { "${it.name}(${it.type})" }}")
+            } catch (e: Exception) {
+                isConnected = mpd.connected
+                android.util.Log.e("MainViewModel", "loadDevices failed: ${e.message}")
             }
         }
     }
