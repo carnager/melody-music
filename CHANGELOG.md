@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Features
+
+- Add `melody-macos-agent`, a macOS-only playback target with its own generated config file.
+
 ## 1.2.0 (2026-06-04)
 
 ### Breaking Changes

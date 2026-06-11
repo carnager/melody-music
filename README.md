@@ -37,6 +37,8 @@ Pick a song on your phone, switch playback to your desktop speakers without miss
 
 **melody-agent** turns any machine into a playback target. Install it on your living room PC, your laptop, wherever — each one shows up as an output device you can switch to. Supports optional resume-on-connect to automatically resume playback when the agent reconnects.
 
+**melody-macos-agent** is the macOS playback target. It uses the same agent protocol and mpv playback engine as `melody-agent`, but keeps a separate macOS config and default device name.
+
 **melody-tui** is a terminal interface for browsing your library, managing the queue, rating tracks and albums, and controlling playback.
 
 **melody-cli** is a command-line client for scripting — search, queue, rate, view lyrics, and control playback from shell scripts or the command line.
@@ -102,6 +104,10 @@ master = "192.168.1.10:6600"
 
 It shows up as an output device in the TUI (press `D`) and the Android app.
 
+On macOS, build or install `melody-macos-agent` and edit
+`~/.config/melody/melody-macos-agent.toml`; it appears as a normal Melody
+output device and plays through macOS' current audio output.
+
 ### Android
 
 ```sh
@@ -161,7 +167,7 @@ Notes:
 - `server.base_url` should be set when clients need externally reachable stream URLs.
 - Remote stream transcoding accepts `mp3`, `opus`, `ogg`, `aac`, and `flac`.
 - `player.mpv_socket = ""` lets Melody create a runtime socket automatically.
-- Go playback targets require `mpv` on the experimental mpv agent branch.
+- Go playback targets require `mpv`.
 
 Daemon state files:
 
@@ -196,7 +202,35 @@ Notes:
 - `music_dir` enables direct file access when the agent can see the same library path.
 - Empty `music_dir` streams audio from the daemon.
 - `format` and `max_bitrate` advertise the agent's preferred stream/transcode format; empty/zero means original or unrestricted.
-- Go agents require `mpv` on the experimental mpv agent branch.
+- Go agents require `mpv`.
+
+### melody-macos-agent
+
+`melody-macos-agent` is built only for macOS. It reads
+`~/.config/melody/melody-macos-agent.toml` and creates it on first start. The
+config format is the same as `melody-agent`; the generated default name is the
+hostname with `-macos` appended.
+
+```toml
+[agent]
+name = "macbook-macos"
+master = "192.168.1.10:6600"
+music_dir = ""
+format = ""
+max_bitrate = 0
+
+[player]
+replaygain = "track"
+volume = 100
+mpv_path = "mpv"
+mpv_socket = ""
+```
+
+Notes:
+
+- Requires `mpv` on macOS, for example from Homebrew.
+- Leave `music_dir` empty to stream from `melodyd`, or set it when the Mac can see the same library path.
+- Playback follows the current macOS audio output device.
 
 ### melody-tui
 
