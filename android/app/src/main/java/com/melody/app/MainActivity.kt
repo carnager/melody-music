@@ -207,29 +207,61 @@ class MainActivity : ComponentActivity() {
 
 // ==================== Theme ====================
 
+// Melody's own dark palette — used when dynamic color is off or unavailable.
+private val melodyDarkScheme = darkColorScheme(
+    primary = Color(0xFF60A5FA),
+    onPrimary = Color(0xFF0F172A),
+    primaryContainer = Color(0xFF1E40AF),
+    onPrimaryContainer = Color(0xFFDBEAFE),
+    secondary = Color(0xFF94A3B8),
+    onSecondary = Color(0xFF0F172A),
+    surface = Color(0xFF1E293B),
+    onSurface = Color(0xFFF1F5F9),
+    surfaceVariant = Color(0xFF334155),
+    onSurfaceVariant = Color(0xFF94A3B8),
+    surfaceContainerLow = Color(0xFF1E293B),
+    surfaceContainer = Color(0xFF1E293B),
+    surfaceContainerHigh = Color(0xFF334155),
+    background = Color(0xFF0F172A),
+    onBackground = Color(0xFFF1F5F9),
+    outline = Color(0xFF475569),
+)
+
+// Light counterpart of the Melody palette (non-dynamic fallback).
+private val melodyLightScheme = androidx.compose.material3.lightColorScheme(
+    primary = Color(0xFF2563EB),
+    onPrimary = Color(0xFFFFFFFF),
+    primaryContainer = Color(0xFFDBEAFE),
+    onPrimaryContainer = Color(0xFF1E3A8A),
+    secondary = Color(0xFF475569),
+    surface = Color(0xFFF8FAFC),
+    onSurface = Color(0xFF0F172A),
+    surfaceVariant = Color(0xFFE2E8F0),
+    onSurfaceVariant = Color(0xFF475569),
+    surfaceContainerLow = Color(0xFFF1F5F9),
+    surfaceContainer = Color(0xFFF1F5F9),
+    surfaceContainerHigh = Color(0xFFE2E8F0),
+    background = Color(0xFFFFFFFF),
+    onBackground = Color(0xFF0F172A),
+    outline = Color(0xFF94A3B8),
+)
+
 @Composable
 fun MelodyTheme(content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = darkColorScheme(
-            primary = Color(0xFF60A5FA),
-            onPrimary = Color(0xFF0F172A),
-            primaryContainer = Color(0xFF1E40AF),
-            onPrimaryContainer = Color(0xFFDBEAFE),
-            secondary = Color(0xFF94A3B8),
-            onSecondary = Color(0xFF0F172A),
-            surface = Color(0xFF1E293B),
-            onSurface = Color(0xFFF1F5F9),
-            surfaceVariant = Color(0xFF334155),
-            onSurfaceVariant = Color(0xFF94A3B8),
-            surfaceContainerLow = Color(0xFF1E293B),
-            surfaceContainer = Color(0xFF1E293B),
-            surfaceContainerHigh = Color(0xFF334155),
-            background = Color(0xFF0F172A),
-            onBackground = Color(0xFFF1F5F9),
-            outline = Color(0xFF475569),
-        ),
-        content = content
-    )
+    val dark = when (ThemePrefs.mode) {
+        "dark" -> true
+        "light" -> false
+        else -> androidx.compose.foundation.isSystemInDarkTheme()
+    }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scheme = when {
+        ThemePrefs.dynamic && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
+            if (dark) androidx.compose.material3.dynamicDarkColorScheme(context)
+            else androidx.compose.material3.dynamicLightColorScheme(context)
+        dark -> melodyDarkScheme
+        else -> melodyLightScheme
+    }
+    MaterialTheme(colorScheme = scheme, content = content)
 }
 
 // ==================== Setup ====================
@@ -519,11 +551,24 @@ fun MainScreen(vm: MainViewModel) {
             // keyboard height and the bottom-bar height stack, leaving a dead
             // band above the keyboard.
             Box(Modifier.padding(padding).consumeWindowInsets(padding)) {
-                when (selectedTab) {
-                    0 -> LibraryScreen(vm)
-                    1 -> SearchScreen(vm)
-                    2 -> QueueScreen(vm, onSwitchToLibrary = { selectedTab = 0 })
-                    3 -> PlaylistsScreen(vm)
+                // Direction-aware slide between tabs, so switching tabs (and
+                // the back gesture returning to Library) animates instead of
+                // hard-swapping the content.
+                AnimatedContent(
+                    targetState = selectedTab,
+                    transitionSpec = {
+                        val forward = targetState > initialState
+                        (slideInHorizontally { if (forward) it / 4 else -it / 4 } + fadeIn()) togetherWith
+                                (slideOutHorizontally { if (forward) -it / 4 else it / 4 } + fadeOut())
+                    },
+                    label = "tabs"
+                ) { tab ->
+                    when (tab) {
+                        0 -> LibraryScreen(vm)
+                        1 -> SearchScreen(vm)
+                        2 -> QueueScreen(vm, onSwitchToLibrary = { selectedTab = 0 })
+                        3 -> PlaylistsScreen(vm)
+                    }
                 }
             }
         }
@@ -1428,22 +1473,24 @@ fun ArtistList(vm: MainViewModel) {
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Row {
-                        IconButton(onClick = { vm.toggleLibSortLatest() }) {
-                            Icon(
-                                Icons.Default.Schedule,
-                                contentDescription = "Sort by latest",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        IconButton(onClick = { vm.toggleCachedOnly() }) {
-                            Icon(
-                                Icons.Default.FilterList,
-                                contentDescription = if (vm.showCachedOnly) "Show all" else "Show offline only",
-                                tint = if (vm.showCachedOnly) MaterialTheme.colorScheme.primary
-                                       else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                    // Labeled chips instead of cryptic icon toggles
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = vm.libSortLatest,
+                            onClick = { vm.toggleLibSortLatest() },
+                            label = { Text("Latest") },
+                            leadingIcon = {
+                                Icon(Icons.Default.Schedule, null, modifier = Modifier.size(16.dp))
+                            }
+                        )
+                        FilterChip(
+                            selected = vm.showCachedOnly,
+                            onClick = { vm.toggleCachedOnly() },
+                            label = { Text("Downloaded") },
+                            leadingIcon = {
+                                Icon(Icons.Default.DownloadDone, null, modifier = Modifier.size(16.dp))
+                            }
+                        )
                     }
                 }
             }
@@ -1660,31 +1707,16 @@ fun TrackList(vm: MainViewModel) {
                         val isComputed = vm.albumRating == 0 && displayRating > 0
                         Spacer(Modifier.height(6.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            for (starPos in 1..5) {
-                                val fullValue = starPos * 2
-                                val halfValue = starPos * 2 - 1
-                                val icon = when {
-                                    displayRating >= fullValue -> Icons.Default.Star
-                                    displayRating >= halfValue -> Icons.AutoMirrored.Filled.StarHalf
-                                    else -> Icons.Default.StarOutline
-                                }
-                                val filled = displayRating >= halfValue
-                                val tint = if (filled) {
-                                    if (isComputed) Color(0xFFE6B422).copy(alpha = 0.5f)
-                                    else Color(0xFFE6B422)
-                                } else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                                Box(modifier = Modifier.size(22.dp)) {
-                                    Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.fillMaxSize())
-                                    Row(Modifier.matchParentSize()) {
-                                        Box(Modifier.weight(1f).fillMaxHeight().clickable(onClickLabel = "Rate half star") {
-                                            vm.rateAlbum(if (vm.albumRating == halfValue) 0 else halfValue)
-                                        })
-                                        Box(Modifier.weight(1f).fillMaxHeight().clickable(onClickLabel = "Rate full star") {
-                                            vm.rateAlbum(if (vm.albumRating == fullValue) 0 else fullValue)
-                                        })
-                                    }
-                                }
-                            }
+                            StarRating(
+                                rating = displayRating,
+                                boxSize = 26.dp,
+                                iconSize = 22.dp,
+                                computed = isComputed,
+                                // Cycle from the user's own rating, not the
+                                // computed average shown when unrated.
+                                cycleFrom = vm.albumRating,
+                                onRate = { vm.rateAlbum(it) }
+                            )
                         }
                     }
                 }
@@ -2119,12 +2151,32 @@ fun QueueScreen(vm: MainViewModel, onSwitchToLibrary: () -> Unit = {}) {
             userScrollEnabled = dragFromPos < 0
         ) {
             item {
-                Text(
-                    "${vm.queue.size} tracks",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "${vm.queue.size} tracks",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    // Legend for the priority dots, shown only when relevant
+                    if (vm.queue.any { it.priority > 0 }) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text("priority:", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            listOf(Color(0xFFFF6600) to "high", Color(0xFFFF9933) to "mid", Color(0xFFFFCC66) to "low").forEach { (c, l) ->
+                                Text("●", color = c, style = MaterialTheme.typography.labelSmall)
+                                Text(l, style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
             }
             items(
                 vm.queue,
@@ -2138,7 +2190,7 @@ fun QueueScreen(vm: MainViewModel, onSwitchToLibrary: () -> Unit = {}) {
 
                 Surface(
                     color = if (isDragging) MaterialTheme.colorScheme.surfaceContainerHigh
-                           else if (isCurrent) Color(0xFF2A3F5F)
+                           else if (isCurrent) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
                            else MaterialTheme.colorScheme.surface,
                     shadowElevation = if (isDragging) 8.dp else 0.dp,
                     modifier = Modifier
@@ -2347,34 +2399,9 @@ fun QueueScreen(vm: MainViewModel, onSwitchToLibrary: () -> Unit = {}) {
                         leadingContent = { Icon(Icons.Default.Star, null) },
                         supportingContent = {
                             Row {
-                                for (starPos in 1..5) {
-                                    val halfValue = starPos * 2 - 1
-                                    val fullValue = starPos * 2
-                                    val icon = when {
-                                        trackRating >= fullValue -> Icons.Default.Star
-                                        trackRating >= halfValue -> Icons.AutoMirrored.Filled.StarHalf
-                                        else -> Icons.Default.StarOutline
-                                    }
-                                    val filled = trackRating >= halfValue
-                                    Box(modifier = Modifier.size(36.dp)) {
-                                        Icon(
-                                            icon,
-                                            contentDescription = null,
-                                            tint = if (filled) Color(0xFFE6B422)
-                                                   else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                                            modifier = Modifier.size(24.dp).align(Alignment.Center)
-                                        )
-                                        Row(Modifier.matchParentSize()) {
-                                            Box(Modifier.weight(1f).fillMaxHeight().clickable(onClickLabel = "Rate half star") {
-                                                val v = halfValue; trackRating = if (trackRating == v) 0 else v
-                                                vm.rateQueueTrack(item.songId, trackRating)
-                                            })
-                                            Box(Modifier.weight(1f).fillMaxHeight().clickable(onClickLabel = "Rate full star") {
-                                                val v = fullValue; trackRating = if (trackRating == v) 0 else v
-                                                vm.rateQueueTrack(item.songId, trackRating)
-                                            })
-                                        }
-                                    }
+                                StarRating(rating = trackRating, boxSize = 36.dp, iconSize = 24.dp) {
+                                    trackRating = it
+                                    vm.rateQueueTrack(item.songId, it)
                                 }
                             }
                         }
@@ -3084,6 +3111,37 @@ fun SettingsScreen(vm: MainViewModel, onDismiss: () -> Unit) {
                     )
                 }
 
+                // --- Appearance ---
+                item {
+                    SettingsSectionHeader("Appearance")
+                }
+                item {
+                    SettingsChipRow(
+                        title = "Theme",
+                        options = listOf("system" to "System", "dark" to "Dark", "light" to "Light"),
+                        selected = ThemePrefs.mode,
+                        onSelect = {
+                            ThemePrefs.mode = it
+                            ThemePrefs.save(MelodyApp.instance)
+                        }
+                    )
+                }
+                item {
+                    ListItem(
+                        headlineContent = { Text("Dynamic colors") },
+                        supportingContent = { Text("Use Material You colors from your wallpaper (Android 12+)") },
+                        trailingContent = {
+                            Switch(
+                                checked = ThemePrefs.dynamic,
+                                onCheckedChange = {
+                                    ThemePrefs.dynamic = it
+                                    ThemePrefs.save(MelodyApp.instance)
+                                }
+                            )
+                        }
+                    )
+                }
+
                 // --- About ---
                 item {
                     SettingsSectionHeader("About")
@@ -3188,41 +3246,66 @@ fun MiniStars(rating: Int, starSize: Dp) {
 
 // ==================== Action Sheet ====================
 
+/**
+ * Shared star rating widget (0-10 scale, 5 stars, half steps).
+ *
+ * Tap-to-cycle interaction: tapping a star sets it as a full star; tapping
+ * the same star again refines to a half star; a third tap clears the rating.
+ * Discoverable through natural use — unlike invisible left/right tap zones —
+ * and gives TalkBack one labeled target per star.
+ *
+ * [rating] is what's displayed (may be a computed album average, dimmed via
+ * [computed]); [cycleFrom] is the user's own rating that cycling starts from.
+ */
+@Composable
+fun StarRating(
+    rating: Int,
+    boxSize: Dp,
+    iconSize: Dp,
+    computed: Boolean = false,
+    cycleFrom: Int = rating,
+    onRate: (Int) -> Unit
+) {
+    for (starPos in 1..5) {
+        val fullValue = starPos * 2
+        val halfValue = fullValue - 1
+        val icon = when {
+            rating >= fullValue -> Icons.Default.Star
+            rating >= halfValue -> Icons.AutoMirrored.Filled.StarHalf
+            else -> Icons.Default.StarOutline
+        }
+        val gold = Color(0xFFE6B422)
+        val tint = when {
+            rating >= halfValue && computed -> gold.copy(alpha = 0.5f)
+            rating >= halfValue -> gold
+            else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+        }
+        Box(
+            modifier = Modifier
+                .size(boxSize)
+                .clickable(onClickLabel = "Rate $starPos stars, tap again for half star, again to clear") {
+                    onRate(
+                        when (cycleFrom) {
+                            fullValue -> halfValue
+                            halfValue -> 0
+                            else -> fullValue
+                        }
+                    )
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(iconSize))
+        }
+    }
+}
+
 @Composable
 fun RatingBar(rating: Int, onRate: (Int) -> Unit) {
-    // rating is 0-10: each star position covers 2 values (half star = odd, full = even)
     Row(
         horizontalArrangement = Arrangement.Center,
         modifier = Modifier.fillMaxWidth()
     ) {
-        for (starPos in 1..5) {
-            val halfValue = starPos * 2 - 1  // 1,3,5,7,9
-            val fullValue = starPos * 2      // 2,4,6,8,10
-            val icon = when {
-                rating >= fullValue -> Icons.Default.Star
-                rating >= halfValue -> Icons.AutoMirrored.Filled.StarHalf
-                else -> Icons.Default.StarOutline
-            }
-            val tint = if (rating >= halfValue) Color(0xFFE6B422)
-                       else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-            Box(modifier = Modifier.size(44.dp)) {
-                Icon(
-                    icon,
-                    contentDescription = "${starPos} stars",
-                    tint = tint,
-                    modifier = Modifier.size(28.dp).align(Alignment.Center)
-                )
-                // Left half tap = half star (odd), right half tap = full star (even)
-                Row(Modifier.matchParentSize()) {
-                    Box(Modifier.weight(1f).fillMaxHeight().clickable(onClickLabel = "Rate half star") {
-                        onRate(if (rating == halfValue) 0 else halfValue)
-                    })
-                    Box(Modifier.weight(1f).fillMaxHeight().clickable(onClickLabel = "Rate full star") {
-                        onRate(if (rating == fullValue) 0 else fullValue)
-                    })
-                }
-            }
-        }
+        StarRating(rating = rating, boxSize = 44.dp, iconSize = 28.dp, onRate = onRate)
     }
 }
 
@@ -3331,34 +3414,9 @@ fun ActionSheet(vm: MainViewModel) {
                     leadingContent = { Icon(Icons.Default.Star, null) },
                     supportingContent = {
                         Row {
-                            for (starPos in 1..5) {
-                                val halfValue = starPos * 2 - 1
-                                val fullValue = starPos * 2
-                                val icon = when {
-                                    albumRating >= fullValue -> Icons.Default.Star
-                                    albumRating >= halfValue -> Icons.AutoMirrored.Filled.StarHalf
-                                    else -> Icons.Default.StarOutline
-                                }
-                                val filled = albumRating >= halfValue
-                                Box(modifier = Modifier.size(36.dp)) {
-                                    Icon(
-                                        icon,
-                                        contentDescription = null,
-                                        tint = if (filled) Color(0xFFE6B422)
-                                               else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                                        modifier = Modifier.size(24.dp).align(Alignment.Center)
-                                    )
-                                    Row(Modifier.matchParentSize()) {
-                                        Box(Modifier.weight(1f).fillMaxHeight().clickable(onClickLabel = "Rate half star") {
-                                            val v = halfValue; albumRating = if (albumRating == v) 0 else v
-                                            vm.rateAlbumDirect(albumForRating, albumRating)
-                                        })
-                                        Box(Modifier.weight(1f).fillMaxHeight().clickable(onClickLabel = "Rate full star") {
-                                            val v = fullValue; albumRating = if (albumRating == v) 0 else v
-                                            vm.rateAlbumDirect(albumForRating, albumRating)
-                                        })
-                                    }
-                                }
+                            StarRating(rating = albumRating, boxSize = 36.dp, iconSize = 24.dp) {
+                                albumRating = it
+                                vm.rateAlbumDirect(albumForRating, it)
                             }
                         }
                     }

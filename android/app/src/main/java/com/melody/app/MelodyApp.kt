@@ -10,6 +10,31 @@ import android.net.wifi.WifiInfo
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+
+/**
+ * Theme settings backed by prefs and exposed as Compose state so the whole
+ * UI recomposes immediately when they change from the Settings screen.
+ */
+object ThemePrefs {
+    var mode by mutableStateOf("system")   // "system", "dark", "light"
+    var dynamic by mutableStateOf(true)    // Material You dynamic color (Android 12+)
+
+    fun load(context: Context) {
+        val p = context.getSharedPreferences("melody", Context.MODE_PRIVATE)
+        mode = p.getString("theme_mode", "system") ?: "system"
+        dynamic = p.getBoolean("theme_dynamic", true)
+    }
+
+    fun save(context: Context) {
+        context.getSharedPreferences("melody", Context.MODE_PRIVATE).edit()
+            .putString("theme_mode", mode)
+            .putBoolean("theme_dynamic", dynamic)
+            .apply()
+    }
+}
 
 class MelodyApp : Application() {
     lateinit var mpd: MpdClient
@@ -25,6 +50,7 @@ class MelodyApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        ThemePrefs.load(this)
         offlineManager = OfflineManager(this)
         applyServerForCurrentNetwork()
         startNetworkMonitor()

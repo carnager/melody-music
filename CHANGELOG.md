@@ -17,6 +17,9 @@
 - Android: play/shuffle buttons on the album screen; tapping a track in the library or a playlist now plays it in context (long-press or ⋮ for the menu).
 - Android: back from any tab returns to the Library tab instead of closing the app; predictive back gestures enabled.
 - Android: clear-queue asks for confirmation; random-album uses a dice icon; track rows show durations; library shows a proper loading/error state with retry; app version in Settings.
+- Android: Material You dynamic color and light/dark/system theme selection (Settings → Appearance), with the Melody palette as non-dynamic fallback.
+- Android: star ratings cycle full → half → clear on repeated taps (one shared, accessible widget) instead of invisible left/right tap zones.
+- Android: library sort/filter toggles are labeled chips ("Latest", "Downloaded"); queue shows a priority-dot legend; animated tab transitions (including the back gesture to Library).
 - melody-tui: queue management — `Shift+↑`/`Shift+↓` (or `J`/`K`) move the track or selection, `g` jumps to the current song, `Z` shuffles, `S` saves the queue as a playlist, `!` sets or clears track priorities, `←`/`→` seek.
 - melody-tui: `:` command palette with completion (play/pause/seek/volume/save/shuffle/replaygain/modes/outputs/…).
 - melody-tui: `F5`-`F8` transport keys (prev / play-pause / stop / next); Space no longer toggles pause — it quick-adds in the library and toggles selection in the queue.
