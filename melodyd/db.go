@@ -19,6 +19,10 @@ type musicDB struct {
 	cacheMu                  sync.Mutex
 	cachedAlbumsLatest       []map[string]any
 	cachedAlbumsLatestFormatted string // pre-formatted MPD response lines
+	// Pre-built, ready-to-send lists for the rofi/launcher client.
+	cachedRofiAlbums       string
+	cachedRofiAlbumsLatest string
+	cachedRofiTracks       string
 }
 
 func openMusicDB(path string) (*musicDB, error) {
@@ -163,18 +167,15 @@ func (m *musicDB) backfillRatingHashes() {
 // ---------------------------------------------------------------------------
 
 func (m *musicDB) upsertArtist(name string) (int64, error) {
-	res, err := m.db.Exec(`INSERT INTO artists(name) VALUES(?) ON CONFLICT(name) DO NOTHING`, name)
-	if err != nil {
-		return 0, err
-	}
-	id, err := res.LastInsertId()
-	if err != nil || id == 0 {
-		row := m.db.QueryRow(`SELECT id FROM artists WHERE name = ?`, name)
-		if err := row.Scan(&id); err != nil {
-			return 0, err
-		}
-	}
-	return id, nil
+	// Use ON CONFLICT DO UPDATE ... RETURNING id so the existing row id is
+	// returned on conflict. ON CONFLICT DO NOTHING cannot be relied upon here:
+	// after a no-op conflict LastInsertId() returns a stale/phantom rowid rather
+	// than 0, which previously produced albums with a dangling artist_id.
+	var id int64
+	err := m.db.QueryRow(`INSERT INTO artists(name) VALUES(?)
+		ON CONFLICT(name) DO UPDATE SET name = excluded.name
+		RETURNING id`, name).Scan(&id)
+	return id, err
 }
 
 func (m *musicDB) allArtists() ([]string, error) {
@@ -201,22 +202,14 @@ func (m *musicDB) allArtists() ([]string, error) {
 // ---------------------------------------------------------------------------
 
 func (m *musicDB) upsertAlbum(artistID int64, title, date string) (int64, error) {
-	res, err := m.db.Exec(`INSERT INTO albums(artist_id, title, date)
+	// RETURNING id reliably yields the existing row id on conflict; see the note
+	// in upsertArtist about why LastInsertId() can't be trusted here.
+	var id int64
+	err := m.db.QueryRow(`INSERT INTO albums(artist_id, title, date)
 		VALUES(?, ?, ?)
-		ON CONFLICT(artist_id, title, date) DO NOTHING`,
-		artistID, title, date)
-	if err != nil {
-		return 0, err
-	}
-	id, err := res.LastInsertId()
-	if err != nil || id == 0 {
-		row := m.db.QueryRow(`SELECT id FROM albums WHERE artist_id = ? AND title = ? AND date = ?`,
-			artistID, title, date)
-		if err := row.Scan(&id); err != nil {
-			return 0, err
-		}
-	}
-	return id, nil
+		ON CONFLICT(artist_id, title, date) DO UPDATE SET title = excluded.title
+		RETURNING id`, artistID, title, date).Scan(&id)
+	return id, err
 }
 
 func (m *musicDB) allAlbums(sortLatest bool) ([]map[string]any, error) {
@@ -290,11 +283,100 @@ func (m *musicDB) invalidateCache() {
 	m.cacheMu.Lock()
 	m.cachedAlbumsLatest = nil
 	m.cachedAlbumsLatestFormatted = ""
+	m.cachedRofiAlbums = ""
+	m.cachedRofiAlbumsLatest = ""
+	m.cachedRofiTracks = ""
 	m.cacheMu.Unlock()
 }
 
 func (m *musicDB) warmCache() {
 	m.allAlbums(true)
+	// Pre-build the launcher lists so the first rofi invocation is instant.
+	// Tracks can be large, so build it lazily on first request instead.
+	m.rofiAlbumsResponse(false)
+	m.rofiAlbumsResponse(true)
+}
+
+// rofiAlbumsResponse returns a pre-built, cached list of albums for the rofi
+// client. Each line is "X-Album: <albumid>\t<display>" so the client can show
+// <display> and enqueue by id. latest sorts most-recently-added first.
+func (m *musicDB) rofiAlbumsResponse(latest bool) (string, error) {
+	m.cacheMu.Lock()
+	cached := m.cachedRofiAlbums
+	if latest {
+		cached = m.cachedRofiAlbumsLatest
+	}
+	m.cacheMu.Unlock()
+	if cached != "" {
+		return cached, nil
+	}
+
+	albums, err := m.allAlbums(latest)
+	if err != nil {
+		return "", err
+	}
+	var sb strings.Builder
+	for _, al := range albums {
+		id, _ := al["album_id"].(string)
+		artist, _ := al["albumartist"].(string)
+		title, _ := al["album"].(string)
+		date, _ := al["date"].(string)
+		// Tab-separated raw fields: id, artist, album, date. The client aligns
+		// these into columns; sending fields (not a rendered string) keeps the
+		// server cheap and lets the client own presentation.
+		fmt.Fprintf(&sb, "X-Album: %s\t%s\t%s\t%s\n",
+			id, sanitizeField(artist), sanitizeField(title), sanitizeField(date))
+	}
+	s := sb.String()
+
+	m.cacheMu.Lock()
+	if latest {
+		m.cachedRofiAlbumsLatest = s
+	} else {
+		m.cachedRofiAlbums = s
+	}
+	m.cacheMu.Unlock()
+	return s, nil
+}
+
+// rofiTracksResponse returns a pre-built, cached list of every track for the
+// rofi client. Each line is "X-Track: <trackid>\t<display>".
+func (m *musicDB) rofiTracksResponse() (string, error) {
+	m.cacheMu.Lock()
+	cached := m.cachedRofiTracks
+	m.cacheMu.Unlock()
+	if cached != "" {
+		return cached, nil
+	}
+
+	tracks, err := m.allTracks()
+	if err != nil {
+		return "", err
+	}
+	var sb strings.Builder
+	for _, t := range tracks {
+		id, _ := t["song_id"].(string)
+		artist, _ := t["artist"].(string)
+		if artist == "" {
+			artist, _ = t["albumartist"].(string)
+		}
+		title, _ := t["title"].(string)
+		album, _ := t["album"].(string)
+		// Tab-separated raw fields: id, artist, title, album (client aligns).
+		fmt.Fprintf(&sb, "X-Track: %s\t%s\t%s\t%s\n",
+			id, sanitizeField(artist), sanitizeField(title), sanitizeField(album))
+	}
+	s := sb.String()
+
+	m.cacheMu.Lock()
+	m.cachedRofiTracks = s
+	m.cacheMu.Unlock()
+	return s, nil
+}
+
+// sanitizeField strips tabs/newlines so a field stays on one tab-delimited line.
+func sanitizeField(s string) string {
+	return strings.NewReplacer("\t", " ", "\n", " ", "\r", " ").Replace(s)
 }
 
 // cachedAlbumsLatestResponse returns the pre-formatted MPD response for
@@ -428,7 +510,11 @@ type trackMeta struct {
 
 func (m *musicDB) upsertTrack(t *trackMeta) (int64, error) {
 	rHash := trackRatingHash(t.albumArtist, t.album, t.Title, t.TrackNumber)
-	res, err := m.db.Exec(`INSERT INTO tracks(album_id, artist, title, track_number, disc_number,
+	// RETURNING id yields the row id whether the track was inserted or updated,
+	// so the FTS index below always targets the correct rowid (LastInsertId is
+	// unreliable on the ON CONFLICT DO UPDATE path).
+	var id int64
+	err := m.db.QueryRow(`INSERT INTO tracks(album_id, artist, title, track_number, disc_number,
 			duration, path, file_modified, replay_gain_track, replay_gain_album, peak_track, peak_album, rating_hash)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
@@ -443,18 +529,12 @@ func (m *musicDB) upsertTrack(t *trackMeta) (int64, error) {
 			replay_gain_album = excluded.replay_gain_album,
 			peak_track = excluded.peak_track,
 			peak_album = excluded.peak_album,
-			rating_hash = excluded.rating_hash`,
+			rating_hash = excluded.rating_hash
+		RETURNING id`,
 		t.AlbumID, t.Artist, t.Title, t.TrackNumber, t.DiscNumber,
-		t.Duration, t.Path, t.FileModified, t.ReplayGainTrack, t.ReplayGainAlbum, t.PeakTrack, t.PeakAlbum, rHash)
+		t.Duration, t.Path, t.FileModified, t.ReplayGainTrack, t.ReplayGainAlbum, t.PeakTrack, t.PeakAlbum, rHash).Scan(&id)
 	if err != nil {
 		return 0, err
-	}
-	id, err := res.LastInsertId()
-	if err != nil || id == 0 {
-		row := m.db.QueryRow(`SELECT id FROM tracks WHERE path = ?`, t.Path)
-		if err := row.Scan(&id); err != nil {
-			return 0, err
-		}
 	}
 	// Update FTS index for this track
 	m.db.Exec(`DELETE FROM tracks_fts WHERE rowid = ?`, id)
@@ -1063,6 +1143,65 @@ func (m *musicDB) removeTracksNotIn(paths map[string]struct{}) error {
 		}
 	}
 	// Clean up orphaned albums and artists
+	_, _ = m.db.Exec(`DELETE FROM albums WHERE id NOT IN (SELECT DISTINCT album_id FROM tracks)`)
+	_, _ = m.db.Exec(`DELETE FROM artists WHERE id NOT IN (SELECT DISTINCT artist_id FROM albums)`)
+	return nil
+}
+
+// removeTracksUnderPrefixNotIn deletes tracks whose path begins with prefix but
+// is not present in keep. Used by targeted subtree scans to prune files that
+// vanished from a rescanned directory without touching the rest of the library.
+// Pass an empty keep set to remove every track under the prefix (deleted dir).
+func (m *musicDB) removeTracksUnderPrefixNotIn(prefix string, keep map[string]struct{}) error {
+	rows, err := m.db.Query(`SELECT id, path FROM tracks`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var toDelete []int64
+	for rows.Next() {
+		var id int64
+		var path string
+		if err := rows.Scan(&id, &path); err != nil {
+			return err
+		}
+		if !strings.HasPrefix(path, prefix) {
+			continue
+		}
+		if _, ok := keep[path]; ok {
+			continue
+		}
+		toDelete = append(toDelete, id)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range toDelete {
+		m.db.Exec(`DELETE FROM tracks_fts WHERE rowid = ?`, id)
+		if _, err := m.db.Exec(`DELETE FROM tracks WHERE id = ?`, id); err != nil {
+			return err
+		}
+	}
+	if len(toDelete) > 0 {
+		// Clean up orphaned albums and artists
+		_, _ = m.db.Exec(`DELETE FROM albums WHERE id NOT IN (SELECT DISTINCT album_id FROM tracks)`)
+		_, _ = m.db.Exec(`DELETE FROM artists WHERE id NOT IN (SELECT DISTINCT artist_id FROM albums)`)
+	}
+	return nil
+}
+
+// deleteTrackByPath removes a single track (and its FTS row) by exact path,
+// then prunes any artist/album left orphaned. No-op if the path is unknown.
+func (m *musicDB) deleteTrackByPath(path string) error {
+	var id int64
+	err := m.db.QueryRow(`SELECT id FROM tracks WHERE path = ?`, path).Scan(&id)
+	if err != nil {
+		return nil // not present — nothing to do
+	}
+	m.db.Exec(`DELETE FROM tracks_fts WHERE rowid = ?`, id)
+	if _, err := m.db.Exec(`DELETE FROM tracks WHERE id = ?`, id); err != nil {
+		return err
+	}
 	_, _ = m.db.Exec(`DELETE FROM albums WHERE id NOT IN (SELECT DISTINCT album_id FROM tracks)`)
 	_, _ = m.db.Exec(`DELETE FROM artists WHERE id NOT IN (SELECT DISTINCT artist_id FROM albums)`)
 	return nil

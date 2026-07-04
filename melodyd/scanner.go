@@ -30,8 +30,12 @@ type scanner struct {
 	logger            *log.Logger
 	transcodeCacheDir string
 	scanning          bool
+	updateJobID       int                 // last issued MPD update job id
+	lastUpdate        int64               // unix seconds of the last completed scan
+	pendingUpdates    map[string]struct{} // queued update URIs awaiting a scan slot
+	draining          bool                // a drainUpdates goroutine is active
 	scanMu            sync.Mutex
-	onScanComplete    func() // called after a successful full scan
+	onScanComplete    func(fullRebuild bool) // called after a successful scan; fullRebuild=true only for full scans
 }
 
 func newScanner(musicDir string, db *musicDB, logger *log.Logger, transcodeCacheDir string) *scanner {
@@ -257,8 +261,230 @@ func (s *scanner) fullScan() error {
 	s.logger.Printf("scanner: full scan complete in %s (scanned=%d skipped=%d errors=%d total=%d)",
 		elapsed.Round(time.Millisecond), scanned, skipped, scanErrors, len(files))
 
+	s.markUpdated(start)
 	if s.onScanComplete != nil {
-		s.onScanComplete()
+		s.onScanComplete(true) // full scan — rebuild FTS and warm caches
+	}
+	return nil
+}
+
+// markUpdated records the time of a completed scan for the MPD `db_update` field.
+func (s *scanner) markUpdated(at time.Time) {
+	s.scanMu.Lock()
+	s.lastUpdate = at.Unix()
+	s.scanMu.Unlock()
+}
+
+// currentJob returns the in-progress MPD update job id, or 0 if no scan is running.
+func (s *scanner) currentJob() int {
+	s.scanMu.Lock()
+	defer s.scanMu.Unlock()
+	if s.scanning {
+		return s.updateJobID
+	}
+	return 0
+}
+
+// lastUpdateTime returns the unix timestamp of the last completed scan (0 if none).
+func (s *scanner) lastUpdateTime() int64 {
+	s.scanMu.Lock()
+	defer s.scanMu.Unlock()
+	return s.lastUpdate
+}
+
+// requestUpdate queues a scan and returns the MPD update job id. An empty uri
+// triggers a full scan; otherwise only the subtree under uri is scanned.
+//
+// Updates that arrive while a scan is already running are QUEUED (deduplicated
+// by URI), not dropped — a single drain goroutine processes them serially once
+// the running scan finishes. This matters for bursts: a file-watcher pushing
+// create+rename events for the same album in quick succession would otherwise
+// lose all but the first, leaving the album unscanned (or wrongly removed).
+func (s *scanner) requestUpdate(uri string) int {
+	s.scanMu.Lock()
+	s.updateJobID++
+	job := s.updateJobID
+	if s.pendingUpdates == nil {
+		s.pendingUpdates = make(map[string]struct{})
+	}
+	s.pendingUpdates[uri] = struct{}{}
+	if s.draining {
+		s.scanMu.Unlock()
+		return job // an active drain goroutine will pick this up
+	}
+	s.draining = true
+	s.scanMu.Unlock()
+
+	go s.drainUpdates()
+	return job
+}
+
+// drainUpdates processes queued update URIs one at a time, waiting out any
+// concurrent scan (e.g. the startup full scan) rather than dropping work.
+func (s *scanner) drainUpdates() {
+	for {
+		s.scanMu.Lock()
+		if s.scanning {
+			// Another scan holds the slot — wait, keeping the queue intact.
+			s.scanMu.Unlock()
+			time.Sleep(250 * time.Millisecond)
+			continue
+		}
+		if len(s.pendingUpdates) == 0 {
+			s.draining = false
+			s.scanMu.Unlock()
+			return
+		}
+		var uri string
+		for u := range s.pendingUpdates {
+			uri = u
+			break
+		}
+		delete(s.pendingUpdates, uri)
+		s.scanMu.Unlock()
+
+		var err error
+		if uri == "" {
+			err = s.fullScan()
+		} else {
+			err = s.scanPath(uri)
+		}
+		if err != nil {
+			// Lost a race for the scan slot — requeue and retry shortly.
+			if strings.Contains(err.Error(), "scan already in progress") {
+				s.scanMu.Lock()
+				s.pendingUpdates[uri] = struct{}{}
+				s.scanMu.Unlock()
+				time.Sleep(250 * time.Millisecond)
+				continue
+			}
+			s.logger.Printf("scanner: update %q failed: %v", uri, err)
+		}
+	}
+}
+
+// scanPath scans a single subtree (directory or file) under the music root,
+// identified by an MPD-relative URI. Used for targeted updates pushed by an
+// external file-watcher (e.g. a NAS-side inotify daemon) so we avoid walking
+// the entire library over a network share on every change.
+func (s *scanner) scanPath(uri string) error {
+	s.scanMu.Lock()
+	if s.scanning {
+		s.scanMu.Unlock()
+		return fmt.Errorf("scan already in progress")
+	}
+	s.scanning = true
+	s.scanMu.Unlock()
+	defer func() {
+		s.scanMu.Lock()
+		s.scanning = false
+		s.scanMu.Unlock()
+	}()
+
+	// Resolve the target and ensure it stays within the music root.
+	clean := filepath.Clean("/" + uri) // strips ".." segments and leading slashes
+	target := filepath.Join(s.musicDir, clean)
+	rel, err := filepath.Rel(s.musicDir, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("invalid update path %q", uri)
+	}
+
+	start := time.Now()
+	s.logger.Printf("scanner: starting targeted scan of %s", target)
+
+	info, err := os.Stat(target)
+	if err != nil {
+		// Target is missing — but only treat that as a real deletion if the
+		// target's PARENT directory still exists. A missing parent means either
+		// a malformed URI (e.g. a wrong "flac/…" prefix yielding a doubled path)
+		// or that the underlying mount is unreachable (an sshfs/NFS hiccup).
+		// Removing tracks in those cases would wrongly wipe the library, so bail
+		// without touching the DB.
+		parent := filepath.Dir(target)
+		if pInfo, pErr := os.Stat(parent); pErr != nil || !pInfo.IsDir() {
+			s.logger.Printf("scanner: skipping update for %q — parent %q not accessible (bad path or mount down), no removal",
+				uri, parent)
+			return nil
+		}
+		// Genuine deletion: remove the track at that exact path (single file)
+		// and any tracks beneath it (directory). The trailing separator on the
+		// subtree prefix avoids pruning a sibling whose name merely shares this
+		// prefix (e.g. "Album2" vs "Album2 Deluxe").
+		if rmErr := s.db.removeTracksUnderPrefixNotIn(target+string(os.PathSeparator), nil); rmErr != nil {
+			s.logger.Printf("scanner: cleanup error for %s: %v", target, rmErr)
+		}
+		if rmErr := s.db.deleteTrackByPath(target); rmErr != nil {
+			s.logger.Printf("scanner: cleanup error for %s: %v", target, rmErr)
+		}
+		s.logger.Printf("scanner: targeted scan complete in %s (removed subtree %s)",
+			time.Since(start).Round(time.Millisecond), target)
+		s.markUpdated(start)
+		if s.onScanComplete != nil {
+			s.onScanComplete(false) // targeted — FTS already maintained incrementally
+		}
+		return nil
+	}
+
+	// Collect audio files under the target.
+	var files []string
+	if info.IsDir() {
+		filepath.WalkDir(target, func(path string, d os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return nil
+			}
+			if d.IsDir() {
+				return nil
+			}
+			if audioExtensions[strings.ToLower(filepath.Ext(path))] {
+				files = append(files, path)
+			}
+			return nil
+		})
+	} else if audioExtensions[strings.ToLower(filepath.Ext(target))] {
+		files = append(files, target)
+	}
+
+	var changed []string
+	var scanned, skipped, scanErrors int
+	for _, p := range files {
+		err := s.scanFile(p)
+		if err != nil {
+			if err.Error() == "unchanged" {
+				skipped++
+				continue
+			}
+			scanErrors++
+			s.logger.Printf("scanner: error scanning %s: %v", p, err)
+			continue
+		}
+		scanned++
+		changed = append(changed, p)
+	}
+
+	// Prune tracks that disappeared from the scanned subtree. For a directory we
+	// constrain cleanup to that subtree; for a single file, to that exact path.
+	prefix := target
+	if info.IsDir() {
+		prefix = target + string(os.PathSeparator)
+	}
+	keep := make(map[string]struct{}, len(files))
+	for _, f := range files {
+		keep[f] = struct{}{}
+	}
+	if err := s.db.removeTracksUnderPrefixNotIn(prefix, keep); err != nil {
+		s.logger.Printf("scanner: cleanup error for %s: %v", prefix, err)
+	}
+
+	if s.transcodeCacheDir != "" && len(changed) > 0 {
+		s.invalidateTranscodeCachePaths(changed)
+	}
+
+	s.logger.Printf("scanner: targeted scan complete in %s (scanned=%d skipped=%d errors=%d total=%d)",
+		time.Since(start).Round(time.Millisecond), scanned, skipped, scanErrors, len(files))
+
+	s.markUpdated(start)
+	if s.onScanComplete != nil {
+		s.onScanComplete(false) // targeted — FTS already maintained incrementally
 	}
 	return nil
 }
@@ -1012,5 +1238,24 @@ func (s *scanner) invalidateTranscodeCache(changed []*trackMeta) {
 	}
 	if len(changed) > 0 {
 		s.logger.Printf("scanner: invalidated transcode cache for %d changed tracks", len(changed))
+	}
+}
+
+// invalidateTranscodeCachePaths is like invalidateTranscodeCache but takes file
+// paths directly (used by targeted subtree scans).
+func (s *scanner) invalidateTranscodeCachePaths(paths []string) {
+	for _, p := range paths {
+		id, err := s.db.trackIDByPath(p)
+		if err != nil || id == 0 {
+			continue
+		}
+		pattern := filepath.Join(s.transcodeCacheDir, fmt.Sprintf("%d_*", id))
+		matches, _ := filepath.Glob(pattern)
+		for _, m := range matches {
+			os.Remove(m)
+		}
+	}
+	if len(paths) > 0 {
+		s.logger.Printf("scanner: invalidated transcode cache for %d changed tracks", len(paths))
 	}
 }

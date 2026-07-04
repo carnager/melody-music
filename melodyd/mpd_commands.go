@@ -50,6 +50,8 @@ func init() {
 		"addidprio":      cmdAddIDPrio,
 
 		// Database
+		"update":      cmdUpdate,
+		"rescan":      cmdRescan,
 		"lsinfo":      cmdLsInfo,
 		"list":        cmdList,
 		"find":        cmdFind,
@@ -59,6 +61,12 @@ func init() {
 		"listallinfo": cmdListAllInfo,
 		"findadd":     cmdFindAdd,
 		"searchadd":   cmdSearchAdd,
+		"enqueue":     cmdEnqueue,
+
+		// Pre-built launcher lists (rofi/dmenu client)
+		"melody_albums":        cmdMelodyAlbums,
+		"melody_albums_latest": cmdMelodyAlbumsLatest,
+		"melody_tracks":        cmdMelodyTracks,
 
 		// Stored playlists
 		"listplaylists":    cmdListPlaylists,
@@ -237,7 +245,29 @@ func cmdStatus(c *mpdConn, args []string) *mpdError {
 			c.writeKV("nextsongid", nextMPDID)
 		}
 	}
+	if job := a.scanner.currentJob(); job > 0 {
+		c.writeKV("updating_db", job)
+	}
 	return nil
+}
+
+// cmdUpdate triggers a library scan. With no argument it scans the whole music
+// root; with a URI it scans only that subtree. Returns the update job id. This
+// is the entry point for an external file-watcher (e.g. a NAS-side inotify
+// daemon) to push changes: `update "Artist/Album"`.
+func cmdUpdate(c *mpdConn, args []string) *mpdError {
+	var uri string
+	if len(args) > 0 {
+		uri = args[0]
+	}
+	job := c.app.scanner.requestUpdate(uri)
+	c.writeKV("updating_db", job)
+	return nil
+}
+
+// cmdRescan behaves like update; both schedule a scan of the given subtree.
+func cmdRescan(c *mpdConn, args []string) *mpdError {
+	return cmdUpdate(c, args)
 }
 
 func cmdCurrentSong(c *mpdConn, args []string) *mpdError {
@@ -282,7 +312,7 @@ func cmdStats(c *mpdConn, args []string) *mpdError {
 	c.writeKV("songs", trackCount)
 	c.writeKV("uptime", 0)
 	c.writeKV("db_playtime", 0)
-	c.writeKV("db_update", 0)
+	c.writeKV("db_update", c.app.scanner.lastUpdateTime())
 	c.writeKV("playtime", 0)
 	return nil
 }
@@ -880,14 +910,11 @@ func cmdMove(c *mpdConn, args []string) *mpdError {
 	a.playQueue = append(a.playQueue[:from], a.playQueue[from+1:]...)
 	a.queueIDs = append(a.queueIDs[:from], a.queueIDs[from+1:]...)
 
-	// Adjust curQueuePos for the removal
+	// MPD semantics: TO is the moved song's position in the resulting queue,
+	// so after removal the insert index is TO for both directions.
 	if a.curQueuePos == from {
 		// Track the current song as it moves
-		if to > from {
-			a.curQueuePos = to - 1
-		} else {
-			a.curQueuePos = to
-		}
+		a.curQueuePos = to
 	} else {
 		if a.curQueuePos > from {
 			a.curQueuePos--
@@ -897,9 +924,6 @@ func cmdMove(c *mpdConn, args []string) *mpdError {
 		}
 	}
 
-	if to > from {
-		to--
-	}
 	a.playQueue = append(a.playQueue[:to], append([]string{entry}, a.playQueue[to:]...)...)
 	a.queueIDs = append(a.queueIDs[:to], append([]int{entryID}, a.queueIDs[to:]...)...)
 	for len(a.queuePriority) < to {
@@ -963,6 +987,7 @@ func cmdShuffle(c *mpdConn, args []string) *mpdError {
 		end = qLen
 	}
 	if end-start < 2 {
+		a.playQueueMu.Unlock()
 		return nil
 	}
 
@@ -1511,6 +1536,32 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 		return writeOrAddFilteredTracks(c, a, tracks, nil, nil, cmdName, addToQueue)
 	}
 
+	// Album lookup by id (fast, unambiguous — used by the rofi/launcher client).
+	if v, ok := tags["albumid"]; ok && v != "" {
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return mpdErr(errArg, cmdName, "invalid albumid")
+		}
+		tracks, err := a.db.tracksByAlbum(id)
+		if err != nil {
+			return mpdErr(errSystem, cmdName, err.Error())
+		}
+		return writeOrAddFilteredTracks(c, a, tracks, ratingFilter, albumRatingFilter, cmdName, addToQueue)
+	}
+
+	// Track lookup by id.
+	if v, ok := tags["trackid"]; ok && v != "" {
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return mpdErr(errArg, cmdName, "invalid trackid")
+		}
+		track, err := a.db.trackByID(id)
+		if err != nil {
+			return nil // no match
+		}
+		return writeOrAddFilteredTracks(c, a, []map[string]any{track}, ratingFilter, nil, cmdName, addToQueue)
+	}
+
 	// File lookup by path
 	if fileURI, ok := tags["file"]; ok && fileURI != "" {
 		absPath := filepath.Join(a.cfg.Library.MusicDir, fileURI)
@@ -1676,10 +1727,17 @@ func writeOrAddFilteredTracks(c *mpdConn, a *app, tracks []map[string]any, ratin
 		}
 	}
 	if addToQueue && len(allSongIDs) > 0 {
-		if err := a.addSongsToPlaylist(allSongIDs, "add"); err != nil {
+		mode := c.enqueueMode
+		if mode == "" {
+			mode = "add"
+		}
+		if err := a.addSongsToPlaylist(allSongIDs, mode); err != nil {
 			return mpdErr(errSystem, cmdName, err.Error())
 		}
 		a.mpdHub.notify(SubPlaylist)
+		if mode == "replace" {
+			a.mpdHub.notify(SubPlayer)
+		}
 	}
 	return nil
 }
@@ -1722,6 +1780,59 @@ func oldStyleToConditions(args []string) []filterCondition {
 		})
 	}
 	return conditions
+}
+
+// cmdMelodyAlbums sends the pre-built album list for the launcher client.
+func cmdMelodyAlbums(c *mpdConn, args []string) *mpdError {
+	resp, err := c.app.db.rofiAlbumsResponse(false)
+	if err != nil {
+		return mpdErr(errSystem, "melody_albums", err.Error())
+	}
+	c.writef("%s", resp)
+	return nil
+}
+
+// cmdMelodyAlbumsLatest sends the pre-built album list sorted newest-first.
+func cmdMelodyAlbumsLatest(c *mpdConn, args []string) *mpdError {
+	resp, err := c.app.db.rofiAlbumsResponse(true)
+	if err != nil {
+		return mpdErr(errSystem, "melody_albums_latest", err.Error())
+	}
+	c.writef("%s", resp)
+	return nil
+}
+
+// cmdMelodyTracks sends the pre-built track list for the launcher client.
+func cmdMelodyTracks(c *mpdConn, args []string) *mpdError {
+	resp, err := c.app.db.rofiTracksResponse()
+	if err != nil {
+		return mpdErr(errSystem, "melody_tracks", err.Error())
+	}
+	c.writef("%s", resp)
+	return nil
+}
+
+// cmdEnqueue is a melody extension: `enqueue <add|insert|replace> <filter...>`.
+// It matches tracks exactly like find/findadd but queues them with the given
+// mode — insert places them right after the current track, replace clears the
+// queue and starts playback. Lets clients (rofi/dmenu, TUI, web) offer an
+// add/insert/replace choice without juggling clear+add+move themselves.
+func cmdEnqueue(c *mpdConn, args []string) *mpdError {
+	if len(args) < 1 {
+		return mpdErr(errArg, "enqueue", "need mode (add|insert|replace) and filter arguments")
+	}
+	mode := strings.ToLower(args[0])
+	switch mode {
+	case "add", "insert", "replace":
+	default:
+		return mpdErr(errArg, "enqueue", "mode must be add, insert, or replace")
+	}
+	if len(args) < 2 {
+		return mpdErr(errArg, "enqueue", "need filter arguments")
+	}
+	c.enqueueMode = mode
+	defer func() { c.enqueueMode = "" }()
+	return cmdSearchOrFindInner(c, args[1:], "enqueue", false, true)
 }
 
 func cmdFindAdd(c *mpdConn, args []string) *mpdError {

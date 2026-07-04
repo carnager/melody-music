@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	xdraw "golang.org/x/image/draw"
 	_ "golang.org/x/image/webp"
 
 	"github.com/BurntSushi/toml"
@@ -36,9 +37,22 @@ import (
 // Config
 // ---------------------------------------------------------------------------
 
+type tuiColors struct {
+	Accent     string `toml:"accent"`
+	Dim        string `toml:"dim"`
+	Danger     string `toml:"danger"`
+	Border     string `toml:"border"`
+	SelectedBg string `toml:"selected_bg"`
+	PlayingBg  string `toml:"playing_bg"`
+}
+
 type tuiConfig struct {
 	MPDHost string `toml:"mpd_host"`
 	MPDPort int    `toml:"mpd_port"`
+	// AlbumArt controls kitty-graphics album art: "auto" (default, detect
+	// kitty/ghostty), "always", or "never".
+	AlbumArt string    `toml:"album_art"`
+	Colors   tuiColors `toml:"colors"`
 }
 
 var cfg tuiConfig
@@ -79,7 +93,37 @@ func defaultTUIConfig() string {
 # MPD_HOST and MPD_PORT environment variables override these values.
 mpd_host = "localhost"
 mpd_port = 6600
+
+# Album art via the kitty graphics protocol.
+# "auto" enables it on kitty/ghostty terminals; "always"/"never" override.
+#album_art = "auto"
+
+# Override UI colors (any subset).
+#[colors]
+#accent = "#3b82f6"
+#dim = "#6b7280"
+#danger = "#ef4444"
+#border = "#374151"
+#selected_bg = "#1e3a5f"
+#playing_bg = "#1a2744"
 `
+}
+
+// artEnabled gates all kitty-graphics album art handling.
+var artEnabled bool
+
+func detectArtSupport() bool {
+	switch strings.ToLower(cfg.AlbumArt) {
+	case "always", "on", "true", "yes":
+		return true
+	case "never", "off", "false", "no":
+		return false
+	}
+	if os.Getenv("KITTY_WINDOW_ID") != "" {
+		return true
+	}
+	term := os.Getenv("TERM")
+	return strings.Contains(term, "kitty") || strings.Contains(term, "ghostty")
 }
 
 func applyMPDEnv(c *tuiConfig) {
@@ -514,16 +558,26 @@ type playlistTracksMsg []trackEntry
 
 type plPickerReadyMsg []playlistEntry
 
+// plPickerFilesMsg carries resolved file URIs for an album/artist that should
+// open the playlist picker.
+type plPickerFilesMsg []string
+
 type devicesMsg struct {
 	devices []deviceInfo
 	active  int // output ID of enabled device, -1 if none
 }
 
 type albumArtMsg struct {
-	data []byte
+	img  *image.RGBA // decoded + downscaled cover (nil if unavailable)
 	file string
-	w, h int
 	err  string
+}
+
+// artReadyMsg delivers star-burned, zlib-compressed pixels ready to transmit.
+type artReadyMsg struct {
+	file string
+	rgba []byte
+	w, h int
 }
 
 type artTransmittedMsg struct{}
@@ -550,6 +604,16 @@ type gotoMetaMsg struct {
 }
 
 type errMsg string
+
+type toastMsg struct {
+	text  string
+	isErr bool
+}
+
+// toastCmd emits a transient status message shown in the player bar.
+func toastCmd(text string, isErr bool) tea.Cmd {
+	return func() tea.Msg { return toastMsg{text: text, isErr: isErr} }
+}
 
 // ---------------------------------------------------------------------------
 // Focus / panel
@@ -614,8 +678,11 @@ type model struct {
 	qOffset      int
 	qSelected    map[int]bool
 	confirmClear bool
-	qFirstSongID string
-	queueVersion int // MPD playlist version, used to skip redundant queue fetches
+
+	// playlist delete confirmation (holds playlist name)
+	confirmDeletePl string
+	qFirstSongID    string
+	queueVersion    int // MPD playlist version, used to skip redundant queue fetches
 
 	// playlists
 	playlists      []playlistEntry
@@ -641,7 +708,7 @@ type model struct {
 	showPlPicker    bool
 	plPickerList    []playlistEntry
 	plPickerCursor  int
-	plPickerURI     string
+	plPickerURIs    []string
 	plPickerNewMode bool
 	plPickerInput   textinput.Model
 
@@ -676,8 +743,19 @@ type model struct {
 
 	// priority popup
 	showPrioMenu  bool
-	prioCursor    int    // 0=Low, 1=Medium, 2=High
-	prioSourceURI string // file URI to add with priority
+	prioCursor    int      // 0=Low, 1=Medium, 2=High (3=None in queue mode)
+	prioSourceURI string   // file URI to add with priority
+	prioForQueue  bool     // true when changing priority of existing queue items
+	prioTargetIDs []string // queue song IDs to re-prioritize
+
+	// save queue as playlist
+	saveQueueMode bool
+	saveInput     textinput.Model
+
+	// command palette (:)
+	cmdMode  bool
+	cmdInput textinput.Model
+	cmdSel   int // selected entry among the filtered suggestions
 
 	// modes popup
 	showModes   bool
@@ -690,10 +768,20 @@ type model struct {
 	devCursor    int
 
 	// album art (kitty protocol)
-	artData    []byte // raw image data for current track
-	artFile    string // URI of track whose art is loaded
-	artW, artH int    // pixel dimensions of the image
-	artRGBA    []byte // zlib-compressed RGBA pixels (cached for re-transmit)
+	artBase    *image.RGBA // decoded + downscaled cover for the current track
+	artFile    string      // URI of track whose art is loaded
+	artW, artH int         // pixel dimensions of the prepared image
+	artRGBA    []byte      // zlib-compressed RGBA pixels (cached for re-transmit)
+
+	// transient status toast (player bar)
+	toast      string
+	toastErr   bool
+	toastUntil time.Time
+
+	// mouse double-click tracking
+	lastClickTime  time.Time
+	lastClickRow   int
+	lastClickPanel panel
 
 	err string
 }
@@ -707,11 +795,22 @@ func newModel() model {
 	pti.Placeholder = "New playlist name..."
 	pti.CharLimit = 100
 
+	sti := textinput.New()
+	sti.Placeholder = "Playlist name..."
+	sti.CharLimit = 100
+
+	cti := textinput.New()
+	cti.Prompt = ": "
+	cti.Placeholder = "command..."
+	cti.CharLimit = 100
+
 	return model{
 		focus:         panelLibrary,
 		libMode:       libArtists,
 		searchInput:   ti,
 		plPickerInput: pti,
+		saveInput:     sti,
+		cmdInput:      cti,
 		activeDevice:  -1,
 	}
 }
@@ -758,7 +857,7 @@ func listenIdle() tea.Msg {
 
 	// Send idle command (no mutex needed — this connection is exclusively for idle)
 	idleConn.conn.SetDeadline(time.Time{}) // no deadline for idle
-	_, err := idleConn.w.WriteString("idle player playlist mixer options database stored_playlist rating\n")
+	_, err := idleConn.w.WriteString("idle player playlist mixer options database stored_playlist output rating\n")
 	if err != nil {
 		idleConn.close()
 		idleConn = nil
@@ -824,7 +923,11 @@ func fetchStatus() tea.Msg {
 	if ps.Dur == 0 {
 		ps.Dur, _ = strconv.ParseFloat(cs["Time"], 64)
 	}
-	ps.Volume, _ = strconv.Atoi(st["volume"])
+	if v, ok := st["volume"]; ok {
+		ps.Volume, _ = strconv.Atoi(v)
+	} else {
+		ps.Volume = -1
+	}
 	ps.Title = cs["Title"]
 	ps.Artist = cs["Artist"]
 	ps.AlbumArtist = cs["AlbumArtist"]
@@ -1055,6 +1158,9 @@ func fetchGotoMeta(file string) tea.Cmd {
 
 func fetchAlbumArt(file string) tea.Cmd {
 	return func() tea.Msg {
+		if !artEnabled {
+			return albumArtMsg{file: file, err: "album art disabled"}
+		}
 		if fetchConn == nil || file == "" {
 			return albumArtMsg{file: file, err: "no fetch connection or empty file"}
 		}
@@ -1065,13 +1171,11 @@ func fetchAlbumArt(file string) tea.Cmd {
 		if len(data) == 0 {
 			return albumArtMsg{file: file, err: "empty albumart response"}
 		}
-		// Decode to get dimensions
-		r := bytes.NewReader(data)
-		cfg, _, err := image.DecodeConfig(r)
+		img, _, err := image.Decode(bytes.NewReader(data))
 		if err != nil {
-			return albumArtMsg{data: data, file: file, w: 300, h: 300, err: "decode config: " + err.Error()}
+			return albumArtMsg{file: file, err: "decode: " + err.Error()}
 		}
-		return albumArtMsg{data: data, file: file, w: cfg.Width, h: cfg.Height}
+		return albumArtMsg{img: downscaleRGBA(img, 640), file: file}
 	}
 }
 
@@ -1108,17 +1212,24 @@ func fetchAlbums(artist string) tea.Cmd {
 			a.ID = artist + "\x00" + a.Album + "\x00" + a.Date
 			albums = append(albums, a)
 		}
-		// Fetch album ratings
-		for i := range albums {
-			a := &albums[i]
-			rLines, err := mpd.cmd("getalbumrating " + mpdEscape(a.AlbumArtist) + " " + mpdEscape(a.Album) + " " + mpdEscape(a.Date))
-			if err == nil {
-				rKV := parseKV(rLines)
-				if v, ok := rKV["rating"]; ok {
-					a.Rating, _ = strconv.Atoi(v)
-				}
-				if v, ok := rKV["computed"]; ok {
-					a.Computed, _ = strconv.ParseFloat(v, 64)
+		// Fetch all album ratings in a single command-list round-trip
+		if len(albums) > 0 {
+			cmds := make([]string, len(albums))
+			for i, a := range albums {
+				cmds[i] = "getalbumrating " + mpdEscape(a.AlbumArtist) + " " + mpdEscape(a.Album) + " " + mpdEscape(a.Date)
+			}
+			if results, err := mpd.cmdBatch(cmds); err == nil {
+				for i := range albums {
+					if i >= len(results) {
+						break
+					}
+					rKV := parseKV(results[i])
+					if v, ok := rKV["rating"]; ok {
+						albums[i].Rating, _ = strconv.Atoi(v)
+					}
+					if v, ok := rKV["computed"]; ok {
+						albums[i].Computed, _ = strconv.ParseFloat(v, 64)
+					}
 				}
 			}
 		}
@@ -1337,36 +1448,62 @@ func loadPlaylist(name, mode string) tea.Cmd {
 	}
 }
 
-func fetchPlPickerPlaylists(uri string) tea.Cmd {
+func fetchPlPickerPlaylists() tea.Msg {
+	if mpd == nil {
+		return plPickerReadyMsg(nil)
+	}
+	lines, err := mpd.cmd("listplaylists")
+	if err != nil {
+		return plPickerReadyMsg(nil)
+	}
+	groups := parseGroups(lines, "playlist")
+	var pls []playlistEntry
+	for _, g := range groups {
+		name := g["playlist"]
+		if name == "" {
+			continue
+		}
+		sc, _ := strconv.Atoi(g["songs"])
+		pls = append(pls, playlistEntry{Name: name, SongCount: sc})
+	}
+	return plPickerReadyMsg(pls)
+}
+
+// fetchFilesForFilter resolves an MPD find filter to its file URIs, then opens
+// the playlist picker with those URIs pending.
+func openPlPickerForFilter(filterArgs string) tea.Cmd {
 	return func() tea.Msg {
 		if mpd == nil {
 			return plPickerReadyMsg(nil)
 		}
-		lines, err := mpd.cmd("listplaylists")
+		lines, err := mpd.cmd("find " + filterArgs)
 		if err != nil {
-			return plPickerReadyMsg(nil)
+			return errMsg(err.Error())
 		}
-		groups := parseGroups(lines, "playlist")
-		var pls []playlistEntry
-		for _, g := range groups {
-			name := g["playlist"]
-			if name == "" {
-				continue
-			}
-			sc, _ := strconv.Atoi(g["songs"])
-			pls = append(pls, playlistEntry{Name: name, SongCount: sc})
+		files := parseList(lines, "file")
+		if len(files) == 0 {
+			return errMsg("no tracks found")
 		}
-		return plPickerReadyMsg(pls)
+		return plPickerFilesMsg(files)
 	}
 }
 
-func addToPlaylist(playlistName, uri string) tea.Cmd {
+func addToPlaylist(playlistName string, uris []string) tea.Cmd {
 	return func() tea.Msg {
 		if mpd == nil {
-			return nil
+			return errMsg("not connected")
 		}
-		mpd.cmd("playlistadd " + mpdEscape(playlistName) + " " + mpdEscape(uri))
-		return nil
+		cmds := make([]string, len(uris))
+		for i, uri := range uris {
+			cmds[i] = "playlistadd " + mpdEscape(playlistName) + " " + mpdEscape(uri)
+		}
+		if _, err := mpd.cmdBatch(cmds); err != nil {
+			return errMsg(err.Error())
+		}
+		if len(uris) == 1 {
+			return toastMsg{text: "Added to " + playlistName}
+		}
+		return toastMsg{text: fmt.Sprintf("Added %d tracks to %s", len(uris), playlistName)}
 	}
 }
 
@@ -1393,6 +1530,28 @@ func parseRatingFilter(w string) (tag, op, value string, ok bool) {
 	return "", "", "", false
 }
 
+// parseTagQuery recognizes tag-qualified search tokens like "artist:foo",
+// "album:bar", "title:baz", "date:1994".
+func parseTagQuery(w string) (tag, value string, ok bool) {
+	k, v, found := strings.Cut(w, ":")
+	if !found || v == "" {
+		return "", "", false
+	}
+	switch strings.ToLower(k) {
+	case "artist":
+		return "Artist", v, true
+	case "albumartist":
+		return "AlbumArtist", v, true
+	case "album":
+		return "Album", v, true
+	case "title":
+		return "Title", v, true
+	case "date", "year":
+		return "Date", v, true
+	}
+	return "", "", false
+}
+
 func buildSearchCmd(q string) string {
 	words := strings.Fields(q)
 	var textParts []string
@@ -1400,6 +1559,8 @@ func buildSearchCmd(q string) string {
 	for _, w := range words {
 		if tag, op, val, ok := parseRatingFilter(w); ok {
 			filters = append(filters, "("+tag+" "+op+" '"+val+"')")
+		} else if tag, val, ok := parseTagQuery(w); ok {
+			filters = append(filters, "("+tag+" contains '"+mpdEscapeFilter(val)+"')")
 		} else {
 			textParts = append(textParts, w)
 		}
@@ -1433,9 +1594,13 @@ func matchesAll(text string, terms []string) bool {
 func searchTextTerms(q string) []string {
 	var terms []string
 	for _, w := range strings.Fields(q) {
-		if _, _, _, ok := parseRatingFilter(w); !ok {
-			terms = append(terms, strings.ToLower(w))
+		if _, _, _, ok := parseRatingFilter(w); ok {
+			continue
 		}
+		if _, _, ok := parseTagQuery(w); ok {
+			continue
+		}
+		terms = append(terms, strings.ToLower(w))
 	}
 	return terms
 }
@@ -1544,10 +1709,304 @@ func mpdCommand(cmds ...string) tea.Cmd {
 			return fetchStatus()
 		}
 		for _, c := range cmds {
-			mpd.cmd(c)
+			if _, err := mpd.cmd(c); err != nil {
+				return errMsg(err.Error())
+			}
 		}
 		return fetchStatus()
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Command palette (:)
+// ---------------------------------------------------------------------------
+
+type paletteEntry struct {
+	name string
+	args string // argument hint shown in the palette
+	desc string
+	run  func(m model, args string) (model, tea.Cmd)
+}
+
+// onOff resolves an on/off argument, toggling the current state when empty.
+func onOff(args string, cur bool) string {
+	switch strings.ToLower(strings.TrimSpace(args)) {
+	case "on", "1", "true", "yes":
+		return "1"
+	case "off", "0", "false", "no":
+		return "0"
+	}
+	if cur {
+		return "0"
+	}
+	return "1"
+}
+
+// seekCmdArg turns a :seek argument (+n/-n relative, mm:ss or plain seconds
+// absolute) into a seekcur command.
+func seekCmdArg(args string) (string, bool) {
+	a := strings.TrimSpace(args)
+	if a == "" {
+		return "", false
+	}
+	if strings.HasPrefix(a, "+") || strings.HasPrefix(a, "-") {
+		if _, err := strconv.ParseFloat(a, 64); err == nil {
+			return "seekcur " + a, true
+		}
+		return "", false
+	}
+	if mm, ss, ok := strings.Cut(a, ":"); ok {
+		mI, err1 := strconv.Atoi(mm)
+		sI, err2 := strconv.Atoi(ss)
+		if err1 == nil && err2 == nil && mI >= 0 && sI >= 0 && sI < 60 {
+			return fmt.Sprintf("seekcur %d", mI*60+sI), true
+		}
+		return "", false
+	}
+	if _, err := strconv.ParseFloat(a, 64); err == nil {
+		return "seekcur " + a, true
+	}
+	return "", false
+}
+
+var palette = []paletteEntry{
+	{"clear", "", "Clear the queue", func(m model, _ string) (model, tea.Cmd) {
+		return m, tea.Batch(mpdCommand("clear"), toastCmd("Queue cleared", false))
+	}},
+	{"consume", "[on|off]", "Consume mode", func(m model, a string) (model, tea.Cmd) {
+		return m, mpdCommand("consume " + onOff(a, m.status.Consume))
+	}},
+	{"help", "", "Show hotkey help", func(m model, _ string) (model, tea.Cmd) {
+		m.showHelp = true
+		return m, nil
+	}},
+	{"lyrics", "", "Toggle lyrics sidebar", func(m model, _ string) (model, tea.Cmd) {
+		m.showLyrics = !m.showLyrics
+		if m.showLyrics {
+			file := m.status.File
+			if file != "" && m.lyricsFile != file {
+				m.lyrics = nil
+				m.lyricsFile = file
+				m.lyricsScroll = 0
+				return m, fetchLyrics(file)
+			}
+		}
+		return m, nil
+	}},
+	{"modes", "", "Playback modes popup", func(m model, _ string) (model, tea.Cmd) {
+		m.showModes = true
+		m.modesCursor = 0
+		return m, nil
+	}},
+	{"next", "", "Next track", func(m model, _ string) (model, tea.Cmd) {
+		return m, mpdCommand("next")
+	}},
+	{"outputs", "", "Device picker", func(m model, _ string) (model, tea.Cmd) {
+		m.showDevices = true
+		m.devCursor = 0
+		return m, tea.Cmd(fetchDevices)
+	}},
+	{"pause", "", "Toggle pause", func(m model, _ string) (model, tea.Cmd) {
+		return m, mpdCommand("pause")
+	}},
+	{"play", "", "Start playback", func(m model, _ string) (model, tea.Cmd) {
+		return m, mpdCommand("play")
+	}},
+	{"prev", "", "Previous track", func(m model, _ string) (model, tea.Cmd) {
+		return m, mpdCommand("previous")
+	}},
+	{"random", "[on|off]", "Random playback mode", func(m model, a string) (model, tea.Cmd) {
+		return m, mpdCommand("random " + onOff(a, m.status.Random))
+	}},
+	{"random-album", "", "Play a random album", func(m model, _ string) (model, tea.Cmd) {
+		return m, doRandomAlbum()
+	}},
+	{"random-tracks", "", "Play 50 random tracks", func(m model, _ string) (model, tea.Cmd) {
+		return m, doRandomTracks()
+	}},
+	{"repeat", "[on|off]", "Repeat mode", func(m model, a string) (model, tea.Cmd) {
+		return m, mpdCommand("repeat " + onOff(a, m.status.Repeat))
+	}},
+	{"replaygain", "off|track|album", "ReplayGain mode", func(m model, a string) (model, tea.Cmd) {
+		switch strings.ToLower(strings.TrimSpace(a)) {
+		case "off", "track", "album":
+			return m, mpdCommand("replay_gain_mode " + strings.ToLower(strings.TrimSpace(a)))
+		case "":
+			// Cycle like Ctrl+G
+			next := "track"
+			switch m.status.ReplayGainMode {
+			case "track":
+				next = "album"
+			case "album":
+				next = "off"
+			}
+			return m, mpdCommand("replay_gain_mode " + next)
+		}
+		return m, toastCmd("replaygain: off, track or album", true)
+	}},
+	{"save", "<name>", "Save queue as playlist", func(m model, a string) (model, tea.Cmd) {
+		if a == "" {
+			return m, toastCmd("save: playlist name required", true)
+		}
+		return m, saveQueue(a)
+	}},
+	{"seek", "+/-secs | mm:ss", "Seek in current track", func(m model, a string) (model, tea.Cmd) {
+		if cmd, ok := seekCmdArg(a); ok {
+			return m, mpdCommand(cmd)
+		}
+		return m, toastCmd("seek: use +10, -10, 90 or 1:30", true)
+	}},
+	{"shuffle", "", "Shuffle the queue", func(m model, _ string) (model, tea.Cmd) {
+		return m, tea.Batch(mpdCommand("shuffle"), toastCmd("Queue shuffled", false))
+	}},
+	{"single", "[on|off]", "Single mode", func(m model, a string) (model, tea.Cmd) {
+		return m, mpdCommand("single " + onOff(a, m.status.Single))
+	}},
+	{"stop", "", "Stop playback", func(m model, _ string) (model, tea.Cmd) {
+		return m, mpdCommand("stop")
+	}},
+	{"update", "", "Rescan the library", func(m model, _ string) (model, tea.Cmd) {
+		return m, mpdCommand("update")
+	}},
+	{"volume", "<0-100 | +n | -n>", "Set or adjust volume", func(m model, a string) (model, tea.Cmd) {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			return m, toastCmd("volume: use 0-100, +5 or -5", true)
+		}
+		if strings.HasPrefix(a, "+") || strings.HasPrefix(a, "-") {
+			if _, err := strconv.Atoi(a); err == nil {
+				return m, mpdCommand("volume " + a)
+			}
+		} else if n, err := strconv.Atoi(a); err == nil && n >= 0 && n <= 100 {
+			return m, mpdCommand("setvol " + a)
+		}
+		return m, toastCmd("volume: use 0-100, +5 or -5", true)
+	}},
+}
+
+// paletteStatus provides the current state shown next to stateful commands in
+// the palette.
+var paletteStatus = map[string]func(m model) string{
+	"repeat":  func(m model) string { return onOffLabel(m.status.Repeat) },
+	"random":  func(m model) string { return onOffLabel(m.status.Random) },
+	"single":  func(m model) string { return onOffLabel(m.status.Single) },
+	"consume": func(m model) string { return onOffLabel(m.status.Consume) },
+	"lyrics":  func(m model) string { return onOffLabel(m.showLyrics) },
+	"pause": func(m model) string {
+		if m.status.State == "" {
+			return ""
+		}
+		return m.status.State
+	},
+	"replaygain": func(m model) string {
+		if m.status.ReplayGainMode == "" {
+			return "off"
+		}
+		return m.status.ReplayGainMode
+	},
+	"volume": func(m model) string {
+		if m.status.Volume < 0 {
+			return ""
+		}
+		return fmt.Sprintf("%d%%", m.status.Volume)
+	},
+}
+
+func onOffLabel(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
+}
+
+// cmdMatches returns palette entries whose name has the typed first token as
+// a prefix.
+func (m model) cmdMatches() []*paletteEntry {
+	first := strings.ToLower(strings.TrimSpace(m.cmdInput.Value()))
+	if i := strings.IndexByte(first, ' '); i >= 0 {
+		first = first[:i]
+	}
+	var out []*paletteEntry
+	for i := range palette {
+		if strings.HasPrefix(palette[i].name, first) {
+			out = append(out, &palette[i])
+		}
+	}
+	return out
+}
+
+func (m model) handleCmdKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
+	matches := m.cmdMatches()
+	switch key {
+	case "esc":
+		m.cmdMode = false
+		m.cmdInput.Blur()
+		return m, nil
+	case "down", "ctrl+n":
+		if m.cmdSel < len(matches)-1 {
+			m.cmdSel++
+		}
+		return m, nil
+	case "up", "ctrl+p":
+		if m.cmdSel > 0 {
+			m.cmdSel--
+		}
+		return m, nil
+	case "tab":
+		// Complete the highlighted command name
+		if m.cmdSel < len(matches) {
+			m.cmdInput.SetValue(matches[m.cmdSel].name + " ")
+			m.cmdInput.CursorEnd()
+			m.cmdSel = 0
+		}
+		return m, nil
+	case "enter":
+		m.cmdMode = false
+		m.cmdInput.Blur()
+		line := strings.TrimSpace(m.cmdInput.Value())
+		if line == "" {
+			return m, nil
+		}
+		name, args, _ := strings.Cut(line, " ")
+		var entry *paletteEntry
+		for i := range palette {
+			if palette[i].name == strings.ToLower(name) {
+				entry = &palette[i]
+				break
+			}
+		}
+		if entry == nil && m.cmdSel < len(matches) {
+			entry = matches[m.cmdSel]
+		}
+		if entry == nil {
+			return m, toastCmd("Unknown command: "+name, true)
+		}
+		return entry.run(m, strings.TrimSpace(args))
+	default:
+		var cmd tea.Cmd
+		prev := m.cmdInput.Value()
+		m.cmdInput, cmd = m.cmdInput.Update(msg)
+		if m.cmdInput.Value() != prev {
+			m.cmdSel = 0
+		}
+		return m, cmd
+	}
+}
+
+// transportKeyCmd handles playback transport keys (F5-F8 and their ASCII
+// aliases) that keep working inside fullscreen views without closing them.
+func transportKeyCmd(key string) (tea.Cmd, bool) {
+	switch key {
+	case "f5", "<":
+		return mpdCommand("previous"), true
+	case "f6":
+		return mpdCommand("pause"), true
+	case "f7", "s":
+		return mpdCommand("stop"), true
+	case "f8", ">":
+		return mpdCommand("next"), true
+	}
+	return nil, false
 }
 
 func volumeDeltaKey(msg tea.KeyMsg, key string) (int, bool) {
@@ -1661,17 +2120,21 @@ func doRandomTracks() tea.Cmd {
 		if len(files) == 0 {
 			return fetchStatus()
 		}
-		// Shuffle and pick up to 50
+		// Shuffle and pick up to 50, added in one command-list round-trip
 		rand.Shuffle(len(files), func(i, j int) { files[i], files[j] = files[j], files[i] })
 		n := 50
 		if n > len(files) {
 			n = len(files)
 		}
-		mpd.cmd("clear")
+		cmds := make([]string, 0, n+2)
+		cmds = append(cmds, "clear")
 		for _, f := range files[:n] {
-			mpd.cmd("add " + mpdEscape(f))
+			cmds = append(cmds, "add "+mpdEscape(f))
 		}
-		mpd.cmd("play")
+		cmds = append(cmds, "play")
+		if _, err := mpd.cmdBatch(cmds); err != nil {
+			return errMsg(err.Error())
+		}
 		return fetchStatus()
 	}
 }
@@ -1679,12 +2142,14 @@ func doRandomTracks() tea.Cmd {
 func addToQueue(uri, mode string) tea.Cmd {
 	return func() tea.Msg {
 		if mpd == nil {
-			return fetchStatus()
+			return errMsg("not connected")
 		}
 		switch mode {
 		case "replace":
 			mpd.cmd("clear")
-			mpd.cmd("add " + mpdEscape(uri))
+			if _, err := mpd.cmd("add " + mpdEscape(uri)); err != nil {
+				return errMsg(err.Error())
+			}
 			mpd.cmd("play")
 		case "insert":
 			// Insert after current song
@@ -1694,7 +2159,10 @@ func addToQueue(uri, mode string) tea.Cmd {
 			if v, ok := st["song"]; ok {
 				pos, _ = strconv.Atoi(v)
 			}
-			result, _ := mpd.cmd("addid " + mpdEscape(uri))
+			result, err := mpd.cmd("addid " + mpdEscape(uri))
+			if err != nil {
+				return errMsg(err.Error())
+			}
 			if pos >= 0 && len(result) > 0 {
 				kv := parseKV(result)
 				if id, ok := kv["Id"]; ok {
@@ -1702,25 +2170,36 @@ func addToQueue(uri, mode string) tea.Cmd {
 				}
 			}
 		default: // "add"
-			mpd.cmd("add " + mpdEscape(uri))
+			if _, err := mpd.cmd("add " + mpdEscape(uri)); err != nil {
+				return errMsg(err.Error())
+			}
 		}
 		return fetchStatus()
 	}
 }
 
+// albumFilterArgs builds find filter args from a composite album ID
+// (artist\x00album\x00date).
+func albumFilterArgs(albumID string) string {
+	parts := strings.SplitN(albumID, "\x00", 3)
+	if len(parts) < 3 {
+		return ""
+	}
+	args := mpdFilterEq("AlbumArtist", parts[0]) + " " + mpdFilterEq("Album", parts[1])
+	if parts[2] != "" {
+		args += " " + mpdFilterEq("Date", parts[2])
+	}
+	return args
+}
+
 func addAlbumToQueue(albumID, mode string) tea.Cmd {
 	return func() tea.Msg {
 		if mpd == nil {
-			return fetchStatus()
+			return errMsg("not connected")
 		}
-		parts := strings.SplitN(albumID, "\x00", 3)
-		if len(parts) < 3 {
+		filterArgs := albumFilterArgs(albumID)
+		if filterArgs == "" {
 			return fetchStatus()
-		}
-		artist, album, date := parts[0], parts[1], parts[2]
-		filterArgs := mpdFilterEq("AlbumArtist", artist) + " " + mpdFilterEq("Album", album)
-		if date != "" {
-			filterArgs += " " + mpdFilterEq("Date", date)
 		}
 
 		switch mode {
@@ -1802,6 +2281,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
+		if m.toast != "" && time.Now().After(m.toastUntil) {
+			m.toast = ""
+		}
 		// Tick is only for elapsed time interpolation redraws — no status fetch
 		if m.status.State == "play" {
 			m.status.TimePos += time.Since(statusFetchTime).Seconds()
@@ -1813,15 +2295,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickCmd()
 
 	case idleMsg:
-		// On rating changes, force queue refetch to pick up new X-Rating values
+		// Server notified us of changes — fetch status immediately, plus
+		// whatever else the changed subsystems invalidate.
+		cmds := []tea.Cmd{tea.Cmd(fetchStatus), tea.Cmd(listenIdle)}
 		for _, sub := range []string(msg) {
-			if sub == "rating" {
+			switch sub {
+			case "rating":
+				// Force queue refetch to pick up new X-Rating values
 				forceQueueRefresh = true
-				break
+			case "database":
+				cmds = append(cmds, tea.Cmd(fetchArtists), toastCmd("Library updated", false))
+				if m.libMode == libAlbums && m.libSortLatest {
+					cmds = append(cmds, tea.Cmd(fetchAllAlbumsLatest))
+				}
+			case "stored_playlist":
+				if m.libMode == libPlaylists || m.libMode == libPlaylistTracks {
+					cmds = append(cmds, tea.Cmd(fetchPlaylists))
+				}
+			case "output":
+				if m.showDevices {
+					cmds = append(cmds, tea.Cmd(fetchDevices))
+				}
 			}
 		}
-		// Server notified us of changes — fetch status immediately
-		return m, tea.Batch(tea.Cmd(fetchStatus), tea.Cmd(listenIdle))
+		return m, tea.Batch(cmds...)
 
 	case statusMsg:
 		m.status = msg.status
@@ -1871,32 +2368,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case albumArtMsg:
-		resetArtTransmission()
-		if len(msg.data) > 0 {
-			m.artData = msg.data
-			rgba, w, h := prepareArtRGBA(msg.data, m.npAlbumRating)
-			if len(rgba) == 0 {
-				tuiDebugf("albumart decode failed file=%q bytes=%d err=%q", msg.file, len(msg.data), msg.err)
-				m.artFile = ""
-				m.artData = nil
-				m.artRGBA = nil
-				return m, nil
-			}
-			m.artFile = msg.file
-			m.artW = w
-			m.artH = h
-			m.artRGBA = rgba
-			tuiDebugf("albumart loaded file=%q bytes=%d size=%dx%d", msg.file, len(msg.data), m.artW, m.artH)
-		} else {
-			tuiDebugf("albumart empty file=%q err=%q", msg.file, msg.err)
+		if msg.img == nil {
+			tuiDebugf("albumart unavailable file=%q err=%q", msg.file, msg.err)
+			resetArtTransmission()
 			m.artFile = ""
-			m.artData = nil
+			m.artBase = nil
 			m.artRGBA = nil
+			return m, nil
 		}
+		m.artBase = msg.img
+		m.artFile = msg.file
+		tuiDebugf("albumart loaded file=%q size=%dx%d", msg.file, msg.img.Bounds().Dx(), msg.img.Bounds().Dy())
+		// Star-burn + compression happen off the UI thread
+		return m, prepareArtCmd(msg.img, msg.file, m.npAlbumRating)
+
+	case artReadyMsg:
+		if msg.file != m.artFile {
+			return m, nil // prepared for a track we've already moved past
+		}
+		m.artRGBA = msg.rgba
+		m.artW = msg.w
+		m.artH = msg.h
+		resetArtTransmission()
 		return m, nil
 
 	case artistsMsg:
+		refresh := m.libMode == libArtists && len(m.artists) > 0
 		m.artists = msg
+		if refresh {
+			// In-place refresh (library update, reconnect) — keep position/filter
+			if m.libFilter != "" {
+				m.rebuildLibFilter()
+			}
+			if l := m.libListLen(); m.libCursor >= l {
+				m.libCursor = l - 1
+				if m.libCursor < 0 {
+					m.libCursor = 0
+				}
+			}
+			return m, nil
+		}
 		m.libCursor = 0
 		m.libOffset = 0
 		m.libFiltering = false
@@ -1949,10 +2460,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case npAlbumRatingMsg:
 		m.npAlbumRating = msg.rating
-		// Re-prepare art with updated rating burned in
-		if m.artData != nil {
-			resetArtTransmission()
-			m.artRGBA, m.artW, m.artH = prepareArtRGBA(m.artData, m.npAlbumRating)
+		// Re-burn the stars off the UI thread
+		if m.artBase != nil {
+			return m, prepareArtCmd(m.artBase, m.artFile, msg.rating)
 		}
 		return m, nil
 
@@ -1966,11 +2476,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.curAlbum != nil {
 			isNP = m.curAlbum.AlbumArtist == m.status.AlbumArtist && m.curAlbum.Album == m.status.Album && m.curAlbum.Date == m.status.Date
 		}
+		var artCmd tea.Cmd
 		if isNP {
 			m.npAlbumRating = msg.rating
-			if m.artData != nil {
-				resetArtTransmission()
-				m.artRGBA, m.artW, m.artH = prepareArtRGBA(m.artData, m.npAlbumRating)
+			if m.artBase != nil {
+				artCmd = prepareArtCmd(m.artBase, m.artFile, msg.rating)
 			}
 		}
 		// Update the album entry in the albums list so the view refreshes
@@ -1995,7 +2505,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		return m, nil
+		return m, artCmd
 
 	case ratingPopupMsg:
 		if m.showRating {
@@ -2004,6 +2514,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case playlistsMsg:
+		if m.libMode == libPlaylists && len(m.playlists) > 0 {
+			// In-place refresh after stored_playlist change
+			m.playlists = msg
+			if m.libFilter != "" {
+				m.rebuildLibFilter()
+			}
+			if l := m.libListLen(); m.libCursor >= l {
+				m.libCursor = l - 1
+				if m.libCursor < 0 {
+					m.libCursor = 0
+				}
+			}
+			return m, nil
+		}
+		if m.libMode == libPlaylistTracks {
+			// Background refresh while inside a playlist — update the list and
+			// re-fetch the open playlist's tracks; stay in the tracks view.
+			m.playlists = msg
+			return m, fetchPlaylistTracks(m.curPlaylist)
+		}
 		m.playlists = msg
 		m.libMode = libPlaylists
 		m.libCursor = 0
@@ -2015,7 +2545,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.ClearScreen
 
 	case playlistTracksMsg:
+		refresh := m.libMode == libPlaylistTracks
 		m.playlistTracks = msg
+		if refresh {
+			if m.libFilter != "" {
+				m.rebuildLibFilter()
+			}
+			if l := m.libListLen(); m.libCursor >= l {
+				m.libCursor = l - 1
+				if m.libCursor < 0 {
+					m.libCursor = 0
+				}
+			}
+			return m, nil
+		}
 		m.libMode = libPlaylistTracks
 		m.libCursor = 0
 		m.libOffset = 0
@@ -2031,6 +2574,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.plPickerCursor = 0
 		m.plPickerNewMode = false
 		return m, nil
+
+	case plPickerFilesMsg:
+		m.plPickerURIs = msg
+		return m, fetchPlPickerPlaylists
 
 	case searchMsg:
 		m.searchRes = searchResult(msg)
@@ -2051,36 +2598,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.activeDevice = msg.active
 		return m, nil
 
+	case toastMsg:
+		m.toast = msg.text
+		m.toastErr = msg.isErr
+		m.toastUntil = time.Now().Add(3 * time.Second)
+		return m, nil
+
+	case errMsg:
+		m.toast = string(msg)
+		m.toastErr = true
+		m.toastUntil = time.Now().Add(5 * time.Second)
+		return m, nil
+
 	case tea.KeyMsg:
-		return m.handleKey(msg)
+		nm, cmd := m.handleKey(msg)
+		if mm, ok := nm.(model); ok {
+			// Keep scroll offsets in sync with cursor movement (edge scrolling)
+			d := mm.layoutDims()
+			mm.libOffset = scrollOffset(mm.libCursor, mm.libOffset, d.libBodyH, mm.libListLen())
+			mm.qOffset = scrollOffset(mm.qCursor, mm.qOffset, d.queueVisH, len(mm.queue))
+			return mm, cmd
+		}
+		return nm, cmd
 
 	case tea.MouseMsg:
-		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
-			seekY := m.height - 1
-			if (msg.Y >= seekY-3 && msg.Y <= seekY+1) && m.status.Dur > 0 {
-				// Offset for album art on the left
-				artOffset := 0
-				if len(m.artRGBA) > 0 {
-					artOffset = 4*2 + 1 // artCols (rows*2) + gap
-				}
-				posStr := fmtTime(m.status.TimePos)
-				durStr := fmtTime(m.status.Dur)
-				infoW := m.width - artOffset
-				if infoW < 20 {
-					infoW = 20
-				}
-				barStart := artOffset + len(posStr) + 1
-				barW := infoW - len(posStr) - len(durStr) - 6
-				if barW < 5 {
-					barW = 5
-				}
-				x := msg.X - barStart
-				if x >= 0 && x <= barW {
-					pos := float64(x) / float64(barW) * m.status.Dur
-					return m, mpdCommand(fmt.Sprintf("seekcur %.1f", pos))
-				}
-			}
-		}
+		return m.handleMouse(msg)
 	}
 
 	if m.searching {
@@ -2091,34 +2633,167 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	overlay := m.searching || m.showMenu || m.showHelp || m.showRating || m.showTrackInfo ||
+		m.showNowPlaying || m.showModes || m.showPrioMenu || m.showPlPicker ||
+		m.showGoto || m.showDevices || m.saveQueueMode || m.cmdMode
+	if overlay || msg.Action != tea.MouseActionPress {
+		return m, nil
+	}
+
+	d := m.layoutDims()
+	inPanels := msg.Y >= 0 && msg.Y < d.mainH
+
+	switch msg.Button {
+	case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
+		delta := 3
+		if msg.Button == tea.MouseButtonWheelUp {
+			delta = -3
+		}
+		switch {
+		case inPanels && msg.X < d.libW:
+			l := m.libListLen()
+			m.libCursor += delta
+			if m.libCursor >= l {
+				m.libCursor = l - 1
+			}
+			if m.libCursor < 0 {
+				m.libCursor = 0
+			}
+			m.libOffset = scrollOffset(m.libCursor, m.libOffset, d.libBodyH, l)
+		case inPanels && msg.X < d.libW+d.queueW:
+			m.qCursor += delta
+			if m.qCursor >= len(m.queue) {
+				m.qCursor = len(m.queue) - 1
+			}
+			if m.qCursor < 0 {
+				m.qCursor = 0
+			}
+			m.qOffset = scrollOffset(m.qCursor, m.qOffset, d.queueVisH, len(m.queue))
+		case inPanels && m.showLyrics:
+			m.lyricsScroll += delta
+			if m.lyricsScroll >= len(m.lyrics) {
+				m.lyricsScroll = len(m.lyrics) - 1
+			}
+			if m.lyricsScroll < 0 {
+				m.lyricsScroll = 0
+			}
+		}
+		return m, nil
+
+	case tea.MouseButtonLeft:
+		// Clicks in the panel area focus the panel and select the row;
+		// a double-click on a queue row plays it.
+		if inPanels && msg.Y >= 2 {
+			row := msg.Y - 2 // border + header
+			if msg.X < d.libW {
+				idx := m.libOffset + row
+				if idx >= 0 && idx < m.libListLen() {
+					m.focus = panelLibrary
+					m.libCursor = idx
+					m.lastClickTime = time.Now()
+					m.lastClickRow = idx
+					m.lastClickPanel = panelLibrary
+				}
+				return m, nil
+			}
+			if msg.X < d.libW+d.queueW {
+				idx := m.qOffset + row
+				if idx >= 0 && idx < len(m.queue) {
+					m.focus = panelQueue
+					m.qCursor = idx
+					now := time.Now()
+					if idx == m.lastClickRow && m.lastClickPanel == panelQueue &&
+						now.Sub(m.lastClickTime) < 400*time.Millisecond {
+						m.lastClickTime = time.Time{} // consume the double-click
+						m.qSelected = nil
+						return m, mpdCommand(fmt.Sprintf("play %d", idx))
+					}
+					m.lastClickTime = now
+					m.lastClickRow = idx
+					m.lastClickPanel = panelQueue
+				}
+				return m, nil
+			}
+			return m, nil
+		}
+		// Clicks near the seekbar seek
+		seekY := m.height - 1
+		if (msg.Y >= seekY-3 && msg.Y <= seekY+1) && m.status.Dur > 0 {
+			// Offset for album art on the left
+			artOffset := 0
+			if len(m.artRGBA) > 0 {
+				artOffset = 4*2 + 1 // artCols (rows*2) + gap
+			}
+			posStr := fmtTime(m.status.TimePos)
+			durStr := fmtTime(m.status.Dur)
+			infoW := m.width - artOffset
+			if infoW < 20 {
+				infoW = 20
+			}
+			barStart := artOffset + len(posStr) + 1
+			barW := infoW - len(posStr) - len(durStr) - 6
+			if barW < 5 {
+				barW = 5
+			}
+			x := msg.X - barStart
+			if x >= 0 && x <= barW {
+				pos := float64(x) / float64(barW) * m.status.Dur
+				return m, mpdCommand(fmt.Sprintf("seekcur %.1f", pos))
+			}
+		}
+	}
+	return m, nil
+}
+
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
 	if key == "ctrl+c" {
 		return m, tea.Quit
 	}
-	if key == "q" && !m.searching && !m.showMenu && !m.showHelp && !m.showRating && !m.showTrackInfo && !m.showNowPlaying && !m.showModes && !m.showPrioMenu && !m.libFiltering {
+	anyOverlay := m.searching || m.showMenu || m.showHelp || m.showRating || m.showTrackInfo ||
+		m.showNowPlaying || m.showModes || m.showPrioMenu || m.libFiltering ||
+		m.showPlPicker || m.showGoto || m.showDevices || m.saveQueueMode || m.cmdMode
+	if key == "q" && !anyOverlay {
+		// q steps back when drilled into the library; quits only at a root view
+		if m.focus == panelLibrary && m.libMode != libArtists {
+			return m.libBack()
+		}
 		return m, tea.Quit
 	}
 
-	if !m.searching && !m.libFiltering && !m.showPlPicker {
+	if !m.searching && !m.libFiltering && !m.showPlPicker && !m.saveQueueMode && !m.cmdMode {
 		if delta, ok := volumeDeltaKey(msg, key); ok {
 			return m, mpdCommand(fmt.Sprintf("volume %+d", delta))
 		}
 	}
 
 	if m.showHelp {
+		if cmd, ok := transportKeyCmd(key); ok {
+			return m, cmd
+		}
 		m.showHelp = false
 		return m, nil
 	}
 
 	if m.showTrackInfo {
+		if cmd, ok := transportKeyCmd(key); ok {
+			return m, cmd
+		}
 		m.showTrackInfo = false
 		return m, nil
 	}
 
 	if m.showNowPlaying {
+		if cmd, ok := transportKeyCmd(key); ok {
+			return m, cmd
+		}
 		switch key {
+		case "left":
+			return m, mpdCommand("seekcur -5")
+		case "right":
+			return m, mpdCommand("seekcur +5")
 		case "down":
 			if m.lyricsScroll < len(m.lyrics)-1 {
 				m.lyricsScroll++
@@ -2145,6 +2820,31 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showNowPlaying = false
 		}
 		return m, nil
+	}
+
+	if m.saveQueueMode {
+		switch key {
+		case "esc":
+			m.saveQueueMode = false
+			m.saveInput.Blur()
+			return m, nil
+		case "enter":
+			name := strings.TrimSpace(m.saveInput.Value())
+			if name != "" {
+				m.saveQueueMode = false
+				m.saveInput.Blur()
+				return m, saveQueue(name)
+			}
+			return m, nil
+		default:
+			var cmd tea.Cmd
+			m.saveInput, cmd = m.saveInput.Update(msg)
+			return m, cmd
+		}
+	}
+
+	if m.cmdMode {
+		return m.handleCmdKey(msg, key)
 	}
 
 	if m.showGoto {
@@ -2194,8 +2894,53 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.srCursor = 0
 		m.srTotal = 0
 		return m, textinput.Blink
-	case " ":
+	case ":":
+		m.cmdMode = true
+		m.cmdInput.SetValue("")
+		m.cmdInput.Focus()
+		m.cmdSel = 0
+		return m, textinput.Blink
+	case "f5":
+		return m, mpdCommand("previous")
+	case "f6":
 		return m, mpdCommand("pause")
+	case "f7":
+		return m, mpdCommand("stop")
+	case "f8":
+		return m, mpdCommand("next")
+	case " ":
+		// In the library panel, Space quick-adds the focused item; in the
+		// queue it toggles selection (handled by the queue key handler).
+		if m.focus == panelLibrary {
+			return m.libAction("add")
+		}
+		return m.handleQueueKey(key)
+	case "1", "2", "3":
+		m.focus = panelLibrary
+		if m.libMode == libArtists && !m.libSortLatest {
+			m.savedArtistCursor = m.libCursor
+			m.savedArtistOffset = m.libOffset
+		}
+		m.libCursor = 0
+		m.libOffset = 0
+		m.libFiltering = false
+		m.libFilter = ""
+		m.libFiltered = nil
+		resetArtTransmission()
+		switch key {
+		case "1":
+			m.libMode = libArtists
+			m.libSortLatest = false
+			m.libCursor = m.savedArtistCursor
+			m.libOffset = m.savedArtistOffset
+			return m, tea.Batch(tea.Cmd(fetchArtists), tea.ClearScreen)
+		case "2":
+			m.libSortLatest = false
+			return m, fetchPlaylists
+		default: // "3"
+			m.libSortLatest = true
+			return m, fetchAllAlbumsLatest
+		}
 	case ">":
 		return m, mpdCommand("next")
 	case "<":
@@ -2252,7 +2997,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.trackInfo = nil
 			return m, fetchTrackInfo(file)
 		}
-		return m, nil
 		return m, nil
 	case "l":
 		m.showLyrics = !m.showLyrics
@@ -2400,6 +3144,15 @@ func (m model) handleMenuKey(key string) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleLibKey(key string) (tea.Model, tea.Cmd) {
+	if m.confirmDeletePl != "" {
+		name := m.confirmDeletePl
+		m.confirmDeletePl = ""
+		if key == "y" || key == "Y" {
+			return m, deletePlaylist(name)
+		}
+		return m, nil
+	}
+
 	listLen := m.libListLen()
 
 	switch key {
@@ -2445,6 +3198,12 @@ func (m model) handleLibKey(key string) (tea.Model, tea.Cmd) {
 		if di < 0 {
 			return m.libBack()
 		}
+		return m.libAction("replace")
+	case "m":
+		di := m.dataIndex()
+		if di < 0 {
+			return m, nil
+		}
 		m.showMenu = true
 		m.menuCursor = 0
 		m.menuSource = "library"
@@ -2457,27 +3216,40 @@ func (m model) handleLibKey(key string) (tea.Model, tea.Cmd) {
 		return m.libAction("add")
 	case "A":
 		return m.libAction("replace")
-	case "i":
+	case "I":
 		return m.libAction("insert")
 	case "p":
 		di := m.dataIndex()
 		if di >= 0 {
-			var uri string
 			switch m.libMode {
 			case libTracks:
 				if di < len(m.tracks) {
-					uri = m.tracks[di].ID
+					m.plPickerURIs = []string{m.tracks[di].ID}
+					return m, fetchPlPickerPlaylists
 				}
 			case libPlaylistTracks:
 				if di < len(m.playlistTracks) {
-					uri = m.playlistTracks[di].ID
+					m.plPickerURIs = []string{m.playlistTracks[di].ID}
+					return m, fetchPlPickerPlaylists
+				}
+			case libAlbums:
+				if di < len(m.albums) {
+					return m, openPlPickerForFilter(albumFilterArgs(m.albums[di].ID))
+				}
+			case libArtists:
+				if di < len(m.artists) {
+					return m, openPlPickerForFilter(mpdFilterEq("AlbumArtist", m.artists[di]))
 				}
 			}
-			if uri != "" {
-				m.plPickerURI = uri
-				return m, fetchPlPickerPlaylists(uri)
+		}
+	case "d", "delete":
+		if m.libMode == libPlaylists {
+			di := m.dataIndex()
+			if di >= 0 && di < len(m.playlists) {
+				m.confirmDeletePl = m.playlists[di].Name
 			}
 		}
+		return m, nil
 	case "S":
 		if m.libMode == libArtists && !m.libSortLatest {
 			// Toggle on: switch to latest-sorted album list
@@ -2561,7 +3333,18 @@ func (m model) handleLibFilterKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cm
 		}
 		return m, nil
 	case "enter":
-		// Show popup menu (same as normal mode)
+		// Replace queue and play the filtered selection, leaving filter mode
+		di := m.dataIndex()
+		if di < 0 {
+			return m, nil
+		}
+		m.libFiltering = false
+		m.libFilter = ""
+		m.libFiltered = nil
+		m.libCursor = di
+		return m.libAction("replace")
+	case "tab":
+		// Action menu for the filtered selection
 		di := m.dataIndex()
 		if di < 0 {
 			return m, nil
@@ -2632,7 +3415,7 @@ func (m *model) rebuildLibFilter() {
 		}
 	case libTracks:
 		for i, t := range m.tracks {
-			if strings.Contains(strings.ToLower(t.Title), query) {
+			if strings.Contains(strings.ToLower(t.Title+" "+t.Artist), query) {
 				indices = append(indices, i)
 			}
 		}
@@ -2697,7 +3480,7 @@ func (m model) focusedTrackFile() string {
 }
 
 func (m model) dataIndex() int {
-	if m.libFilter != "" && len(m.libFiltered) > 0 {
+	if m.libFilter != "" {
 		if m.libCursor < len(m.libFiltered) {
 			return m.libFiltered[m.libCursor]
 		}
@@ -2792,29 +3575,50 @@ func (m model) libAction(mode string) (tea.Model, tea.Cmd) {
 	if di < 0 {
 		return m, nil
 	}
+	var cmd tea.Cmd
+	var label string
 	switch m.libMode {
 	case libArtists:
 		if di < len(m.artists) {
-			return m, addArtistToQueue(m.artists[di], mode)
+			cmd = addArtistToQueue(m.artists[di], mode)
+			label = m.artists[di]
 		}
 	case libAlbums:
 		if di < len(m.albums) {
-			return m, addAlbumToQueue(m.albums[di].ID, mode)
+			cmd = addAlbumToQueue(m.albums[di].ID, mode)
+			label = m.albums[di].Album
 		}
 	case libTracks:
 		if di < len(m.tracks) {
-			return m, addToQueue(m.tracks[di].ID, mode)
+			cmd = addToQueue(m.tracks[di].ID, mode)
+			label = m.tracks[di].Title
 		}
 	case libPlaylists:
 		if di < len(m.playlists) {
-			return m, loadPlaylist(m.playlists[di].Name, mode)
+			cmd = loadPlaylist(m.playlists[di].Name, mode)
+			label = m.playlists[di].Name
 		}
 	case libPlaylistTracks:
 		if di < len(m.playlistTracks) {
-			return m, addToQueue(m.playlistTracks[di].ID, mode)
+			cmd = addToQueue(m.playlistTracks[di].ID, mode)
+			label = m.playlistTracks[di].Title
 		}
 	}
-	return m, nil
+	if cmd == nil {
+		return m, nil
+	}
+	return m, tea.Batch(cmd, toastCmd(actionToast(mode, label), false))
+}
+
+func actionToast(mode, label string) string {
+	switch mode {
+	case "replace":
+		return "Playing: " + label
+	case "insert":
+		return "Inserted: " + label
+	default:
+		return "Added: " + label
+	}
 }
 
 func (m model) handleQueueKey(key string) (tea.Model, tea.Cmd) {
@@ -2854,12 +3658,55 @@ func (m model) handleQueueKey(key string) (tea.Model, tea.Cmd) {
 		if m.qCursor < 0 {
 			m.qCursor = 0
 		}
+	case "left":
+		return m, mpdCommand("seekcur -5")
+	case "right":
+		return m, mpdCommand("seekcur +5")
+	case "J", "shift+down":
+		return m.moveQueueSelection(1)
+	case "K", "shift+up":
+		return m.moveQueueSelection(-1)
+	case "g":
+		for i, q := range m.queue {
+			if q.Current {
+				m.qCursor = i
+				break
+			}
+		}
+	case "Z":
+		if qLen > 0 {
+			return m, tea.Batch(mpdCommand("shuffle"), toastCmd("Queue shuffled", false))
+		}
+	case "S":
+		if qLen > 0 {
+			m.saveQueueMode = true
+			m.saveInput.SetValue("")
+			m.saveInput.Focus()
+			return m, textinput.Blink
+		}
+	case "!":
+		if m.qCursor < qLen {
+			var ids []string
+			if len(m.qSelected) > 0 {
+				for pos := range m.qSelected {
+					if pos < qLen {
+						ids = append(ids, m.queue[pos].SongID)
+					}
+				}
+			} else {
+				ids = []string{m.queue[m.qCursor].SongID}
+			}
+			m.showPrioMenu = true
+			m.prioForQueue = true
+			m.prioTargetIDs = ids
+			m.prioCursor = 1
+		}
 	case "enter":
 		if m.qCursor < qLen {
 			m.qSelected = nil
 			return m, mpdCommand(fmt.Sprintf("play %d", m.qCursor))
 		}
-	case "v":
+	case "v", " ":
 		if m.qCursor < qLen {
 			if m.qSelected == nil {
 				m.qSelected = map[int]bool{}
@@ -2916,8 +3763,8 @@ func (m model) handleQueueKey(key string) (tea.Model, tea.Cmd) {
 		if m.qCursor < qLen {
 			uri := m.queue[m.qCursor].File
 			if uri != "" {
-				m.plPickerURI = uri
-				return m, fetchPlPickerPlaylists(uri)
+				m.plPickerURIs = []string{uri}
+				return m, fetchPlPickerPlaylists
 			}
 		}
 	case "c":
@@ -2925,6 +3772,56 @@ func (m model) handleQueueKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// moveQueueSelection moves the selected queue tracks (or the cursor track if
+// nothing is selected) up or down by one position.
+func (m model) moveQueueSelection(delta int) (tea.Model, tea.Cmd) {
+	qLen := len(m.queue)
+	if qLen == 0 {
+		return m, nil
+	}
+	positions := sortedSelected(m.qSelected)
+	if len(positions) == 0 {
+		if m.qCursor >= qLen {
+			return m, nil
+		}
+		positions = []int{m.qCursor}
+	}
+	// Don't move past either end
+	if delta < 0 && positions[0] == 0 {
+		return m, nil
+	}
+	if delta > 0 && positions[len(positions)-1] >= qLen-1 {
+		return m, nil
+	}
+	// Order the moves so items never collide: bottom-up when moving down,
+	// top-down when moving up.
+	ordered := make([]int, len(positions))
+	copy(ordered, positions)
+	if delta > 0 {
+		sort.Sort(sort.Reverse(sort.IntSlice(ordered)))
+	}
+	cmds := make([]string, len(ordered))
+	for i, pos := range ordered {
+		cmds[i] = fmt.Sprintf("move %d %d", pos, pos+delta)
+	}
+	// Shift the local selection and cursor so the UI follows the move
+	if len(m.qSelected) > 0 {
+		sel := make(map[int]bool, len(m.qSelected))
+		for pos := range m.qSelected {
+			sel[pos+delta] = true
+		}
+		m.qSelected = sel
+	}
+	m.qCursor += delta
+	if m.qCursor < 0 {
+		m.qCursor = 0
+	}
+	if m.qCursor >= qLen {
+		m.qCursor = qLen - 1
+	}
+	return m, mpdCommand(cmds...)
 }
 
 func (m model) handlePlPickerKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
@@ -2942,7 +3839,7 @@ func (m model) handlePlPickerKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd
 				m.showPlPicker = false
 				m.plPickerNewMode = false
 				m.plPickerInput.Blur()
-				return m, addToPlaylist(name, m.plPickerURI)
+				return m, addToPlaylist(name, m.plPickerURIs)
 			}
 			return m, nil
 		default:
@@ -2990,7 +3887,7 @@ func (m model) handlePlPickerKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd
 		if plIdx < len(m.plPickerList) {
 			name := m.plPickerList[plIdx].Name
 			m.showPlPicker = false
-			return m, addToPlaylist(name, m.plPickerURI)
+			return m, addToPlaylist(name, m.plPickerURIs)
 		}
 	}
 	return m, nil
@@ -3073,15 +3970,18 @@ func (m model) searchAction(mode string) (tea.Model, tea.Cmd) {
 	idx := m.srCursor
 	nAlbums := len(m.searchRes.Albums)
 	var cmd tea.Cmd
+	var label string
 	if idx < nAlbums {
 		a := m.searchRes.Albums[idx]
 		cmd = addAlbumToQueue(a.ID, mode)
+		label = a.Album
 	} else {
 		t := m.searchRes.Tracks[idx-nAlbums]
 		cmd = addToQueue(t.ID, mode)
+		label = t.Title
 	}
 	m.searching = false
-	return m, cmd
+	return m, tea.Batch(cmd, toastCmd(actionToast(mode, label), false))
 }
 
 func (m model) searchDrillIn() (tea.Model, tea.Cmd) {
@@ -3167,12 +4067,18 @@ func (m model) searchPrioAction() (tea.Model, tea.Cmd) {
 }
 
 func (m model) handlePrioKey(key string) (tea.Model, tea.Cmd) {
+	maxIdx := 2
+	if m.prioForQueue {
+		maxIdx = 3 // extra "None" entry
+	}
 	switch key {
 	case "esc", "q":
 		m.showPrioMenu = false
+		m.prioForQueue = false
+		m.prioTargetIDs = nil
 		return m, nil
 	case "down":
-		if m.prioCursor < 2 {
+		if m.prioCursor < maxIdx {
 			m.prioCursor++
 		}
 		return m, nil
@@ -3188,8 +4094,17 @@ func (m model) handlePrioKey(key string) (tea.Model, tea.Cmd) {
 			prio = 20 // Medium
 		case 2:
 			prio = 30 // High
+		case 3:
+			prio = 0 // None (queue mode only)
 		}
 		m.showPrioMenu = false
+		if m.prioForQueue {
+			ids := m.prioTargetIDs
+			m.prioForQueue = false
+			m.prioTargetIDs = nil
+			m.qSelected = nil
+			return m, setQueuePriority(ids, prio)
+		}
 		uri := m.prioSourceURI
 		return m, addWithPriority(uri, prio)
 	}
@@ -3199,10 +4114,49 @@ func (m model) handlePrioKey(key string) (tea.Model, tea.Cmd) {
 func addWithPriority(uri string, prio int) tea.Cmd {
 	return func() tea.Msg {
 		if mpd == nil {
-			return fetchStatus()
+			return errMsg("not connected")
 		}
-		mpd.cmd(fmt.Sprintf("addidprio %s %d", mpdEscape(uri), prio))
+		if _, err := mpd.cmd(fmt.Sprintf("addidprio %s %d", mpdEscape(uri), prio)); err != nil {
+			return errMsg(err.Error())
+		}
 		return fetchStatus()
+	}
+}
+
+func setQueuePriority(ids []string, prio int) tea.Cmd {
+	return func() tea.Msg {
+		if mpd == nil {
+			return errMsg("not connected")
+		}
+		if _, err := mpd.cmd(fmt.Sprintf("prioid %d %s", prio, strings.Join(ids, " "))); err != nil {
+			return errMsg(err.Error())
+		}
+		forceQueueRefresh = true
+		return fetchStatus()
+	}
+}
+
+func deletePlaylist(name string) tea.Cmd {
+	return func() tea.Msg {
+		if mpd == nil {
+			return errMsg("not connected")
+		}
+		if _, err := mpd.cmd("rm " + mpdEscape(name)); err != nil {
+			return errMsg(err.Error())
+		}
+		return toastMsg{text: "Deleted playlist " + name}
+	}
+}
+
+func saveQueue(name string) tea.Cmd {
+	return func() tea.Msg {
+		if mpd == nil {
+			return errMsg("not connected")
+		}
+		if _, err := mpd.cmd("save " + mpdEscape(name)); err != nil {
+			return errMsg(err.Error())
+		}
+		return toastMsg{text: "Queue saved as " + name}
 	}
 }
 
@@ -3375,13 +4329,14 @@ func (m model) handleRatingKey(key string) (tea.Model, tea.Cmd) {
 	case "enter":
 		m.showRating = false
 		ratingStr := strconv.Itoa(m.ratingCursor)
+		toast := toastCmd(ratingToast(m.ratingCursor), false)
 		if m.ratingIsAlbum {
 			// Album rating — from album list or track view
 			if m.ratingAlbum != nil {
-				return m, rateAlbum(m.ratingAlbum.AlbumArtist, m.ratingAlbum.Album, m.ratingAlbum.Date, ratingStr)
+				return m, tea.Batch(rateAlbum(m.ratingAlbum.AlbumArtist, m.ratingAlbum.Album, m.ratingAlbum.Date, ratingStr), toast)
 			}
 			if m.curAlbum != nil {
-				return m, rateAlbum(m.curAlbum.AlbumArtist, m.curAlbum.Album, m.curAlbum.Date, ratingStr)
+				return m, tea.Batch(rateAlbum(m.curAlbum.AlbumArtist, m.curAlbum.Album, m.curAlbum.Date, ratingStr), toast)
 			}
 			return m, nil
 		}
@@ -3396,21 +4351,21 @@ func (m model) handleRatingKey(key string) (tea.Model, tea.Cmd) {
 			}
 			m.qSelected = nil
 			if len(ids) > 0 {
-				return m, rateTracks(ids, ratingStr)
+				return m, tea.Batch(rateTracks(ids, ratingStr), toast)
 			}
 			return m, nil
 		} else if m.focus == panelQueue && m.qCursor < len(m.queue) {
 			q := m.queue[m.qCursor]
 			if q.XSongID != "" {
-				return m, rateTrack(q.XSongID, ratingStr)
+				return m, tea.Batch(rateTrack(q.XSongID, ratingStr), toast)
 			}
 		} else if m.focus == panelLibrary && m.libMode == libTracks {
 			di := m.dataIndex()
 			if di >= 0 && di < len(m.tracks) && m.tracks[di].XSongID != "" {
-				return m, rateTrack(m.tracks[di].XSongID, ratingStr)
+				return m, tea.Batch(rateTrack(m.tracks[di].XSongID, ratingStr), toast)
 			}
 		} else if m.status.SongID != "" {
-			return m, rateTrack(m.status.SongID, ratingStr)
+			return m, tea.Batch(rateTrack(m.status.SongID, ratingStr), toast)
 		}
 		return m, nil
 	case "0":
@@ -3460,6 +4415,27 @@ var (
 			BorderForeground(accentColor)
 )
 
+// applyTheme overrides the default colors with any set in the config and
+// rebuilds the styles derived from them.
+func applyTheme(c tuiColors) {
+	set := func(dst *lipgloss.Color, v string) {
+		if v != "" {
+			*dst = lipgloss.Color(v)
+		}
+	}
+	set(&accentColor, c.Accent)
+	set(&dimColor, c.Dim)
+	set(&dangerColor, c.Danger)
+	set(&borderColor, c.Border)
+	set(&selectedBg, c.SelectedBg)
+	set(&playingBg, c.PlayingBg)
+
+	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
+	dimStyle = lipgloss.NewStyle().Foreground(dimColor)
+	panelBorder = panelBorder.BorderForeground(borderColor)
+	focusBorder = focusBorder.BorderForeground(accentColor)
+}
+
 func (m model) View() string {
 	if m.width == 0 {
 		return "Loading..."
@@ -3483,6 +4459,12 @@ func (m model) View() string {
 	if m.showPlPicker {
 		return m.plPickerView()
 	}
+	if m.saveQueueMode {
+		return m.saveQueueView()
+	}
+	if m.cmdMode {
+		return m.cmdPaletteView()
+	}
 	if m.showPrioMenu {
 		return m.prioView()
 	}
@@ -3499,40 +4481,12 @@ func (m model) View() string {
 		return m.searchView()
 	}
 
-	playerH := 5
-	mainH := m.height - playerH
-	if mainH < 3 {
-		mainH = 3
-	}
-
-	lyricsW := 0
-	if m.showLyrics {
-		lyricsW = m.width * 30 / 100
-		if lyricsW < 25 {
-			lyricsW = 25
-		}
-		if lyricsW > 60 {
-			lyricsW = 60
-		}
-	}
-
-	remainW := m.width - lyricsW
-	libW := remainW * 25 / 100
-	if libW < 25 {
-		libW = 25
-	}
-	if libW > 55 {
-		libW = 55
-	}
-	queueW := remainW - libW
-	if queueW < 20 {
-		queueW = 20
-	}
-
-	libH := mainH - 2
-	if m.libMode == libPlaylists || m.libMode == libPlaylistTracks {
-		libH--
-	}
+	d := m.layoutDims()
+	mainH := d.mainH
+	lyricsW := d.lyricsW
+	libW := d.libW
+	queueW := d.queueW
+	libH := d.libH
 
 	lib := m.libraryView(libW-2, libH)
 	que := m.queueView(queueW-2, mainH-2)
@@ -3576,13 +4530,13 @@ func (m model) libraryView(w, h int) string {
 
 	switch m.libMode {
 	case libArtists:
-		breadcrumbs = []string{fmt.Sprintf("Artists (%d)", len(m.artists))}
+		breadcrumbs = []string{fmt.Sprintf("1 Artists (%d) · 2 Playlists · 3 Latest", len(m.artists))}
 		for i, a := range m.artists {
 			allItems = append(allItems, libItem{text: a, srcIdx: i})
 		}
 	case libAlbums:
 		if m.libSortLatest {
-			breadcrumbs = []string{fmt.Sprintf("Latest Albums (%d)", len(m.albums))}
+			breadcrumbs = []string{fmt.Sprintf("1 Artists · 2 Playlists · 3 Latest (%d)", len(m.albums))}
 		} else {
 			breadcrumbs = []string{"Artists", m.curArtist, fmt.Sprintf("Albums (%d)", len(m.albums))}
 		}
@@ -3636,7 +4590,7 @@ func (m model) libraryView(w, h int) string {
 			})
 		}
 	case libPlaylists:
-		breadcrumbs = []string{fmt.Sprintf("Playlists (%d)", len(m.playlists))}
+		breadcrumbs = []string{fmt.Sprintf("1 Artists · 2 Playlists (%d) · 3 Latest", len(m.playlists))}
 		for i, pl := range m.playlists {
 			label := pl.Name
 			if pl.SongCount > 0 {
@@ -3674,6 +4628,10 @@ func (m model) libraryView(w, h int) string {
 	title := strings.Join(breadcrumbs, " > ")
 	title = truncate(title, w-2)
 	hdr := headerStyle.Width(w).Render(title)
+	if m.confirmDeletePl != "" {
+		hdr = headerStyle.Width(w).Foreground(dangerColor).
+			Render(truncate("Delete playlist "+m.confirmDeletePl+"? [y/N]", w-2))
+	}
 	visH := h - 1
 	if visH < 1 {
 		visH = 1
@@ -3758,8 +4716,14 @@ func (m model) queueView(w, h int) string {
 	var title string
 	if m.confirmClear {
 		title = lipgloss.NewStyle().Bold(true).Foreground(dangerColor).Render("Clear queue? [y/N]")
+	} else if len(m.queue) > 0 {
+		var total float64
+		for _, q := range m.queue {
+			total += q.Duration
+		}
+		title = fmt.Sprintf("Queue (%d · %s)", len(m.queue), fmtLongTime(total))
 	} else {
-		title = fmt.Sprintf("Queue (%d)", len(m.queue))
+		title = "Queue (0)"
 	}
 	hdr := headerStyle.Width(w).Render(title)
 	visH := h - 1
@@ -3860,6 +4824,53 @@ func (m model) queueView(w, h int) string {
 	}
 
 	return hdr + "\n" + body
+}
+
+// downscaleRGBA converts img to RGBA, scaling it down so its longest side is
+// at most maxDim. Kitty scales to the cell area anyway; shipping full-size
+// covers costs hundreds of ms in compression and terminal I/O.
+func downscaleRGBA(img image.Image, maxDim int) *image.RGBA {
+	b := img.Bounds()
+	w, h := b.Dx(), b.Dy()
+	if w > maxDim || h > maxDim {
+		scale := float64(maxDim) / float64(w)
+		if h > w {
+			scale = float64(maxDim) / float64(h)
+		}
+		w = int(float64(w)*scale + 0.5)
+		h = int(float64(h)*scale + 0.5)
+		if w < 1 {
+			w = 1
+		}
+		if h < 1 {
+			h = 1
+		}
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, w, h))
+	xdraw.CatmullRom.Scale(dst, dst.Bounds(), img, b, xdraw.Src, nil)
+	return dst
+}
+
+// prepareArtCmd burns the album-rating stars into a copy of the cover and
+// zlib-compresses it for the kitty protocol. Both steps are too slow to run
+// inside Update, so this is a background command.
+func prepareArtCmd(base *image.RGBA, file string, rating int) tea.Cmd {
+	return func() tea.Msg {
+		cp := image.NewRGBA(base.Bounds())
+		copy(cp.Pix, base.Pix)
+		drawStarsOnImage(cp, rating)
+
+		var compressed bytes.Buffer
+		zw, _ := zlib.NewWriterLevel(&compressed, 6)
+		zw.Write(cp.Pix)
+		zw.Close()
+		return artReadyMsg{
+			file: file,
+			rgba: compressed.Bytes(),
+			w:    cp.Bounds().Dx(),
+			h:    cp.Bounds().Dy(),
+		}
+	}
 }
 
 // prepareArtRGBA decodes image data to RGBA and zlib-compresses it.
@@ -4211,6 +5222,9 @@ func (m model) playerView() string {
 		flags = append(flags, dimStyle.Render("c"))
 	}
 	flagsStr := strings.Join(flags, " ")
+	if m.status.Volume >= 0 {
+		flagsStr += dimStyle.Render(fmt.Sprintf("  %d%%", m.status.Volume))
+	}
 	flagsLen := lipgloss.Width(flagsStr)
 
 	// Line 1: state icon + track + rating, right-aligned RG
@@ -4248,11 +5262,21 @@ func (m model) playerView() string {
 		line2 = strings.Repeat(" ", pad2) + flagsStr
 	}
 
-	// Line 3: empty
+	// Line 3: transient toast / connection state
+	line3 := ""
+	if mpd == nil {
+		line3 = lipgloss.NewStyle().Foreground(dangerColor).Render(truncate("⚠ disconnected — retrying…", infoW))
+	} else if m.toast != "" {
+		st := lipgloss.NewStyle().Foreground(accentColor)
+		if m.toastErr {
+			st = lipgloss.NewStyle().Foreground(dangerColor)
+		}
+		line3 = st.Render(truncate(m.toast, infoW))
+	}
 	// Line 4: seekbar
 	line4 := timeL + " " + bar + " " + timeR
 
-	playerRight := line1 + "\n" + line2 + "\n\n" + line4
+	playerRight := line1 + "\n" + line2 + "\n" + line3 + "\n" + line4
 
 	if artCols > 0 {
 		artStr := kittyPlaceholders(artCols, artRows)
@@ -4271,70 +5295,84 @@ func (m model) helpView() string {
 	title := titleStyle.Render("Hotkeys")
 	sections := []struct{ header, body string }{
 		{"Global", strings.Join([]string{
-			"  /          Search",
+			"  /          Search (artist:/album:/title:/rating>=N filters)",
+			"  :          Command palette",
 			"  ?          This help screen",
-			"  Space      Play / Pause",
-			"  >          Next track",
-			"  <          Previous track",
+			"  F5-F8      Prev / Play-Pause / Stop / Next",
+			"  > / <      Next / previous track",
 			"  s          Stop",
 			"  +/-        Volume up/down",
-			"  r          Random album",
-			"  R          Random tracks",
+			"  1/2/3      Library root: Artists / Playlists / Latest",
+			"  r / R      Random album / random tracks",
 			"  u          Update library",
-			"  P          Playlists",
 			"  D          Device picker",
+			"  M          Playback modes",
 			"  i          Track info (library tracks / queue)",
-			"  l          Toggle lyrics sidebar",
-			"  L          Now playing (art + info + lyrics)",
+			"  l / L      Lyrics sidebar / now-playing screen",
 			"  o          Go to artist/album/search",
 			"  *          Rate track/album",
 			"  Ctrl+G     Cycle ReplayGain (off/track/album)",
 			"  Tab        Switch panel focus",
-			"  q          Quit",
+			"  q          Back (in library) / quit at root",
 		}, "\n")},
 		{"Library", strings.Join([]string{
-			"  j/k        Navigate up/down",
-			"  Enter      Action menu (Add/Priority/Insert/Replace)",
-			"  p          Add track to playlist",
-			"  PgUp/PgDn  Jump 20 items",
-			"  g/G        Go to first/last",
+			"  ↑/↓        Navigate  (PgUp/PgDn jump, Home/End ends)",
+			"  → / ←      Drill in / back",
+			"  Enter      Replace queue & play",
+			"  Space/a    Add to queue",
+			"  A / I      Replace / insert after current",
+			"  m          Action menu (add/priority/insert/replace/browse)",
+			"  f          Filter list (Enter plays, Tab menu, → drills)",
+			"  p          Add track/album/artist to playlist",
+			"  d          Delete playlist (in playlists view)",
 		}, "\n")},
 		{"Queue", strings.Join([]string{
-			"  j/k        Navigate up/down",
+			"  ↑/↓        Navigate  (PgUp/PgDn jump, Home/End ends)",
 			"  Enter      Play selected track",
-			"  p          Add track to playlist",
+			"  ←/→        Seek -5s/+5s",
+			"  Shift+↑/↓  Move track or selection (also J/K)",
+			"  g          Jump to current song",
+			"  Space/v    Toggle select   V select range (Esc clears)",
 			"  d/x/Del    Delete track (or selection)",
-			"  v          Toggle select",
-			"  V          Select range",
-			"  Esc        Clear selection",
-			"  J/K        Move track down/up",
+			"  !          Set priority (Low/Medium/High/None)",
+			"  Z          Shuffle queue",
+			"  S          Save queue as playlist",
+			"  p          Add track to playlist",
 			"  c          Clear queue (confirm)",
-			"  PgUp/PgDn  Jump 20 items",
-			"  g/G        Go to first/last",
 		}, "\n")},
 		{"Search", strings.Join([]string{
-			"  j/k        Navigate results",
+			"  ↑/↓        Navigate results",
 			"  Enter      Action menu",
 			"  Esc        Close search",
 		}, "\n")},
-		{"Seekbar", strings.Join([]string{
-			"  Click      Seek to position",
+		{"Mouse", strings.Join([]string{
+			"  Click      Select row / focus panel / seek on seekbar",
+			"  Dbl-click  Play queue track",
+			"  Wheel      Scroll lists and lyrics",
 		}, "\n")},
 	}
 
-	var lines []string
-	lines = append(lines, title, "")
-	for _, s := range sections {
-		lines = append(lines, titleStyle.Render(s.header))
-		lines = append(lines, s.body, "")
+	renderSections := func(idx ...int) string {
+		var lines []string
+		for _, i := range idx {
+			lines = append(lines, titleStyle.Render(sections[i].header))
+			lines = append(lines, sections[i].body, "")
+		}
+		return strings.Join(lines, "\n")
 	}
-	lines = append(lines, dimStyle.Render("Press any key to close"))
+
+	// Two columns: Global+Search+Mouse | Library+Queue
+	left := renderSections(0, 3, 4)
+	right := renderSections(1, 2)
+	cols := lipgloss.JoinHorizontal(lipgloss.Top, left, "    ", right)
+
+	content := title + "\n\n" + cols + "\n" + dimStyle.Render("Press any key to close (playback keys keep working)")
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(accentColor).
 		Padding(1, 2).
-		Render(strings.Join(lines, "\n"))
+		Render(content)
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
@@ -4828,11 +5866,105 @@ func (m model) plPickerView() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
+func (m model) cmdPaletteView() string {
+	matches := m.cmdMatches()
+
+	// Window the list around the selection so ↑/↓ scroll through everything
+	maxShow := m.height - 12 // box padding, input, hints
+	if maxShow > 16 {
+		maxShow = 16
+	}
+	if maxShow < 4 {
+		maxShow = 4
+	}
+	start := scrollOffsetCentered(m.cmdSel, maxShow, len(matches))
+	end := start + maxShow
+	if end > len(matches) {
+		end = len(matches)
+	}
+
+	var lines []string
+	lines = append(lines, titleStyle.Render("Command"), "")
+	lines = append(lines, m.cmdInput.View(), "")
+
+	if start > 0 {
+		lines = append(lines, dimStyle.Render(fmt.Sprintf(" ↑ %d more", start)))
+	}
+	sel := lipgloss.NewStyle().Background(selectedBg).Foreground(lipgloss.Color("#ffffff")).Bold(true)
+	onStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#22c55e"))
+	for i := start; i < end; i++ {
+		e := matches[i]
+		name := e.name
+		if e.args != "" {
+			name += " " + e.args
+		}
+		status := ""
+		if fn, ok := paletteStatus[e.name]; ok {
+			status = fn(m)
+		}
+		if i == m.cmdSel {
+			row := fmt.Sprintf(" %-28s %-24s", name, e.desc)
+			if status != "" {
+				row += fmt.Sprintf(" [%s]", status)
+			}
+			lines = append(lines, sel.Render(row+" "))
+			continue
+		}
+		row := fmt.Sprintf(" %-28s ", name) + dimStyle.Render(fmt.Sprintf("%-24s", e.desc))
+		if status != "" {
+			st := dimStyle
+			if status != "off" && status != "stop" {
+				st = onStyle
+			}
+			row += " " + st.Render("["+status+"]")
+		}
+		lines = append(lines, row)
+	}
+	if end < len(matches) {
+		lines = append(lines, dimStyle.Render(fmt.Sprintf(" ↓ %d more", len(matches)-end)))
+	}
+	if len(matches) == 0 {
+		lines = append(lines, dimStyle.Render(" no matching command"))
+	}
+
+	lines = append(lines, "", dimStyle.Render("[enter]run [tab]complete [↑↓]select [esc]close"))
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(accentColor).
+		Padding(1, 2).
+		Render(strings.Join(lines, "\n"))
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+func (m model) saveQueueView() string {
+	content := titleStyle.Render("Save Queue as Playlist") + "\n\n" +
+		m.saveInput.View() + "\n\n" +
+		dimStyle.Render("[enter]save [esc]cancel")
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(accentColor).
+		Padding(1, 3).
+		Render(content)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
 func (m model) prioView() string {
-	header := titleStyle.Render("Add Prioritized") + "\n\n"
+	title := "Add Prioritized"
+	if m.prioForQueue {
+		title = "Set Priority"
+	}
+	header := titleStyle.Render(title) + "\n\n"
 
 	labels := []string{"Low", "Medium", "High"}
 	colors := []string{"#ffcc66", "#ff9933", "#ff6600"}
+	if m.prioForQueue {
+		labels = append(labels, "None")
+		colors = append(colors, "#6b7280")
+	}
 
 	var lines []string
 	for i, label := range labels {
@@ -5133,7 +6265,7 @@ func (m model) searchView() string {
 		}
 	}
 
-	m.srOffset = scrollOffset(cursorVisual, m.srOffset, resH, len(items))
+	m.srOffset = scrollOffsetCentered(cursorVisual, resH, len(items))
 	end := m.srOffset + resH
 	if end > len(items) {
 		end = len(items)
@@ -5175,6 +6307,16 @@ func (m model) srRow(idx int, text string, w int) string {
 // Helpers
 // ---------------------------------------------------------------------------
 
+func ratingToast(r int) string {
+	if r == 0 {
+		return "Rating cleared"
+	}
+	if r%2 == 0 {
+		return fmt.Sprintf("Rated %d★", r/2)
+	}
+	return fmt.Sprintf("Rated %d.5★", r/2)
+}
+
 func renderRating(r int) string {
 	if r <= 0 {
 		return ""
@@ -5183,6 +6325,18 @@ func renderRating(r int) string {
 	half := r % 2
 	empty := 5 - full - half
 	return strings.Repeat("★", full) + strings.Repeat("⯪", half) + strings.Repeat("☆", empty)
+}
+
+// fmtLongTime formats a duration, adding an hours part when needed.
+func fmtLongTime(s float64) string {
+	if s < 0 {
+		s = 0
+	}
+	t := int(s)
+	if h := t / 3600; h > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", h, (t%3600)/60, t%60)
+	}
+	return fmt.Sprintf("%d:%02d", t/60, t%60)
 }
 
 func fmtTime(s float64) string {
@@ -5215,7 +6369,33 @@ func padRight(s string, w int) string {
 	return s + strings.Repeat(" ", w-sw)
 }
 
+// scrollOffset keeps the cursor within the visible window, scrolling only
+// when it approaches an edge (with a small margin), so the list stays calm.
 func scrollOffset(cursor, offset, visible, total int) int {
+	if total <= visible {
+		return 0
+	}
+	margin := 3
+	if visible <= margin*2 {
+		margin = 0
+	}
+	if cursor < offset+margin {
+		offset = cursor - margin
+	} else if cursor > offset+visible-1-margin {
+		offset = cursor - visible + 1 + margin
+	}
+	if offset > total-visible {
+		offset = total - visible
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return offset
+}
+
+// scrollOffsetCentered centers the cursor in the window; used by views whose
+// offset is recomputed per render (search results).
+func scrollOffsetCentered(cursor, visible, total int) int {
 	if total <= visible {
 		return 0
 	}
@@ -5227,6 +6407,66 @@ func scrollOffset(cursor, offset, visible, total int) int {
 		o = total - visible
 	}
 	return o
+}
+
+// layoutDims holds panel geometry shared between View and Update (key/mouse
+// handlers need it to keep scroll offsets and hit-test clicks).
+type layoutDims struct {
+	mainH     int // panel area height (above player)
+	lyricsW   int
+	libW      int
+	queueW    int
+	libH      int // library panel inner height
+	libBodyH  int // visible item rows in the library list
+	queueVisH int // visible item rows in the queue
+}
+
+func (m model) layoutDims() layoutDims {
+	var d layoutDims
+	d.mainH = m.height - 5 // player is 5 rows
+	if d.mainH < 3 {
+		d.mainH = 3
+	}
+	if m.showLyrics {
+		d.lyricsW = m.width * 30 / 100
+		if d.lyricsW < 25 {
+			d.lyricsW = 25
+		}
+		if d.lyricsW > 60 {
+			d.lyricsW = 60
+		}
+	}
+	remainW := m.width - d.lyricsW
+	d.libW = remainW * 25 / 100
+	if d.libW < 25 {
+		d.libW = 25
+	}
+	if d.libW > 55 {
+		d.libW = 55
+	}
+	d.queueW = remainW - d.libW
+	if d.queueW < 20 {
+		d.queueW = 20
+	}
+
+	d.libH = d.mainH - 2
+	if m.libMode == libPlaylists || m.libMode == libPlaylistTracks {
+		d.libH--
+	}
+	bodyH := d.libH - 1 // minus header row
+	if m.libFiltering {
+		bodyH-- // minus filter bar
+	}
+	if bodyH < 1 {
+		bodyH = 1
+	}
+	d.libBodyH = bodyH
+
+	d.queueVisH = d.mainH - 3 // panel height minus border rows and header
+	if d.queueVisH < 1 {
+		d.queueVisH = 1
+	}
+	return d
 }
 
 func debugCoverFetch() error {
@@ -5271,6 +6511,8 @@ func debugCoverFetch() error {
 
 func main() {
 	cfg = loadTUIConfig()
+	applyTheme(cfg.Colors)
+	artEnabled = detectArtSupport()
 
 	if os.Getenv("MELODY_TUI_DEBUG_COVER") == "1" {
 		if err := debugCoverFetch(); err != nil {

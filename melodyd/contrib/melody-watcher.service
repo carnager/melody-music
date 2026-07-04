@@ -1,0 +1,23 @@
+[Unit]
+# Run this on the file server (TrueNAS) where the music library physically
+# lives, NOT on the melodyd host. It watches the library with fsnotify locally
+# and pushes targeted `update` commands to a remote melodyd, so new music on a
+# network share is picked up without restarting melodyd. Self-contained Go
+# binary — no inotify-tools required.
+Description=Melody library watcher (pushes file changes to remote melodyd)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust the library path and melodyd address for your setup.
+Environment=MUSIC_DIR=/mnt/pool/music
+Environment=MELODYD_HOST=melodyd-host
+Environment=MELODYD_PORT=6600
+Environment=DEBOUNCE=3s
+ExecStart=/usr/local/bin/melody-watcher
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
