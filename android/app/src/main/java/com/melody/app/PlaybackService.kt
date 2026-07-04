@@ -99,17 +99,7 @@ class PlaybackService : Service() {
                 }
             )
         }
-        val notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Melody")
-            .setContentText("Connected")
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setOngoing(true)
-            .build()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
-        } else {
-            startForeground(1, notification)
-        }
+        goForeground()
 
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
@@ -197,6 +187,34 @@ class PlaybackService : Service() {
         val prefs = getSharedPreferences("melody", MODE_PRIVATE)
         replaygainMode = prefs.getString("replaygain", "off") ?: "off"
         registerAgent()
+    }
+
+    private fun goForeground() {
+        val notification = NotificationCompat.Builder(this, "melody_service")
+            .setContentTitle("Melody")
+            .setContentText("Connected")
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setOngoing(true)
+            .build()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+        } else {
+            startForeground(1, notification)
+        }
+    }
+
+    // Every startForegroundService() call creates a new "must call
+    // startForeground" obligation — including relaunches of MainActivity while
+    // this service is already running, which only reach onStartCommand. Not
+    // fulfilling it here made the system kill the service (and take the whole
+    // process down) with ForegroundServiceDidNotStartInTimeException.
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        goForeground()
+        updateNotification()
+        // If the agent connection died while the process was cached/frozen,
+        // a fresh start command is a good moment to revive it.
+        if (agentWs == null) registerAgent()
+        return START_STICKY
     }
 
     private fun updateNotification() {

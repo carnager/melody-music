@@ -192,6 +192,17 @@ class MainActivity : ComponentActivity() {
                     androidx.compose.runtime.DisposableEffect(lifecycle) {
                         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
                             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                                // Revive the playback service (and with it the
+                                // agent) if it was killed while the app sat
+                                // cached in the background.
+                                if (PlaybackService.instance == null) {
+                                    val svc = Intent(this@MainActivity, PlaybackService::class.java)
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                        startForegroundService(svc)
+                                    } else {
+                                        startService(svc)
+                                    }
+                                }
                                 vm.onForeground()
                             }
                         }
