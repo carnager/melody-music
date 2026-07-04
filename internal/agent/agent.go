@@ -3,6 +3,8 @@ package agent
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -64,9 +66,10 @@ type queueItem struct {
 // ---------------------------------------------------------------------------
 
 type agent struct {
-	cfg    agentConfig
-	logger *log.Logger
-	player *player.Player
+	cfg        agentConfig
+	logger     *log.Logger
+	player     *player.Player
+	instanceID string // random per-process ID so the server can detect duplicate agents
 
 	// Queue state (synced from server)
 	queueMu sync.Mutex
@@ -101,11 +104,12 @@ func Run(opts Options) error {
 	defer p.Close()
 
 	a := &agent{
-		cfg:     cfg,
-		logger:  logger,
-		player:  p,
-		curPos:  -1,
-		nextPos: -1,
+		cfg:        cfg,
+		logger:     logger,
+		player:     p,
+		instanceID: randomInstanceID(),
+		curPos:     -1,
+		nextPos:    -1,
 	}
 
 	// Set initial player state from config
@@ -203,6 +207,17 @@ mpv_socket = ""
 `
 }
 
+// randomInstanceID returns a random ID identifying this agent process.
+// The server uses it to tell a reconnect of the same process apart from a
+// second process registering under the same name.
+func randomInstanceID() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("pid-%d", os.Getpid())
+	}
+	return hex.EncodeToString(b)
+}
+
 // ---------------------------------------------------------------------------
 // Connection management
 // ---------------------------------------------------------------------------
@@ -241,7 +256,7 @@ func (a *agent) runSession() error {
 	a.logger.Printf("connected to master at %s", a.cfg.Agent.Master)
 
 	// Send agent_register with v2 flag
-	regCmd := fmt.Sprintf("agent_register %s v2", mpdQuote(a.cfg.Agent.Name))
+	regCmd := fmt.Sprintf("agent_register %s v2 instance=%s", mpdQuote(a.cfg.Agent.Name), a.instanceID)
 	if a.cfg.Agent.Format != "" {
 		regCmd += fmt.Sprintf(" format=%s", mpdQuote(a.cfg.Agent.Format))
 	}

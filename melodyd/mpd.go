@@ -145,6 +145,11 @@ type mpdConn struct {
 	windowStart int
 	windowEnd   int // -1 = no window
 	windowPos   int
+
+	// enqueueMode selects how matched tracks are queued by the enqueue command
+	// ("add", "insert", or "replace"). Empty means the default "add" behaviour
+	// used by findadd/searchadd.
+	enqueueMode string
 }
 
 func (c *mpdConn) writeLine(line string) {
@@ -395,6 +400,24 @@ func parseCommand(line string) (string, []string) {
 	inQuote := false
 	escaped := false
 	first := true
+	// quoted tracks whether the current token contained an explicit quote, so an
+	// empty quoted argument (e.g. `find file ""`) is preserved as a real empty
+	// argument instead of being dropped as if it were absent.
+	quoted := false
+
+	emit := func() {
+		if current.Len() == 0 && !quoted {
+			return
+		}
+		if first {
+			cmd = current.String()
+			first = false
+		} else {
+			args = append(args, current.String())
+		}
+		current.Reset()
+		quoted = false
+	}
 
 	for _, r := range line {
 		if escaped {
@@ -408,29 +431,16 @@ func parseCommand(line string) (string, []string) {
 		}
 		if r == '"' {
 			inQuote = !inQuote
+			quoted = true
 			continue
 		}
 		if r == ' ' && !inQuote {
-			if current.Len() > 0 {
-				if first {
-					cmd = current.String()
-					first = false
-				} else {
-					args = append(args, current.String())
-				}
-				current.Reset()
-			}
+			emit()
 			continue
 		}
 		current.WriteRune(r)
 	}
-	if current.Len() > 0 {
-		if first {
-			cmd = current.String()
-		} else {
-			args = append(args, current.String())
-		}
-	}
+	emit()
 	return cmd, args
 }
 
@@ -448,12 +458,15 @@ func (c *mpdConn) handleAgentRegister(args []string) {
 	// Parse optional key=value args
 	format := ""
 	maxBitRate := 0
+	instanceID := ""
 	for _, arg := range args[1:] {
 		if strings.HasPrefix(arg, "format=") {
 			format = strings.TrimPrefix(arg, "format=")
 		} else if strings.HasPrefix(arg, "max_bitrate=") {
 			n, _ := strconv.Atoi(strings.TrimPrefix(arg, "max_bitrate="))
 			maxBitRate = n
+		} else if strings.HasPrefix(arg, "instance=") {
+			instanceID = strings.TrimPrefix(arg, "instance=")
 		}
 	}
 
@@ -466,14 +479,15 @@ func (c *mpdConn) handleAgentRegister(args []string) {
 	}
 
 	at := &agentTarget{
-		writer:  c.writer,
-		conn:    c.conn,
-		alive:   true,
-		done:    make(chan struct{}),
-		app:     c.app,
-		devID:   devID,
-		respCh:  make(chan agentResp, 1),
-		agState: "stop",
+		writer:     c.writer,
+		conn:       c.conn,
+		alive:      true,
+		done:       make(chan struct{}),
+		app:        c.app,
+		devID:      devID,
+		instanceID: instanceID,
+		respCh:     make(chan agentResp, 1),
+		agState:    "stop",
 	}
 
 	dev := &device{
@@ -490,7 +504,12 @@ func (c *mpdConn) handleAgentRegister(args []string) {
 	c.app.devicesMu.Lock()
 	// Close old agent with same name if it exists
 	wasActive := c.app.activeDevice == devID
+	var resume *agentResume
 	if oldAt, ok := c.app.agentTargets[devID]; ok {
+		resume = oldAt.playbackSnapshot()
+		if oldAt.instanceID != "" && instanceID != "" && oldAt.instanceID != instanceID {
+			c.app.logger.Printf("WARNING: agent %s replaced by a DIFFERENT process (old instance=%s, new instance=%s) — two agents may be running with the same name, fighting over the registration", name, oldAt.instanceID, instanceID)
+		}
 		oldAt.close()
 		c.app.logger.Printf("agent replaced: %s (old connection closed)", name)
 	}
@@ -513,7 +532,7 @@ func (c *mpdConn) handleAgentRegister(args []string) {
 	// If this agent was the active device before reconnecting, reload the
 	// play queue into it so playback continues seamlessly.
 	if wasActive {
-		c.app.reloadQueueIntoAgent(at, dev)
+		c.app.reloadQueueIntoAgent(at, dev, resume)
 	}
 
 	c.app.mpdHub.notify(SubOutput)
@@ -583,6 +602,10 @@ type agentTarget struct {
 	app       *app
 	devID     string
 
+	// Random per-process ID from agent_register (empty for older agents).
+	// Used to detect two distinct processes registering under the same name.
+	instanceID string
+
 	// Response channel — reader goroutine sends command responses here
 	respCh chan agentResp
 
@@ -602,6 +625,33 @@ type agentTarget struct {
 type agentResp struct {
 	lines []string
 	err   error
+}
+
+// agentResume captures where a replaced agent connection left off, so a
+// reconnecting agent can continue playback instead of restarting the track.
+type agentResume struct {
+	state   string // "play" or "pause"
+	pos     int
+	elapsed float64
+}
+
+// playbackSnapshot returns the agent's last reported playback position,
+// extrapolated to now for playing tracks. Returns nil if the agent was
+// stopped or if the track would have ended by now.
+func (at *agentTarget) playbackSnapshot() *agentResume {
+	at.stateMu.RLock()
+	defer at.stateMu.RUnlock()
+	if at.agState != "play" && at.agState != "pause" {
+		return nil
+	}
+	elapsed := at.agElapsed
+	if at.agState == "play" && !at.agStateTime.IsZero() {
+		elapsed += time.Since(at.agStateTime).Seconds()
+	}
+	if at.agDuration > 0 && elapsed >= at.agDuration {
+		return nil
+	}
+	return &agentResume{state: at.agState, pos: at.agPos, elapsed: elapsed}
 }
 
 func (at *agentTarget) close() {

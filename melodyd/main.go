@@ -56,6 +56,9 @@ type config struct {
 	MPD struct {
 		Port int `toml:"port"`
 	} `toml:"mpd"`
+	Transcode struct {
+		CacheMaxMB int `toml:"cache_max_mb"` // soft cap on the transcode cache; 0 = unlimited
+	} `toml:"transcode"`
 }
 
 type paths struct {
@@ -169,12 +172,20 @@ func main() {
 	}
 	a.logConfigWarnings()
 
-	a.scanner.onScanComplete = func() {
+	a.scanner.onScanComplete = func(fullRebuild bool) {
 		db.invalidateCache()
-		if err := db.rebuildFTS(); err != nil {
-			logger.Printf("warning: FTS rebuild after scan failed: %v", err)
+		if fullRebuild {
+			// Full scans can add/remove arbitrary rows, so rebuild the FTS index
+			// and pre-warm caches. Targeted updates already maintain the FTS
+			// per-track (upsertTrack / removeTracksUnderPrefixNotIn), so they skip
+			// the expensive full rebuild and let caches rebuild lazily — keeping
+			// each watcher-driven album update sub-second instead of re-indexing
+			// the whole 66k-row library.
+			if err := db.rebuildFTS(); err != nil {
+				logger.Printf("warning: FTS rebuild after scan failed: %v", err)
+			}
+			db.warmCache()
 		}
-		db.warmCache()
 		a.mpdHub.notify(SubDatabase)
 	}
 
@@ -201,6 +212,8 @@ func main() {
 			logger.Printf("initial scan error: %v", err)
 		}
 	}()
+	// Trim the transcode cache to its size cap on startup.
+	go a.maybeEvictTranscodeCache()
 	go a.scanner.watchForChanges()
 
 	go a.startLocalAgent()
@@ -294,6 +307,8 @@ func loadConfig() (config, paths, error) {
 	cfg.Random.Tracks = intFromAny(random["tracks"], 20)
 	mpdSection, _ := raw["mpd"].(map[string]any)
 	cfg.MPD.Port = intFromAny(mpdSection["port"], 6600)
+	transcodeSection, _ := raw["transcode"].(map[string]any)
+	cfg.Transcode.CacheMaxMB = intFromAny(transcodeSection["cache_max_mb"], 5120) // 5 GB default
 	applyDefaults(&cfg)
 	return cfg, pathCfg, nil
 }
@@ -1668,9 +1683,15 @@ func (a *app) streamTranscoded(w http.ResponseWriter, r *http.Request, songID, p
 		tmpFile.Close()
 		if err := cmd.Wait(); err == nil {
 			os.Rename(tmpFile.Name(), cachePath)
+			// A new file landed in the cache — enforce the size cap.
+			go a.maybeEvictTranscodeCache()
 		} else {
 			os.Remove(tmpFile.Name())
 			a.logger.Printf("transcode error for %s: %v — %s", songID, err, stderrBuf.String())
+			// Abort the connection instead of letting the server write the
+			// terminating chunk — a clean EOF would make download clients
+			// treat the truncated stream as a complete file.
+			panic(http.ErrAbortHandler)
 		}
 	} else {
 		if tmpFile != nil {
@@ -1680,7 +1701,84 @@ func (a *app) streamTranscoded(w http.ResponseWriter, r *http.Request, songID, p
 		io.Copy(w, stdout)
 		if err := cmd.Wait(); err != nil {
 			a.logger.Printf("transcode error for %s: %v — %s", songID, err, stderrBuf.String())
+			panic(http.ErrAbortHandler)
 		}
+	}
+}
+
+// transcodeEvictMu ensures only one cache eviction sweep runs at a time.
+var transcodeEvictMu sync.Mutex
+
+// maybeEvictTranscodeCache enforces the configured cache size cap by deleting
+// least-recently-used files (by access time) until the cache is back under 90%
+// of the limit. A no-op when cache_max_mb is 0 (unlimited). Cheap to call after
+// each new transcode; sweeps are coalesced so concurrent calls don't pile up.
+func (a *app) maybeEvictTranscodeCache() {
+	maxMB := a.cfg.Transcode.CacheMaxMB
+	if maxMB <= 0 {
+		return
+	}
+	if !transcodeEvictMu.TryLock() {
+		return // a sweep is already in progress
+	}
+	defer transcodeEvictMu.Unlock()
+
+	dir := a.paths.TranscodeCacheDir
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+
+	type cacheFile struct {
+		path  string
+		size  int64
+		atime time.Time
+	}
+	var files []cacheFile
+	var total int64
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		// Skip in-progress transcodes (written via CreateTemp as transcode_*.tmp).
+		if strings.HasPrefix(e.Name(), "transcode_") && strings.HasSuffix(e.Name(), ".tmp") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, cacheFile{
+			path:  filepath.Join(dir, e.Name()),
+			size:  info.Size(),
+			atime: fileATime(info),
+		})
+		total += info.Size()
+	}
+
+	limit := int64(maxMB) * 1024 * 1024
+	if total <= limit {
+		return
+	}
+
+	// Evict least-recently-used first, down to a 90% low-water mark so we don't
+	// re-run the sweep on every subsequent request.
+	target := limit * 9 / 10
+	sort.Slice(files, func(i, j int) bool { return files[i].atime.Before(files[j].atime) })
+	var removed, freed int64
+	for _, f := range files {
+		if total <= target {
+			break
+		}
+		if err := os.Remove(f.path); err == nil {
+			total -= f.size
+			freed += f.size
+			removed++
+		}
+	}
+	if removed > 0 {
+		a.logger.Printf("transcode cache: evicted %d files (%d MB) — now %d/%d MB",
+			removed, freed/(1024*1024), total/(1024*1024), maxMB)
 	}
 }
 
@@ -1860,7 +1958,7 @@ func (a *app) switchDevice(newID string) error {
 
 // reloadQueueIntoAgent loads the 2-track window into a reconnected agent.
 // Called when an agent re-registers and was already the active device.
-func (a *app) reloadQueueIntoAgent(at *agentTarget, dev *device) {
+func (a *app) reloadQueueIntoAgent(at *agentTarget, dev *device, resume *agentResume) {
 	// Apply replaygain setting
 	if a.cfg.Player.ReplayGain != "" {
 		_ = at.setProperty("replaygain", a.cfg.Player.ReplayGain)
@@ -1874,6 +1972,23 @@ func (a *app) reloadQueueIntoAgent(at *agentTarget, dev *device) {
 	}
 	plan := a.planSyncTarget()
 	a.playQueueMu.Unlock()
+
+	// If the replaced connection was mid-track on the same position, resume
+	// there instead of restarting the track from the beginning.
+	if resume != nil && resume.pos == plan.curPos && resume.elapsed > 0 && plan.currentURL != "" {
+		a.logger.Printf("agent reload: resuming %s at pos %d elapsed=%.1fs", dev.Name, plan.curPos, resume.elapsed)
+		if err := at.agentPlayAt(plan.curPos, plan.nextPos, resume.elapsed); err != nil {
+			a.logger.Printf("agent reload: resume failed, falling back to full reload: %v", err)
+		} else {
+			if resume.state == "pause" {
+				if _, err := at.sendCommand("pause"); err != nil {
+					a.logger.Printf("agent reload: re-pause failed: %v", err)
+				}
+			}
+			return
+		}
+	}
+
 	a.execSyncPlan(plan)
 	a.logger.Printf("agent reload: loaded 2-track window into %s at pos %d", dev.Name, a.curQueuePos)
 }
