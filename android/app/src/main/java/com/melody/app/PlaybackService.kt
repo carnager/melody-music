@@ -9,15 +9,19 @@ import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
+import androidx.media3.session.MediaStyleNotificationHelper
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import okhttp3.*
+import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 
 /**
@@ -43,6 +47,20 @@ class PlaybackService : Service() {
     private var agentWs: WebSocket? = null
     private var agentJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    // Guards agentWs/agentGeneration so a cancelled-but-still-running session
+    // can never clobber the socket of the session that replaced it.
+    private val agentLock = Any()
+    @Volatile private var agentGeneration = 0L
+
+    // One shared OkHttp client for the agent connection and queue syncs —
+    // building a client per reconnect leaks dispatcher/writer threads.
+    private val agentHttpClient by lazy {
+        OkHttpClient.Builder()
+            .readTimeout(0, TimeUnit.SECONDS)
+            .pingInterval(30, TimeUnit.SECONDS)
+            .build()
+    }
 
     // Queue state (synced from server)
     @Volatile private var queue: List<QueueEntry> = emptyList()
@@ -93,17 +111,31 @@ class PlaybackService : Service() {
             startForeground(1, notification)
         }
 
-        player = ExoPlayer.Builder(applicationContext).build().also { p ->
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(C.USAGE_MEDIA)
+            .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+            .build()
+        player = ExoPlayer.Builder(applicationContext)
+            .setAudioAttributes(audioAttributes, /* handleAudioFocus= */ true)
+            .setHandleAudioBecomingNoisy(true)
+            .setWakeMode(C.WAKE_MODE_NETWORK)
+            .build().also { p ->
             p.playWhenReady = false
             p.addListener(object : Player.Listener {
                 override fun onPlaybackStateChanged(state: Int) {
                     if (state == Player.STATE_READY) updateCodecInfo()
-                    if (state == Player.STATE_ENDED && p.mediaItemCount <= 1) {
-                        // Only advance on STATE_ENDED when there's no next item to
-                        // auto-transition to. With a preloaded next track,
-                        // onMediaItemTransition(REASON_AUTO) handles it instead.
+                    if (state == Player.STATE_ENDED) {
+                        // STATE_ENDED only fires when the playlist is exhausted
+                        // (a preloaded next track auto-transitions instead), so
+                        // always tell the server — even if finished items are
+                        // still sitting in the playlist because a preload never
+                        // arrived to trim them.
                         sendAgentAdvance()
                     }
+                    updateNotification()
+                }
+                override fun onIsPlayingChanged(isPlaying: Boolean) {
+                    updateNotification()
                 }
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                     if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
@@ -112,6 +144,10 @@ class PlaybackService : Service() {
                         // The preloaded next track is now playing — advance curPos.
                         // Server will send the definitive position via the next play command.
                         curPos = pendingNextPos
+                        // Drop the finished item now instead of waiting for the
+                        // next preload — if that preload never arrives, stale
+                        // items would suppress future advances.
+                        trimPlaylistToCurrent(p)
                         // Update replay gain for the new track
                         val q = queue
                         if (curPos in 0 until q.size) {
@@ -125,16 +161,65 @@ class PlaybackService : Service() {
                         sendToServer("agent_advance $oldPos")
                     }
                     updateCodecInfo()
+                    updateNotification()
                 }
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                     android.util.Log.e("PlaybackService", "ExoPlayer error: ${error.errorCodeName} — ${error.message}")
                 }
             })
-            mediaSession = MediaSession.Builder(this, p).setId("melody").build()
+            // Lockscreen/headset transport must go through the server — the
+            // server owns the queue position. Sending raw next/seek to
+            // ExoPlayer desyncs the server's pointer from what's playing.
+            val sessionPlayer = object : ForwardingPlayer(p) {
+                private fun viaServer(block: suspend (MpdClient) -> Unit) {
+                    scope.launch {
+                        try {
+                            block(MelodyApp.instance.mpd)
+                        } catch (e: Exception) {
+                            android.util.Log.e("PlaybackService", "Session command failed: ${e.message}")
+                        }
+                    }
+                }
+                override fun play() = viaServer { it.resume() }
+                override fun pause() = viaServer { it.pause() }
+                override fun seekToNext() = viaServer { it.next() }
+                override fun seekToNextMediaItem() = viaServer { it.next() }
+                override fun seekToPrevious() = viaServer { it.prev() }
+                override fun seekToPreviousMediaItem() = viaServer { it.prev() }
+                override fun seekTo(positionMs: Long) {
+                    val absolute = positionMs / 1000.0 + streamStartOffset
+                    viaServer { it.seek(absolute) }
+                }
+                override fun stop() = viaServer { it.stop() }
+            }
+            mediaSession = MediaSession.Builder(this, sessionPlayer).setId("melody").build()
         }
         val prefs = getSharedPreferences("melody", MODE_PRIVATE)
         replaygainMode = prefs.getString("replaygain", "off") ?: "off"
         registerAgent()
+    }
+
+    private fun updateNotification() {
+        val session = mediaSession ?: return
+        val p = player ?: return
+        val nm = getSystemService(NotificationManager::class.java)
+        val title = p.mediaMetadata.title?.toString()?.ifBlank { null }
+        val artist = p.mediaMetadata.artist?.toString()?.ifBlank { null }
+        val connected = agentWs != null
+        val contentIntent = android.app.PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationCompat.Builder(this, "melody_service")
+            .setContentTitle(title ?: "Melody")
+            .setContentText(artist ?: if (connected) "Connected" else "Disconnected")
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentIntent(contentIntent)
+            .setOngoing(true)
+            .setStyle(MediaStyleNotificationHelper.MediaStyle(session))
+            .build()
+        nm.notify(1, notification)
     }
 
     private fun sendAgentAdvance() {
@@ -164,7 +249,12 @@ class PlaybackService : Service() {
         val app = MelodyApp.instance
         if (!app.mpd.isConfigured) return
 
-        agentWs?.close(1000, "reconnecting")
+        val generation: Long
+        synchronized(agentLock) {
+            generation = ++agentGeneration
+            agentWs?.close(1000, "reconnecting")
+            agentWs = null
+        }
         agentJob?.cancel()
         stateReporterJob?.cancel()
 
@@ -172,12 +262,23 @@ class PlaybackService : Service() {
             val prefs = getSharedPreferences("melody", MODE_PRIVATE)
             val name = prefs.getString("device_name", null)
                 ?: "android-${android.os.Build.MODEL}".replace(" ", "-").lowercase()
-            val format = prefs.getString("audio_format", "") ?: ""
-            val bitrate = prefs.getInt("audio_bitrate", 0)
+            // On home WiFi (fast LAN) stream the original file untranscoded; off
+            // home, use the configured format (e.g. opus) to save mobile data.
+            val directOnWifi = prefs.getBoolean("direct_on_wifi", true)
+            val onHome = MelodyApp.instance.isOnHomeWifi()
+            val format: String
+            val bitrate: Int
+            if (directOnWifi && onHome) {
+                format = ""
+                bitrate = 0
+            } else {
+                format = prefs.getString("audio_format", "") ?: ""
+                bitrate = prefs.getInt("audio_bitrate", 0)
+            }
             streamFormat = format
             streamBitrate = bitrate
 
-            connectAgentLoop(name, format, bitrate)
+            connectAgentLoop(generation, name, format, bitrate)
         }
     }
 
@@ -185,28 +286,32 @@ class PlaybackService : Service() {
         registerAgent()
     }
 
-    private suspend fun connectAgentLoop(name: String, format: String, bitrate: Int) {
-        while (true) {
+    private suspend fun connectAgentLoop(generation: Long, name: String, format: String, bitrate: Int) {
+        while (generation == agentGeneration) {
             try {
-                connectAgent(name, format, bitrate)
+                connectAgent(generation, name, format, bitrate)
             } catch (e: Exception) {
                 android.util.Log.e("PlaybackService", "Agent connection error: ${e.message}")
             } finally {
                 stateReporterJob?.cancel()
-                withContext(Dispatchers.Main) {
+                // NonCancellable: this cleanup must also run when the session
+                // was cancelled by a reconnect — withContext on a cancelled
+                // coroutine otherwise throws before executing the block.
+                withContext(NonCancellable + Dispatchers.Main) {
                     val p = player
-                    if (p != null && !isCurrentTrackOffline) {
+                    if (p != null && generation == agentGeneration && !isCurrentTrackOffline) {
                         p.stop()
                         p.clearMediaItems()
                         offlineIndexes.clear()
                     }
+                    updateNotification()
                 }
             }
             delay(5000)
         }
     }
 
-    private suspend fun connectAgent(name: String, format: String, bitrate: Int) {
+    private suspend fun connectAgent(generation: Long, name: String, format: String, bitrate: Int) {
         val app = MelodyApp.instance
         val host = app.mpd.serverHost
         val port = app.mpd.serverPort
@@ -217,13 +322,9 @@ class PlaybackService : Service() {
         val lineChannel = Channel<String>(Channel.UNLIMITED)
         val connected = CompletableDeferred<Boolean>()
 
-        val client = OkHttpClient.Builder()
-            .readTimeout(0, TimeUnit.SECONDS)
-            .pingInterval(30, TimeUnit.SECONDS)
-            .build()
         val request = Request.Builder().url(wsUrl).build()
 
-        val ws = client.newWebSocket(request, object : WebSocketListener() {
+        val ws = agentHttpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {}
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -244,7 +345,15 @@ class PlaybackService : Service() {
             }
         })
 
-        agentWs = ws
+        // Only publish this socket if we are still the current session —
+        // a racing reconnect may already have replaced us.
+        synchronized(agentLock) {
+            if (generation != agentGeneration) {
+                ws.close(1000, "superseded")
+                return
+            }
+            agentWs = ws
+        }
 
         val greeting = lineChannel.receive()
         if (!greeting.startsWith("OK MPD")) {
@@ -252,9 +361,11 @@ class PlaybackService : Service() {
             return
         }
 
-        // Register as v2 autonomous agent
+        // Register as v2 autonomous agent. The instance ID lets the server
+        // tell a reconnect of this process apart from a second device
+        // registering under the same name.
         val regCmd = buildString {
-            append("agent_register ${mpdQuote(name)} v2")
+            append("agent_register ${mpdQuote(name)} v2 instance=$instanceId")
             if (format.isNotBlank()) append(" format=${mpdQuote(format)}")
             if (bitrate > 0) append(" max_bitrate=$bitrate")
         }
@@ -266,6 +377,7 @@ class PlaybackService : Service() {
             ws.close(1000, "register failed")
             return
         }
+        withContext(Dispatchers.Main) { updateNotification() }
 
         // Start periodic state reporter
         stateReporterJob = scope.launch {
@@ -319,10 +431,10 @@ class PlaybackService : Service() {
             }
             "stop" -> {
                 withContext(Dispatchers.Main) {
+                    curPos = -1
                     player?.stop()
                     player?.clearMediaItems()
                 }
-                curPos = -1
                 "OK"
             }
             "seek" -> {
@@ -344,14 +456,18 @@ class PlaybackService : Service() {
             "volume" -> {
                 if (args.isEmpty()) return "ACK [2@0] {volume} missing level"
                 val vol = args[0].toDoubleOrNull() ?: 100.0
-                userVolume = (vol / 100.0).toFloat().coerceIn(0f, 1f)
-                withContext(Dispatchers.Main) { player?.let { applyReplayGain(it) } }
+                withContext(Dispatchers.Main) {
+                    userVolume = (vol / 100.0).toFloat().coerceIn(0f, 1f)
+                    player?.let { applyReplayGain(it) }
+                }
                 "OK"
             }
             "replaygain" -> {
                 if (args.isEmpty()) return "ACK [2@0] {replaygain} missing mode"
-                replaygainMode = args[0]
-                withContext(Dispatchers.Main) { player?.let { applyReplayGain(it) } }
+                withContext(Dispatchers.Main) {
+                    replaygainMode = args[0]
+                    player?.let { applyReplayGain(it) }
+                }
                 "OK"
             }
             "queue_changed" -> {
@@ -474,7 +590,9 @@ class PlaybackService : Service() {
 
             p.addMediaItem(mediaItemFor(item, url))
             if (localPath != null) {
-                offlineIndexes.add(1)
+                // After trimming, the preloaded item's index depends on whether
+                // a current track is still loaded (1) or the player was empty (0).
+                offlineIndexes.add(p.mediaItemCount - 1)
             }
             pendingNextPos = pos
 
@@ -566,6 +684,7 @@ class PlaybackService : Service() {
             val p = player ?: return@withContext null
             val st = when {
                 p.playbackState == Player.STATE_IDLE || p.mediaItemCount == 0 -> "stop"
+                p.playbackState == Player.STATE_ENDED -> "stop"
                 !p.playWhenReady -> "pause"
                 else -> "play"
             }
@@ -594,9 +713,12 @@ class PlaybackService : Service() {
         android.util.Log.d("PlaybackService", "Syncing queue via $wsUrl")
 
         val linesCh = Channel<String>(Channel.UNLIMITED)
-        val client = OkHttpClient.Builder()
+        // newBuilder shares the agent client's dispatcher and connection pool
+        // instead of spawning fresh threads for every sync.
+        val client = agentHttpClient.newBuilder()
             .connectTimeout(5, TimeUnit.SECONDS)
             .readTimeout(10, TimeUnit.SECONDS)
+            .pingInterval(0, TimeUnit.SECONDS)
             .build()
         val request = Request.Builder().url(wsUrl).build()
 
@@ -650,8 +772,9 @@ class PlaybackService : Service() {
                 queue = items
             }
         } finally {
+            // Do NOT shut down the dispatcher here — it is shared with the
+            // long-lived agent connection via newBuilder().
             ws.close(1000, "done")
-            client.dispatcher.executorService.shutdown()
         }
     }
 
@@ -762,6 +885,13 @@ class PlaybackService : Service() {
     companion object {
         var instance: PlaybackService? = null
             private set
+
+        // Random per-process ID sent with agent_register so the server can
+        // detect two devices fighting over the same agent name.
+        val instanceId: String = ByteArray(8).let { b ->
+            SecureRandom().nextBytes(b)
+            b.joinToString("") { "%02x".format(it) }
+        }
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
@@ -770,9 +900,14 @@ class PlaybackService : Service() {
 
     override fun onDestroy() {
         stateReporterJob?.cancel()
-        agentWs?.close(1000, "service destroyed")
+        synchronized(agentLock) {
+            agentGeneration++
+            agentWs?.close(1000, "service destroyed")
+            agentWs = null
+        }
         agentJob?.cancel()
         scope.cancel()
+        agentHttpClient.dispatcher.executorService.shutdown()
         mediaSession?.release()
         mediaSession = null
         player?.release()
@@ -782,14 +917,28 @@ class PlaybackService : Service() {
     }
 }
 
-// MPD command parsing (same as server/agent)
+// MPD command parsing (same as server/agent). The `quoted` flag preserves
+// empty quoted arguments ("" must parse as an empty token, not be dropped).
 private fun parseCommand(line: String): Pair<String, List<String>> {
     var cmd = ""
     val args = mutableListOf<String>()
     val current = StringBuilder()
     var inQuote = false
     var escaped = false
+    var quoted = false
     var first = true
+
+    fun emit() {
+        if (current.isEmpty() && !quoted) return
+        if (first) {
+            cmd = current.toString()
+            first = false
+        } else {
+            args.add(current.toString())
+        }
+        current.clear()
+        quoted = false
+    }
 
     for (r in line) {
         if (escaped) {
@@ -803,26 +952,16 @@ private fun parseCommand(line: String): Pair<String, List<String>> {
         }
         if (r == '"') {
             inQuote = !inQuote
+            quoted = true
             continue
         }
         if (r == ' ' && !inQuote) {
-            if (current.isNotEmpty()) {
-                if (first) {
-                    cmd = current.toString()
-                    first = false
-                } else {
-                    args.add(current.toString())
-                }
-                current.clear()
-            }
+            emit()
             continue
         }
         current.append(r)
     }
-    if (current.isNotEmpty()) {
-        if (first) cmd = current.toString()
-        else args.add(current.toString())
-    }
+    emit()
     return Pair(cmd, args)
 }
 

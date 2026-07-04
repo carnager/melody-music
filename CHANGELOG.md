@@ -5,6 +5,58 @@
 ### Features
 
 - Add `melody-macos-agent`, a macOS-only playback target with its own generated config file.
+- Android: volume control slider in Now Playing.
+- Android: queue shuffle, save queue as playlist, delete playlists (with confirmation), and set/clear track priorities from the queue.
+- Android: tag-qualified search (`artist:`, `album:`, `title:`, `date:`) matching the TUI syntax.
+- Android: trigger a server library update from Settings.
+- Android: media-style notification with lockscreen controls; lockscreen/headset transport now goes through the server so queue state stays in sync.
+- Android: audio focus handling (pauses for calls/other apps), pause on headphone unplug, and network wake mode for screen-off streaming.
+- Android: Wi-Fi-only download preference (on by default); downloads pause on metered networks and resume automatically.
+- Android: failed action feedback via snackbars instead of silent failures.
+- Android: setup screen verifies the server is reachable before saving.
+- Android: play/shuffle buttons on the album screen; tapping a track in the library or a playlist now plays it in context (long-press or ⋮ for the menu).
+- Android: back from any tab returns to the Library tab instead of closing the app; predictive back gestures enabled.
+- Android: clear-queue asks for confirmation; random-album uses a dice icon; track rows show durations; library shows a proper loading/error state with retry; app version in Settings.
+- melody-tui: queue management — `Shift+↑`/`Shift+↓` (or `J`/`K`) move the track or selection, `g` jumps to the current song, `Z` shuffles, `S` saves the queue as a playlist, `!` sets or clears track priorities, `←`/`→` seek.
+- melody-tui: `:` command palette with completion (play/pause/seek/volume/save/shuffle/replaygain/modes/outputs/…).
+- melody-tui: `F5`-`F8` transport keys (prev / play-pause / stop / next); Space no longer toggles pause — it quick-adds in the library and toggles selection in the queue.
+- melody-tui: `Enter` replaces the queue and plays library items; the action menu moved to `m`.
+- melody-tui: `1`/`2`/`3` switch the library root (Artists / Playlists / Latest); `d` deletes a playlist (with confirmation); `q` steps back instead of quitting while drilled in.
+- melody-tui: transient status toasts for actions and MPD errors, a disconnected indicator, and a volume display in the player bar.
+- melody-tui: `p` now also adds whole albums and artists to playlists.
+- melody-tui: mouse support — wheel scrolls lists and lyrics, click focuses panels and selects rows, double-click plays a queue track.
+- melody-tui: tag-qualified search (`artist:`, `album:`, `title:`, `date:`).
+- melody-tui: configurable UI colors and `album_art` mode in `melody-tui.toml`; album art auto-detects kitty/ghostty terminals.
+- melody-tui: transport keys (`F5`-`F8`, `<`, `>`, `s`, volume) keep working inside the help, track-info, and now-playing screens; `←`/`→` seek in now playing.
+
+### Bug Fixes
+
+- melodyd: resume playback at the last reported position when an active agent re-registers, instead of restarting the current track from the beginning.
+- melodyd/melody-agent: agents send a per-process instance ID on registration; melodyd logs a warning when two different processes fight over the same agent name (previously this caused a silent 5-second replace loop that restarted the track endlessly). The Android app sends the instance ID too.
+- melodyd: abort the HTTP response when ffmpeg dies mid-transcode so download clients detect truncation instead of saving a partial file as complete.
+- Android: a transient status-poll failure no longer blanks the Now Playing screen and kills the 1-second progress updates mid-song.
+- Android: seek thumb no longer snaps back to the pre-seek position after release.
+- Android: queue drag-reorder updates the list optimistically and uses stable row keys — the dragged row no longer jumps to the wrong item.
+- Android: the mini player clears instead of showing the last track as "playing" forever after the queue empties.
+- Android: idle notifications arriving during an in-flight refresh are coalesced instead of dropped; concurrent refreshes are serialized.
+- Android: lyrics can no longer attach to the wrong track after fast skips, and clear when the queue empties.
+- Android: agent reconnect races fixed (session generation guard); reconnect cleanup now actually runs (NonCancellable); one shared OkHttp client instead of leaking one per reconnect attempt.
+- Android: track-end advance is no longer suppressed when a preload never arrived; ended playback reports "stop" instead of a stale "play".
+- Android: MpdClient no longer wedges permanently after a non-MPD greeting (captive portal); non-idempotent commands are no longer retried after response timeouts (duplicate queue adds/moves).
+- Android: album list no longer restores another artist's scroll position; "Latest" mode shows a proper title.
+- Android: back button exits search selection mode; the keyboard no longer covers search results; re-tapping the Playlists tab no longer closes the open playlist.
+- Android: changing format/bitrate chips in Settings re-registers the agent once on close instead of interrupting playback per tap.
+- Android: dismissing the "Play on phone?" prompt cancels the action instead of silently starting playback on the remote device.
+- Android: removing an album mid-download actually cancels it (it no longer silently re-downloads and resurrects); downloads survive the UI closing (app-scoped queue persisted across restarts) and retry with exponential backoff instead of hammering every 5 seconds forever.
+- Android: downloaded-album state reconciles with on-disk files at startup; orphaned audio files are garbage-collected; quality changes trigger re-downloads instead of silently keeping the old encoding.
+- Android: on unknown Wi-Fi (SSID unreadable), the app probes the home server instead of blindly assuming it's on the home network.
+- Android: cloud backup excludes the offline music cache and its prefs (restores no longer claim albums are downloaded when files weren't restored).
+- melody-tui: fix library filter with no matches acting on the first item of the unfiltered list.
+- melody-tui: fix `q` quitting the whole app from the playlist picker, go-to, and device popups (including while typing a playlist name).
+- melody-tui: refresh the artist list after library updates and playlist views after stored-playlist changes; watch the `output` idle subsystem.
+- melody-tui: rewrite the stale help screen (removed vim keys were still documented; `J`/`K` queue move existed only in the help text).
+- melody-tui: fetch album ratings in one command-list round-trip instead of one request per album.
+- melody-tui: lists scroll at the edges with a small margin instead of recentering the cursor on every keypress.
 
 ## 1.2.0 (2026-06-04)
 

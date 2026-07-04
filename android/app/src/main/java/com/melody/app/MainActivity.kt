@@ -39,6 +39,8 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -69,6 +71,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.foundation.Canvas
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Album
+import androidx.compose.material.icons.filled.Casino
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -91,6 +94,7 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Repeat
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Settings
@@ -233,6 +237,43 @@ fun MelodyTheme(content: @Composable () -> Unit) {
 @Composable
 fun SetupScreen(onConnected: () -> Unit) {
     var server by remember { mutableStateOf("") }
+    var testing by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    // Verify the server is actually reachable before committing — otherwise a
+    // typo lands the user on an endless "Loading..." screen.
+    fun testAndConnect() {
+        val trimmed = server.trim()
+        if (trimmed.isBlank() || testing) return
+        testing = true
+        error = null
+        scope.launch {
+            val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    val stripped = trimmed.replace(Regex("^https?://"), "")
+                    val lastColon = stripped.lastIndexOf(':')
+                    val host = if (lastColon > 0) stripped.substring(0, lastColon) else stripped
+                    val port = if (lastColon > 0) stripped.substring(lastColon + 1).toIntOrNull() ?: 6701
+                        else if (trimmed.startsWith("https://")) 443 else 6701
+                    java.net.Socket().use {
+                        it.connect(java.net.InetSocketAddress(host, port), 4000)
+                        true
+                    }
+                } catch (_: Exception) {
+                    false
+                }
+            }
+            testing = false
+            if (ok) {
+                MelodyApp.instance.updateServer(trimmed)
+                onConnected()
+            } else {
+                error = "Could not reach $trimmed"
+            }
+        }
+    }
+
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background
@@ -274,20 +315,27 @@ fun SetupScreen(onConnected: () -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
                 colors = OutlinedTextFieldDefaults.colors()
             )
+            if (error != null) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    error!!,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
             Spacer(Modifier.height(20.dp))
             FilledIconButton(
-                onClick = {
-                    if (server.isNotBlank()) {
-                        MelodyApp.instance.updateServer(server.trim())
-                        onConnected()
-                    }
-                },
+                onClick = { testAndConnect() },
+                enabled = !testing,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp),
                 shape = RoundedCornerShape(12.dp)
             ) {
-                Text("Connect", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    if (testing) "Connecting…" else "Connect",
+                    style = MaterialTheme.typography.labelLarge
+                )
             }
         }
     }
@@ -298,16 +346,33 @@ fun SetupScreen(onConnected: () -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(vm: MainViewModel) {
-    var selectedTab by remember { mutableIntStateOf(0) }
-    var showNowPlaying by remember { mutableStateOf(false) }
-    var showSettings by remember { mutableStateOf(false) }
+    var selectedTab by androidx.compose.runtime.saveable.rememberSaveable { mutableIntStateOf(0) }
+    var showNowPlaying by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
+    var showSettings by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
     var showDevices by remember { mutableStateOf(false) }
+    var showSaveQueueDialog by remember { mutableStateOf(false) }
+    var showClearQueueDialog by remember { mutableStateOf(false) }
+
+    // Tab back-stack: back from any other tab returns to Library instead of
+    // closing the app. Declared FIRST so handlers composed later — screen
+    // drill-downs, selection mode, and the overlays — take priority over it.
+    BackHandler(enabled = selectedTab != 0) { selectedTab = 0 }
+
+    // Transient errors/messages from the ViewModel
+    val snackbarHostState = remember { androidx.compose.material3.SnackbarHostState() }
+    val toast = vm.toast
+    LaunchedEffect(toast) {
+        if (toast != null) {
+            snackbarHostState.showSnackbar(toast)
+            vm.clearToast()
+        }
+    }
 
     // Derive top bar title from current state
     val topBarTitle = when (selectedTab) {
         0 -> when (vm.libView) {
             LibView.Artists -> "Library"
-            LibView.Albums -> vm.curArtist
+            LibView.Albums -> if (vm.libSortLatest) "Latest" else vm.curArtist
             LibView.Tracks -> vm.curAlbum?.album ?: "Tracks"
         }
         1 -> "Search"
@@ -344,11 +409,19 @@ fun MainScreen(vm: MainViewModel) {
                         when (selectedTab) {
                             0 -> if (vm.libView == LibView.Artists) {
                                 IconButton(onClick = { vm.randomAlbum() }) {
-                                    Icon(Icons.Default.Shuffle, "Random album")
+                                    // Dice, not shuffle: this picks a random
+                                    // album, it doesn't shuffle anything.
+                                    Icon(Icons.Default.Casino, "Random album")
                                 }
                             }
                             2 -> if (vm.queue.isNotEmpty()) {
-                                IconButton(onClick = { vm.queueClear() }) {
+                                IconButton(onClick = { vm.queueShuffle() }) {
+                                    Icon(Icons.Default.Shuffle, "Shuffle queue")
+                                }
+                                IconButton(onClick = { showSaveQueueDialog = true }) {
+                                    Icon(Icons.Default.Save, "Save queue as playlist")
+                                }
+                                IconButton(onClick = { showClearQueueDialog = true }) {
                                     Icon(Icons.Default.DeleteSweep, "Clear queue")
                                 }
                             }
@@ -423,15 +496,29 @@ fun MainScreen(vm: MainViewModel) {
                         )
                         NavigationBarItem(
                             selected = selectedTab == 3,
-                            onClick = { selectedTab = 3; vm.loadPlaylists() },
+                            onClick = {
+                                // Re-tapping while inside a playlist steps back to
+                                // the list; switching tabs keeps the open playlist.
+                                if (selectedTab == 3 && vm.playlistView) {
+                                    vm.playlistBack()
+                                } else {
+                                    vm.loadPlaylists(resetView = false)
+                                }
+                                selectedTab = 3
+                            },
                             icon = { Icon(Icons.AutoMirrored.Filled.PlaylistPlay, contentDescription = null) },
                             label = { Text("Playlists") }
                         )
                     }
                 }
-            }
+            },
+            snackbarHost = { androidx.compose.material3.SnackbarHost(snackbarHostState) }
         ) { padding ->
-            Box(Modifier.padding(padding)) {
+            // consumeWindowInsets tells nested imePadding() that the scaffold
+            // padding already covers part of the bottom inset — without it the
+            // keyboard height and the bottom-bar height stack, leaving a dead
+            // band above the keyboard.
+            Box(Modifier.padding(padding).consumeWindowInsets(padding)) {
                 when (selectedTab) {
                     0 -> LibraryScreen(vm)
                     1 -> SearchScreen(vm)
@@ -439,6 +526,56 @@ fun MainScreen(vm: MainViewModel) {
                     3 -> PlaylistsScreen(vm)
                 }
             }
+        }
+
+        // Clear-queue confirmation — as destructive as deleting a playlist,
+        // and it sits next to two harmless icons.
+        if (showClearQueueDialog) {
+            AlertDialog(
+                onDismissRequest = { showClearQueueDialog = false },
+                title = { Text("Clear queue?") },
+                text = { Text("All ${vm.queue.size} tracks will be removed and playback stops.") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showClearQueueDialog = false
+                        vm.queueClear()
+                    }) { Text("Clear", color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showClearQueueDialog = false }) { Text("Cancel") }
+                }
+            )
+        }
+
+        // Save-queue-as-playlist dialog
+        if (showSaveQueueDialog) {
+            var name by remember { mutableStateOf("") }
+            AlertDialog(
+                onDismissRequest = { showSaveQueueDialog = false },
+                title = { Text("Save queue as playlist") },
+                text = {
+                    OutlinedTextField(
+                        value = name,
+                        onValueChange = { name = it },
+                        placeholder = { Text("Playlist name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            if (name.isNotBlank()) {
+                                vm.saveQueueAsPlaylist(name.trim())
+                                showSaveQueueDialog = false
+                            }
+                        }
+                    ) { Text("Save") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showSaveQueueDialog = false }) { Text("Cancel") }
+                }
+            )
         }
 
         // Action menu (queue items have their own sheet)
@@ -456,7 +593,8 @@ fun MainScreen(vm: MainViewModel) {
             PlaylistPickerSheet(vm)
         }
 
-        // "Play on phone?" prompt
+        // "Play on phone?" prompt. Tapping outside cancels the action;
+        // "Keep current" explicitly plays on the currently active device.
         if (vm.showPhonePrompt) {
             AlertDialog(
                 onDismissRequest = { vm.phonePromptDismiss() },
@@ -466,7 +604,7 @@ fun MainScreen(vm: MainViewModel) {
                     TextButton(onClick = { vm.phonePromptConfirm() }) { Text("Phone") }
                 },
                 dismissButton = {
-                    TextButton(onClick = { vm.phonePromptDismiss() }) { Text("Keep current") }
+                    TextButton(onClick = { vm.phonePromptPlayOnCurrent() }) { Text("Keep current") }
                 }
             )
         }
@@ -486,7 +624,7 @@ fun MainScreen(vm: MainViewModel) {
             enter = slideInVertically { it },
             exit = slideOutVertically { it }
         ) {
-            SettingsScreen(onDismiss = { showSettings = false })
+            SettingsScreen(vm, onDismiss = { showSettings = false })
         }
     }
 }
@@ -757,7 +895,26 @@ fun NowPlayingScreen(vm: MainViewModel, onDismiss: () -> Unit) {
             val pos = st?.timePos ?: 0.0
             var dragging by remember { mutableStateOf(false) }
             var dragValue by remember { mutableFloatStateOf(0f) }
-            val displayFraction = if (dragging) dragValue else if (dur > 0) (pos / dur).toFloat().coerceIn(0f, 1f) else 0f
+            // Holds the just-seeked fraction until the server's status catches
+            // up — otherwise the thumb snaps back to the pre-seek position for
+            // a second after release.
+            var pendingSeek by remember { mutableStateOf<Float?>(null) }
+            LaunchedEffect(pos) {
+                val p = pendingSeek
+                if (p != null && dur > 0 && kotlin.math.abs(pos - p * dur) < 3.0) pendingSeek = null
+            }
+            LaunchedEffect(pendingSeek) {
+                if (pendingSeek != null) {
+                    kotlinx.coroutines.delay(3000)
+                    pendingSeek = null
+                }
+            }
+            val displayFraction = when {
+                dragging -> dragValue
+                pendingSeek != null -> pendingSeek!!
+                dur > 0 -> (pos / dur).toFloat().coerceIn(0f, 1f)
+                else -> 0f
+            }
 
             Column(Modifier.fillMaxWidth()) {
                 // Custom seek bar
@@ -789,6 +946,7 @@ fun NowPlayingScreen(vm: MainViewModel, onDismiss: () -> Unit) {
                         value = displayFraction,
                         onValueChange = { dragging = true; dragValue = it },
                         onValueChangeFinished = {
+                            pendingSeek = dragValue
                             vm.seek(dragValue.toDouble() * dur)
                             dragging = false
                         },
@@ -810,7 +968,7 @@ fun NowPlayingScreen(vm: MainViewModel, onDismiss: () -> Unit) {
                     .padding(horizontal = 4.dp)
             ) {
                 Text(
-                    fmtTime(if (dragging) dragValue.toDouble() * dur else pos),
+                    fmtTime(if (dragging || pendingSeek != null) displayFraction.toDouble() * dur else pos),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -879,6 +1037,72 @@ fun NowPlayingScreen(vm: MainViewModel, onDismiss: () -> Unit) {
                 PacManButton(active = st?.consume == true) { vm.toggleConsume() }
             }
 
+            // Volume slider (server reports -1 when the target has no volume
+            // control). Styled like the seek bar above — thin custom track
+            // with an invisible Slider for interaction.
+            val vol = st?.volume ?: -1
+            if (vol >= 0) {
+                Spacer(Modifier.height(8.dp))
+                var volDrag by remember { mutableStateOf<Float?>(null) }
+                val volFraction = volDrag ?: (vol / 100f).coerceIn(0f, 1f)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.VolumeUp,
+                        contentDescription = "Volume",
+                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(32.dp),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f))
+                        )
+                        Box(
+                            Modifier
+                                .fillMaxWidth(volFraction)
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(MaterialTheme.colorScheme.primary)
+                        )
+                        Slider(
+                            value = volFraction,
+                            onValueChange = { volDrag = it },
+                            onValueChangeFinished = {
+                                volDrag?.let { vm.setVolume((it * 100).toInt()) }
+                                volDrag = null
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = androidx.compose.material3.SliderDefaults.colors(
+                                thumbColor = MaterialTheme.colorScheme.primary,
+                                activeTrackColor = Color.Transparent,
+                                inactiveTrackColor = Color.Transparent,
+                                activeTickColor = Color.Transparent,
+                                inactiveTickColor = Color.Transparent
+                            )
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        "${(volFraction * 100).toInt()}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.width(28.dp)
+                    )
+                }
+            }
+
             Spacer(Modifier.weight(1f))
         }
     }
@@ -917,7 +1141,13 @@ fun NowPlayingScreen(vm: MainViewModel, onDismiss: () -> Unit) {
 
 @Composable
 fun LyricsScreen(vm: MainViewModel, onDismiss: () -> Unit) {
-    val lyr = vm.lyrics ?: run { onDismiss(); return }
+    val lyr = vm.lyrics
+    if (lyr == null) {
+        // Dismiss in an effect — mutating state during composition forces an
+        // immediate extra recomposition.
+        LaunchedEffect(Unit) { onDismiss() }
+        return
+    }
     val st = vm.status
 
     BackHandler { onDismiss() }
@@ -1018,7 +1248,10 @@ private fun parseLyricsLines(text: String, type: String): List<LyricsLine> {
 
 @Composable
 fun ModeIconButton(icon: androidx.compose.ui.graphics.vector.ImageVector, description: String, active: Boolean, onClick: () -> Unit) {
-    val tint = if (active) Color.White else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+    // Active = primary (clearly "on"); inactive stays readable instead of
+    // looking disabled.
+    val tint = if (active) MaterialTheme.colorScheme.primary
+               else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
     IconButton(onClick = onClick, modifier = Modifier.size(44.dp)) {
         Icon(icon, contentDescription = description, modifier = Modifier.size(24.dp), tint = tint)
     }
@@ -1026,7 +1259,8 @@ fun ModeIconButton(icon: androidx.compose.ui.graphics.vector.ImageVector, descri
 
 @Composable
 fun PacManButton(active: Boolean, onClick: () -> Unit) {
-    val color = if (active) Color.White else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+    val color = if (active) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
     IconButton(onClick = onClick, modifier = Modifier.size(44.dp)) {
         Canvas(modifier = Modifier.size(24.dp)) {
             val r = size.minDimension / 2f
@@ -1149,7 +1383,28 @@ fun Scrollbar(
 fun ArtistList(vm: MainViewModel) {
     if (vm.artists.isEmpty() && !vm.showCachedOnly) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("Loading...", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                if (vm.isConnected) {
+                    androidx.compose.material3.CircularProgressIndicator(modifier = Modifier.size(36.dp))
+                    Spacer(Modifier.height(16.dp))
+                    Text("Loading library…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    Icon(
+                        Icons.Default.LibraryMusic,
+                        contentDescription = null,
+                        modifier = Modifier.size(48.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text("Can't reach the server", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(12.dp))
+                    TextButton(onClick = { vm.onForeground() }) {
+                        Icon(Icons.Default.Refresh, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Retry")
+                    }
+                }
+            }
         }
         return
     }
@@ -1249,7 +1504,7 @@ fun AlbumList(vm: MainViewModel) {
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
             }
-            items(vm.albums, key = { it.id.ifBlank { "${it.albumArtist}\u0000${it.album}" } }) { album ->
+            items(vm.albums, key = { it.id.ifBlank { "${it.albumArtist}\u0000${it.album}\u0000${it.date}" } }) { album ->
                 val isOffline = vm.downloadedAlbums.contains(album.id)
                 ListItem(
                     leadingContent = {
@@ -1331,6 +1586,7 @@ fun AlbumList(vm: MainViewModel) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun TrackList(vm: MainViewModel) {
     LazyColumn(Modifier.fillMaxSize()) {
@@ -1383,6 +1639,22 @@ fun TrackList(vm: MainViewModel) {
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                         )
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilledIconButton(
+                                onClick = { vm.curAlbum?.let { vm.playAlbum(it) } },
+                                modifier = Modifier.size(40.dp),
+                                shape = CircleShape
+                            ) {
+                                Icon(Icons.Default.PlayArrow, "Play album", modifier = Modifier.size(24.dp))
+                            }
+                            IconButton(
+                                onClick = { vm.curAlbum?.let { vm.playAlbumShuffled(it) } },
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(Icons.Default.Shuffle, "Shuffle album", modifier = Modifier.size(22.dp))
+                            }
+                        }
                         val displayRating = if (vm.albumRating > 0) vm.albumRating
                             else vm.albumComputedRating.let { if (it > 0.0) kotlin.math.round(it).toInt().coerceIn(1, 10) else 0 }
                         val isComputed = vm.albumRating == 0 && displayRating > 0
@@ -1404,10 +1676,10 @@ fun TrackList(vm: MainViewModel) {
                                 Box(modifier = Modifier.size(22.dp)) {
                                     Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.fillMaxSize())
                                     Row(Modifier.matchParentSize()) {
-                                        Box(Modifier.weight(1f).fillMaxHeight().clickable {
+                                        Box(Modifier.weight(1f).fillMaxHeight().clickable(onClickLabel = "Rate half star") {
                                             vm.rateAlbum(if (vm.albumRating == halfValue) 0 else halfValue)
                                         })
-                                        Box(Modifier.weight(1f).fillMaxHeight().clickable {
+                                        Box(Modifier.weight(1f).fillMaxHeight().clickable(onClickLabel = "Rate full star") {
                                             vm.rateAlbum(if (vm.albumRating == fullValue) 0 else fullValue)
                                         })
                                     }
@@ -1419,7 +1691,7 @@ fun TrackList(vm: MainViewModel) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
             }
         }
-        itemsIndexed(vm.tracks) { _, track ->
+        itemsIndexed(vm.tracks) { idx, track ->
             ListItem(
                 leadingContent = {
                     Text(
@@ -1433,10 +1705,30 @@ fun TrackList(vm: MainViewModel) {
                 headlineContent = {
                     Text(track.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 },
-                supportingContent = {
+                // Only show the artist when it differs from the album artist
+                // (compilations) — on single-artist albums it's noise.
+                supportingContent = if (track.artist.isNotBlank() && track.artist != vm.curArtist) {{
                     Text(track.artist, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+                }} else null,
+                trailingContent = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (track.duration > 0) {
+                            Text(
+                                fmtTime(track.duration),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        IconButton(onClick = { vm.showAction(MainViewModel.ActionTarget.TrackTarget(track)) }) {
+                            Icon(Icons.Default.MoreVert, "Actions")
+                        }
+                    }
                 },
-                modifier = Modifier.clickable { vm.showAction(MainViewModel.ActionTarget.TrackTarget(track)) }
+                // Tap = play the album from this track; menu via ⋮ or long-press
+                modifier = Modifier.combinedClickable(
+                    onClick = { vm.playTrackInContext(vm.tracks, idx) },
+                    onLongClick = { vm.showAction(MainViewModel.ActionTarget.TrackTarget(track)) }
+                )
             )
         }
     }
@@ -1447,19 +1739,23 @@ fun TrackList(vm: MainViewModel) {
 @Composable
 @OptIn(ExperimentalFoundationApi::class)
 fun SearchScreen(vm: MainViewModel) {
-    Box(Modifier.fillMaxSize()) {
+    // Back exits selection mode instead of leaving the app
+    BackHandler(enabled = vm.searchSelectionMode) { vm.exitSearchSelectionMode() }
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+
+    Box(Modifier.fillMaxSize().imePadding()) {
         Column(Modifier.fillMaxSize()) {
             OutlinedTextField(
                 value = vm.searchQuery,
                 onValueChange = { vm.updateSearch(it) },
-                placeholder = { Text("Search albums and tracks\u2026") },
+                placeholder = { Text("Search albums and tracks\u2026 (artist:/album:/title:/date:)") },
                 singleLine = true,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 12.dp),
                 shape = RoundedCornerShape(16.dp),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                keyboardActions = KeyboardActions(onSearch = {}),
+                keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() }),
                 leadingIcon = { Icon(Icons.Default.Search, "Search") },
                 trailingIcon = {
                     if (vm.searchQuery.isNotBlank()) {
@@ -1805,8 +2101,19 @@ fun QueueScreen(vm: MainViewModel, onSwitchToLibrary: () -> Unit = {}) {
         var dragFromPos by remember { mutableStateOf(-1) }
         var dragOffsetY by remember { mutableFloatStateOf(0f) }
         var itemHeight by remember { mutableFloatStateOf(0f) }
+        val queueListState = rememberLazyListState()
+
+        // Jump to the currently playing track when opening the queue
+        LaunchedEffect(Unit) {
+            val currentIdx = vm.queue.indexOfFirst { it.current }
+            if (currentIdx >= 0) {
+                // +1 for the "N tracks" header item
+                queueListState.scrollToItem((currentIdx + 1 - 2).coerceAtLeast(0))
+            }
+        }
 
         LazyColumn(
+            state = queueListState,
             modifier = Modifier.fillMaxSize(),
             // Disable list scrolling while dragging to prevent conflicts
             userScrollEnabled = dragFromPos < 0
@@ -1819,7 +2126,12 @@ fun QueueScreen(vm: MainViewModel, onSwitchToLibrary: () -> Unit = {}) {
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
             }
-            itemsIndexed(vm.queue) { _, item ->
+            items(
+                vm.queue,
+                // Stable identity across reorders keeps row state and
+                // animations attached to the right track.
+                key = { item -> if (item.queueId >= 0) item.queueId else "${item.songId}#${item.position}" }
+            ) { item ->
                 val isCurrent = item.current
                 val isDragging = dragFromPos == item.position
                 val density = androidx.compose.ui.platform.LocalDensity.current
@@ -1876,7 +2188,8 @@ fun QueueScreen(vm: MainViewModel, onSwitchToLibrary: () -> Unit = {}) {
                                                     if (steps != 0) {
                                                         val newPos = (dragFromPos + steps).coerceIn(0, vm.queue.size - 1)
                                                         if (newPos != dragFromPos) {
-                                                            vm.queueMove(dragFromPos, newPos)
+                                                            // Optimistic: reorders the local list instantly
+                                                            vm.queueMoveOptimistic(dragFromPos, newPos)
                                                             dragFromPos = newPos
                                                             dragOffsetY -= steps * itemHeight
                                                         }
@@ -2052,11 +2365,11 @@ fun QueueScreen(vm: MainViewModel, onSwitchToLibrary: () -> Unit = {}) {
                                             modifier = Modifier.size(24.dp).align(Alignment.Center)
                                         )
                                         Row(Modifier.matchParentSize()) {
-                                            Box(Modifier.weight(1f).fillMaxHeight().clickable {
+                                            Box(Modifier.weight(1f).fillMaxHeight().clickable(onClickLabel = "Rate half star") {
                                                 val v = halfValue; trackRating = if (trackRating == v) 0 else v
                                                 vm.rateQueueTrack(item.songId, trackRating)
                                             })
-                                            Box(Modifier.weight(1f).fillMaxHeight().clickable {
+                                            Box(Modifier.weight(1f).fillMaxHeight().clickable(onClickLabel = "Rate full star") {
                                                 val v = fullValue; trackRating = if (trackRating == v) 0 else v
                                                 vm.rateQueueTrack(item.songId, trackRating)
                                             })
@@ -2067,6 +2380,25 @@ fun QueueScreen(vm: MainViewModel, onSwitchToLibrary: () -> Unit = {}) {
                         }
                     )
                 }
+                // Priority: prioritized tracks play first when random mode is on
+                ListItem(
+                    headlineContent = { Text("Priority") },
+                    leadingContent = { Icon(Icons.Default.Equalizer, null) },
+                    supportingContent = {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(0 to "Off", 10 to "Low", 20 to "Mid", 30 to "High").forEach { (value, label) ->
+                                FilterChip(
+                                    selected = item.priority == value || (value == 0 && item.priority == 0),
+                                    onClick = {
+                                        vm.setQueuePriority(item.position, value)
+                                        vm.dismissAction()
+                                    },
+                                    label = { Text(label) }
+                                )
+                            }
+                        }
+                    }
+                )
                 ListItem(
                     headlineContent = { Text("Remove from queue") },
                     leadingContent = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
@@ -2196,6 +2528,7 @@ fun PlaylistList(vm: MainViewModel) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PlaylistTrackList(vm: MainViewModel) {
     LazyColumn(Modifier.fillMaxSize()) {
@@ -2228,7 +2561,25 @@ fun PlaylistTrackList(vm: MainViewModel) {
                         overflow = TextOverflow.Ellipsis
                     )
                 },
-                modifier = Modifier.clickable { vm.showAction(MainViewModel.ActionTarget.TrackTarget(track)) }
+                trailingContent = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (track.duration > 0) {
+                            Text(
+                                fmtTime(track.duration),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        IconButton(onClick = { vm.showAction(MainViewModel.ActionTarget.TrackTarget(track)) }) {
+                            Icon(Icons.Default.MoreVert, "Actions")
+                        }
+                    }
+                },
+                // Tap = play the playlist from this track; menu via \u22ee or long-press
+                modifier = Modifier.combinedClickable(
+                    onClick = { vm.playTrackInContext(vm.playlistTracks, idx) },
+                    onLongClick = { vm.showAction(MainViewModel.ActionTarget.TrackTarget(track)) }
+                )
             )
         }
     }
@@ -2424,9 +2775,7 @@ fun PlaylistPickerSheet(vm: MainViewModel) {
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun SettingsScreen(onDismiss: () -> Unit) {
-    BackHandler { onDismiss() }
-
+fun SettingsScreen(vm: MainViewModel, onDismiss: () -> Unit) {
     val prefs = MelodyApp.instance.getSharedPreferences(
         "melody", android.content.Context.MODE_PRIVATE
     )
@@ -2443,17 +2792,18 @@ fun SettingsScreen(onDismiss: () -> Unit) {
     var bitrate by remember { mutableIntStateOf(prefs.getInt("audio_bitrate", 0)) }
     var replaygain by remember { mutableStateOf(prefs.getString("replaygain", "off") ?: "off") }
 
-    // Dialog state
-    var editingField by remember { mutableStateOf<String?>(null) }
-    var editValue by remember { mutableStateOf("") }
+    // Snapshot of agent-relevant settings at screen entry. The agent is
+    // re-registered ONCE when leaving settings — reconnecting on every chip
+    // tap audibly interrupts playback while the user experiments.
+    val initialAgentSettings = remember {
+        Triple(
+            prefs.getString("device_name", "") ?: "",
+            prefs.getString("audio_format", "") ?: "",
+            prefs.getInt("audio_bitrate", 0)
+        )
+    }
 
     fun saveAll() {
-        // Check if agent-relevant settings changed before saving
-        val oldName = prefs.getString("device_name", "") ?: ""
-        val oldFormat = prefs.getString("audio_format", "") ?: ""
-        val oldBitrate = prefs.getInt("audio_bitrate", 0)
-        val agentChanged = deviceName != oldName || format != oldFormat || bitrate != oldBitrate
-
         prefs.edit()
             .putString("server", server)
             .putString("external_server", externalServer)
@@ -2463,11 +2813,23 @@ fun SettingsScreen(onDismiss: () -> Unit) {
             .putInt("audio_bitrate", bitrate)
             .putString("replaygain", replaygain)
             .apply()
+    }
+
+    fun closeSettings() {
+        saveAll()
         MelodyApp.instance.applyServerForCurrentNetwork()
-        if (agentChanged) {
+        val (oldName, oldFormat, oldBitrate) = initialAgentSettings
+        if (deviceName != oldName || format != oldFormat || bitrate != oldBitrate) {
             PlaybackService.instance?.reconnect()
         }
+        onDismiss()
     }
+
+    BackHandler { closeSettings() }
+
+    // Dialog state
+    var editingField by remember { mutableStateOf<String?>(null) }
+    var editValue by remember { mutableStateOf("") }
 
     // Edit dialog
     if (editingField != null) {
@@ -2547,10 +2909,7 @@ fun SettingsScreen(onDismiss: () -> Unit) {
             TopAppBar(
                 title = { Text("Settings") },
                 navigationIcon = {
-                    IconButton(onClick = {
-                        saveAll()
-                        onDismiss()
-                    }) {
+                    IconButton(onClick = { closeSettings() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
                     }
                 },
@@ -2634,17 +2993,34 @@ fun SettingsScreen(onDismiss: () -> Unit) {
                     )
                 }
                 item {
-                    val rgScope = rememberCoroutineScope()
+                    var directOnWifi by remember {
+                        mutableStateOf(prefs.getBoolean("direct_on_wifi", true))
+                    }
+                    ListItem(
+                        headlineContent = { Text("Original on home WiFi") },
+                        supportingContent = { Text("Stream untranscoded on home WiFi; use the format above on mobile") },
+                        trailingContent = {
+                            Switch(
+                                checked = directOnWifi,
+                                onCheckedChange = {
+                                    directOnWifi = it
+                                    prefs.edit().putBoolean("direct_on_wifi", it).apply()
+                                    PlaybackService.instance?.reconnect()
+                                }
+                            )
+                        }
+                    )
+                }
+                item {
+                    // Reflect the server's live mode (it may have been changed
+                    // from another client), falling back to the local pref.
                     SettingsChipRow(
                         title = "ReplayGain",
                         options = listOf("off" to "Off", "track" to "Track", "album" to "Album"),
-                        selected = replaygain,
+                        selected = vm.status?.replayGainMode ?: replaygain,
                         onSelect = {
                             replaygain = it; saveAll()
-                            rgScope.launch {
-                                try { MelodyApp.instance.mpd.cmd("replay_gain_mode $it") }
-                                catch (_: Exception) {}
-                            }
+                            vm.setReplayGain(it)
                         }
                     )
                 }
@@ -2669,6 +3045,59 @@ fun SettingsScreen(onDismiss: () -> Unit) {
                                 }
                             )
                         }
+                    )
+                }
+
+                // --- Downloads section ---
+                item {
+                    SettingsSectionHeader("Downloads")
+                }
+                item {
+                    var wifiOnly by remember {
+                        mutableStateOf(prefs.getBoolean("download_wifi_only", true))
+                    }
+                    ListItem(
+                        headlineContent = { Text("Wi-Fi only") },
+                        supportingContent = { Text("Pause offline downloads on metered networks") },
+                        trailingContent = {
+                            Switch(
+                                checked = wifiOnly,
+                                onCheckedChange = {
+                                    wifiOnly = it
+                                    prefs.edit().putBoolean("download_wifi_only", it).apply()
+                                }
+                            )
+                        }
+                    )
+                }
+
+                // --- Library section ---
+                item {
+                    SettingsSectionHeader("Library")
+                }
+                item {
+                    ListItem(
+                        headlineContent = { Text("Update library") },
+                        supportingContent = { Text("Rescan the server's music directory") },
+                        leadingContent = { Icon(Icons.Default.Refresh, null) },
+                        modifier = Modifier.clickable { vm.updateLibrary() }
+                    )
+                }
+
+                // --- About ---
+                item {
+                    SettingsSectionHeader("About")
+                }
+                item {
+                    val context = androidx.compose.ui.platform.LocalContext.current
+                    val versionName = remember {
+                        try {
+                            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "?"
+                        } catch (_: Exception) { "?" }
+                    }
+                    ListItem(
+                        headlineContent = { Text("Version") },
+                        supportingContent = { Text(versionName) }
                     )
                 }
 
@@ -2785,10 +3214,10 @@ fun RatingBar(rating: Int, onRate: (Int) -> Unit) {
                 )
                 // Left half tap = half star (odd), right half tap = full star (even)
                 Row(Modifier.matchParentSize()) {
-                    Box(Modifier.weight(1f).fillMaxHeight().clickable {
+                    Box(Modifier.weight(1f).fillMaxHeight().clickable(onClickLabel = "Rate half star") {
                         onRate(if (rating == halfValue) 0 else halfValue)
                     })
-                    Box(Modifier.weight(1f).fillMaxHeight().clickable {
+                    Box(Modifier.weight(1f).fillMaxHeight().clickable(onClickLabel = "Rate full star") {
                         onRate(if (rating == fullValue) 0 else fullValue)
                     })
                 }
@@ -2920,11 +3349,11 @@ fun ActionSheet(vm: MainViewModel) {
                                         modifier = Modifier.size(24.dp).align(Alignment.Center)
                                     )
                                     Row(Modifier.matchParentSize()) {
-                                        Box(Modifier.weight(1f).fillMaxHeight().clickable {
+                                        Box(Modifier.weight(1f).fillMaxHeight().clickable(onClickLabel = "Rate half star") {
                                             val v = halfValue; albumRating = if (albumRating == v) 0 else v
                                             vm.rateAlbumDirect(albumForRating, albumRating)
                                         })
-                                        Box(Modifier.weight(1f).fillMaxHeight().clickable {
+                                        Box(Modifier.weight(1f).fillMaxHeight().clickable(onClickLabel = "Rate full star") {
                                             val v = fullValue; albumRating = if (albumRating == v) 0 else v
                                             vm.rateAlbumDirect(albumForRating, albumRating)
                                         })
@@ -2954,6 +3383,33 @@ fun ActionSheet(vm: MainViewModel) {
                         modifier = Modifier.clickable {
                             vm.downloadAlbum(albumForDownload)
                             vm.dismissAction()
+                        }
+                    )
+                }
+            }
+
+            // Delete option for playlists (with confirmation)
+            if (target is MainViewModel.ActionTarget.PlaylistTarget) {
+                var confirmDelete by remember { mutableStateOf(false) }
+                ListItem(
+                    headlineContent = { Text("Delete playlist") },
+                    leadingContent = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                    modifier = Modifier.clickable { confirmDelete = true }
+                )
+                if (confirmDelete) {
+                    AlertDialog(
+                        onDismissRequest = { confirmDelete = false },
+                        title = { Text("Delete playlist?") },
+                        text = { Text("\"${target.playlist.name}\" will be permanently deleted.") },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                confirmDelete = false
+                                vm.deletePlaylist(target.playlist)
+                                vm.dismissAction()
+                            }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { confirmDelete = false }) { Text("Cancel") }
                         }
                     )
                 }

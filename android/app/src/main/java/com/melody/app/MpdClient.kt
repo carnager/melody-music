@@ -17,6 +17,10 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     private var ws: WebSocket? = null
     private var lines = Channel<String>(Channel.UNLIMITED)
     private val mutex = Mutex()
+    // Guards connected/ws/connectGeneration writes: they are mutated both from
+    // coroutines holding `mutex` and from OkHttp callback threads, which cannot
+    // take a coroutine Mutex.
+    private val connLock = Any()
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     @Volatile var connected = false
         private set
@@ -66,10 +70,13 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     private suspend fun doConnect(force: Boolean = false) = mutex.withLock {
         if (!force && connected && ws != null) return@withLock
 
-        val generation = ++connectGeneration
-        ws?.close(1000, "reconnecting")
-        ws = null
-        connected = false
+        val generation: Long
+        synchronized(connLock) {
+            generation = ++connectGeneration
+            ws?.close(1000, "reconnecting")
+            ws = null
+            connected = false
+        }
         val connLines = Channel<String>(Channel.UNLIMITED)
         val partialLine = StringBuilder()
         lines = connLines
@@ -103,25 +110,29 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                if (generation != connectGeneration) return
                 val code = response?.code?.let { " response=$it" } ?: ""
-                android.util.Log.e("MpdClient", "WebSocket error for $wsUrl:$code ${t.message}")
-                connected = false
-                ws = null
+                synchronized(connLock) {
+                    if (generation != connectGeneration) return
+                    android.util.Log.e("MpdClient", "WebSocket error for $wsUrl:$code ${t.message}")
+                    connected = false
+                    ws = null
+                }
                 // Close lines channel so any blocked cmd() call fails immediately
                 // instead of waiting for the full command timeout.
                 connLines.close()
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                if (generation != connectGeneration) return
-                android.util.Log.d("MpdClient", "WebSocket closed: $reason")
-                connected = false
-                ws = null
+                synchronized(connLock) {
+                    if (generation != connectGeneration) return
+                    android.util.Log.d("MpdClient", "WebSocket closed: $reason")
+                    connected = false
+                    ws = null
+                }
                 connLines.close()
             }
         })
-        ws = newWs
+        synchronized(connLock) { ws = newWs }
 
         // Consume the MPD greeting before releasing the mutex
         try {
@@ -129,12 +140,24 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
             if (greeting.startsWith("OK MPD")) {
                 connected = true
                 android.util.Log.d("MpdClient", "MPD greeting: $greeting")
+            } else {
+                // A non-MPD peer (captive portal, proxy) answered. Tear the
+                // socket down fully — leaving ws non-null would stop the
+                // reconnect loop from ever retrying.
+                android.util.Log.e("MpdClient", "Unexpected greeting: $greeting")
+                synchronized(connLock) {
+                    connected = false
+                    ws?.close(1000, "bad greeting")
+                    ws = null
+                }
             }
         } catch (e: Exception) {
             android.util.Log.e("MpdClient", "Failed to read greeting: ${e.message}")
-            connected = false
-            ws?.close(1000, "greeting failed")
-            ws = null
+            synchronized(connLock) {
+                connected = false
+                ws?.close(1000, "greeting failed")
+                ws = null
+            }
         }
     }
 
@@ -163,10 +186,12 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
 
     private fun markCommandConnectionDead(reason: String) {
         android.util.Log.d("MpdClient", "Command WebSocket dead: $reason")
-        connected = false
-        connectGeneration++
-        ws?.close(1000, reason)
-        ws = null
+        synchronized(connLock) {
+            connected = false
+            connectGeneration++
+            ws?.close(1000, reason)
+            ws = null
+        }
         lines.close()
     }
 
@@ -178,10 +203,17 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
         idleGeneration++
         idleWs?.close(1000, "bye")
         idleWs = null
-        connectGeneration++
-        ws?.close(1000, "bye")
-        ws = null
-        connected = false
+        synchronized(connLock) {
+            connectGeneration++
+            ws?.close(1000, "bye")
+            ws = null
+            connected = false
+        }
+        // Release the OkHttp executors so discarded clients (server switch)
+        // don't leak threads.
+        scope.cancel()
+        cmdClient.dispatcher.executorService.shutdown()
+        idleClient.dispatcher.executorService.shutdown()
     }
 
     // ---- Idle connection for instant notifications ----
@@ -241,12 +273,14 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
                 // If idle dies, the command connection is likely dead too
                 // (same network event). Proactively tear it down so the
                 // reconnect loop kicks in immediately.
-                if (connected) {
-                    android.util.Log.d("MpdClient", "Idle died, closing command WS too")
-                    connected = false
-                    connectGeneration++
-                    ws?.close(1000, "idle failed")
-                    ws = null
+                synchronized(connLock) {
+                    if (connected) {
+                        android.util.Log.d("MpdClient", "Idle died, closing command WS too")
+                        connected = false
+                        connectGeneration++
+                        ws?.close(1000, "idle failed")
+                        ws = null
+                    }
                 }
             }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
@@ -296,44 +330,58 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
 
     private fun ensureConnected(): WebSocket {
         val w = ws
-        if (w == null || !connected) throw MpdException("not connected")
+        if (w == null || !connected) throw MpdSendException("not connected")
         return w
     }
 
-    suspend fun cmd(command: String): List<String> = withCommandRetry {
-        mutex.withLock {
-            // NonCancellable wraps the entire send+read to prevent cancellation
-            // from leaving stale response data in the channel
-            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
-                val w = ensureConnected()
-                if (!w.send("$command\n")) throw MpdException("send failed")
-                withTimeout(10000) { readUntilOK() }
-            }
-        }
-    }
-
-    suspend fun cmdBatch(commands: List<String>): List<List<String>> = withCommandRetry {
-        mutex.withLock {
-            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
-                val w = ensureConnected()
-                val batch = buildString {
-                    appendLine("command_list_ok_begin")
-                    commands.forEach { appendLine(it) }
-                    appendLine("command_list_end")
+    suspend fun cmd(command: String, idempotent: Boolean = false): List<String> =
+        withCommandRetry(idempotent) {
+            mutex.withLock {
+                // NonCancellable wraps the entire send+read to prevent cancellation
+                // from leaving stale response data in the channel
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                    val w = ensureConnected()
+                    if (!w.send("$command\n")) throw MpdSendException("send failed")
+                    withTimeout(10000) { readUntilOK() }
                 }
-                if (!w.send(batch)) throw MpdException("send failed")
-                withTimeout(10000) { readBatchResponse() }
             }
         }
-    }
 
-    private suspend fun <T> withCommandRetry(block: suspend () -> T): T {
+    suspend fun cmdBatch(commands: List<String>, idempotent: Boolean = false): List<List<String>> =
+        withCommandRetry(idempotent) {
+            mutex.withLock {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                    val w = ensureConnected()
+                    val batch = buildString {
+                        appendLine("command_list_ok_begin")
+                        commands.forEach { appendLine(it) }
+                        appendLine("command_list_end")
+                    }
+                    if (!w.send(batch)) throw MpdSendException("send failed")
+                    withTimeout(10000) { readBatchResponse() }
+                }
+            }
+        }
+
+    // Retries a command after reconnecting. Non-idempotent commands (add, move,
+    // rate, ...) are only retried when the send itself failed — after a response
+    // timeout the command may already have been applied, and blindly re-running
+    // it would duplicate queue entries or double-move tracks.
+    private suspend fun <T> withCommandRetry(idempotent: Boolean, block: suspend () -> T): T {
         try {
             return block()
         } catch (e: Exception) {
             if (e is CancellationException && e !is TimeoutCancellationException) throw e
             if (e is MpdAckException) throw e
+            val delivered = e !is MpdSendException
             markCommandConnectionDead(e.message ?: e.javaClass.simpleName)
+            if (delivered && !idempotent) {
+                // Reconnect in the background so the client recovers, but
+                // surface the failure instead of re-running the command.
+                doConnect()
+                if (connected) onReconnected?.invoke()
+                throw MpdException("command may not have completed: ${e.message}")
+            }
         }
 
         doConnect()
@@ -425,7 +473,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     // ---- Library browsing ----
 
     suspend fun getArtists(): List<String> {
-        val lines = cmd("list AlbumArtist")
+        val lines = cmd("list AlbumArtist", idempotent = true)
         return lines.mapNotNull { line ->
             if (line.startsWith("AlbumArtist: ")) line.substringAfter("AlbumArtist: ")
             else null
@@ -433,7 +481,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     }
 
     suspend fun getAlbums(artist: String): List<Album> {
-        val lines = cmd("list Album ${mpdFilterEq("AlbumArtist", artist)} group Date group AlbumArtist")
+        val lines = cmd("list Album ${mpdFilterEq("AlbumArtist", artist)} group Date group AlbumArtist", idempotent = true)
         val groups = parseGroups(lines, "AlbumArtist")
         return groups.mapNotNull { g ->
             val name = g["Album"] ?: return@mapNotNull null
@@ -448,7 +496,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     }
 
     suspend fun getAllAlbums(): List<Album> {
-        val lines = cmd("list Album group Date group AlbumArtist")
+        val lines = cmd("list Album group Date group AlbumArtist", idempotent = true)
         val groups = parseGroups(lines, "AlbumArtist")
         return groups.mapNotNull { g ->
             val name = g["Album"] ?: return@mapNotNull null
@@ -463,7 +511,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     }
 
     suspend fun getAllAlbumsLatest(): List<Album> {
-        val lines = cmd("list Album group Date group AlbumArtist sort latest")
+        val lines = cmd("list Album group Date group AlbumArtist sort latest", idempotent = true)
         val groups = parseGroups(lines, "AlbumArtist")
         return groups.mapNotNull { g ->
             val name = g["Album"] ?: return@mapNotNull null
@@ -478,7 +526,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     }
 
     suspend fun getTracks(artist: String, album: String): List<Track> {
-        val lines = cmd("find ${mpdFilterEq("AlbumArtist", artist)} ${mpdFilterEq("Album", album)}")
+        val lines = cmd("find ${mpdFilterEq("AlbumArtist", artist)} ${mpdFilterEq("Album", album)}", idempotent = true)
         val groups = parseGroups(lines, "file")
         return groups.map { g ->
             Track(
@@ -517,8 +565,30 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
         return null
     }
 
+    // parseTagQuery recognizes tag-qualified tokens like "artist:foo",
+    // "album:bar", "title:baz", "date:1994" — same syntax as the TUI.
+    private fun parseTagQuery(w: String): Pair<String, String>? {
+        val idx = w.indexOf(':')
+        if (idx <= 0 || idx == w.length - 1) return null
+        val value = w.substring(idx + 1)
+        return when (w.substring(0, idx).lowercase()) {
+            "artist" -> "Artist" to value
+            "albumartist" -> "AlbumArtist" to value
+            "album" -> "Album" to value
+            "title" -> "Title" to value
+            "date", "year" -> "Date" to value
+            else -> null
+        }
+    }
+
     private fun searchTextTerms(query: String): List<String> {
-        return query.trim().split("\\s+".toRegex()).filter { parseRatingFilter(it) == null }.map { it.lowercase() }
+        return query.trim().split("\\s+".toRegex())
+            .filter { parseRatingFilter(it) == null && parseTagQuery(it) == null }
+            .map { it.lowercase() }
+    }
+
+    private fun mpdEscapeFilterValue(v: String): String {
+        return v.replace("\\", "\\\\").replace("'", "\\'")
     }
 
     private fun buildSearchCmd(query: String): String {
@@ -527,8 +597,11 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
         val filters = mutableListOf<String>()
         for (w in words) {
             val rf = parseRatingFilter(w)
+            val tq = parseTagQuery(w)
             if (rf != null) {
                 filters.add("(${rf.first} ${rf.second} '${rf.third}')")
+            } else if (tq != null) {
+                filters.add("(${tq.first} contains '${mpdEscapeFilterValue(tq.second)}')")
             } else {
                 textParts.add(w)
             }
@@ -546,7 +619,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     }
 
     suspend fun search(query: String): SearchResult {
-        val lines = cmd(buildSearchCmd(query))
+        val lines = cmd(buildSearchCmd(query), idempotent = true)
         val groups = parseGroups(lines, "file")
         val terms = searchTextTerms(query)
         val tracks = mutableListOf<Track>()
@@ -592,7 +665,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     suspend fun getStatus(): PlaybackStatus? {
         if (!isConfigured) return null
         return try {
-            val results = cmdBatch(listOf("status", "currentsong", "replay_gain_status"))
+            val results = cmdBatch(listOf("status", "currentsong", "replay_gain_status"), idempotent = true)
             val statusMap = parseKV(results.getOrElse(0) { emptyList() })
             val songMap = parseKV(results.getOrElse(1) { emptyList() })
             val rgMap = parseKV(results.getOrElse(2) { emptyList() })
@@ -626,7 +699,8 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
                 random = statusMap["random"] == "1",
                 single = statusMap["single"] == "1",
                 consume = statusMap["consume"] == "1",
-                replayGainMode = rgMap["replay_gain_mode"] ?: "off"
+                replayGainMode = rgMap["replay_gain_mode"] ?: "off",
+                volume = statusMap["volume"]?.toIntOrNull() ?: -1
             )
         } catch (e: Exception) { null }
     }
@@ -642,13 +716,14 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     suspend fun next() { cmd("next") }
     suspend fun prev() { cmd("previous") }
     suspend fun seek(position: Double) { cmd("seekcur $position") }
+    suspend fun setVolume(volume: Int) { cmd("setvol ${volume.coerceIn(0, 100)}") }
 
     // ---- Queue ----
 
     suspend fun getQueue(): List<QueueItem> {
         if (!isConfigured) return emptyList()
         return try {
-            val lines = cmd("playlistinfo")
+            val lines = cmd("playlistinfo", idempotent = true)
             val groups = parseGroups(lines, "file")
             groups.map { g ->
                 QueueItem(
@@ -662,7 +737,8 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
                     current = false,
                     uri = g["file"] ?: "",
                     rating = g["X-Rating"]?.toIntOrNull() ?: 0,
-                    priority = g["Prio"]?.toIntOrNull() ?: 0
+                    priority = g["Prio"]?.toIntOrNull() ?: 0,
+                    queueId = g["Id"]?.toIntOrNull() ?: -1
                 )
             }
         } catch (e: Exception) { emptyList() }
@@ -672,8 +748,13 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     suspend fun queueRemove(position: Int) { cmd("delete $position") }
     suspend fun queueMove(from: Int, to: Int) { cmd("move $from $to") }
     suspend fun queueClear() { cmd("clear") }
+    suspend fun queueShuffle() { cmd("shuffle") }
     suspend fun setPriority(position: Int, priority: Int) { cmd("prio $priority $position") }
     suspend fun addWithPriority(uri: String, priority: Int) { cmd("addidprio ${mpdEscape(uri)} $priority") }
+
+    // ---- Library maintenance ----
+
+    suspend fun updateLibrary() { cmd("update", idempotent = true) }
 
     // ---- Ratings ----
 
@@ -688,7 +769,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     data class AlbumRatingResult(val rating: Int, val computed: Double)
 
     suspend fun getAlbumRating(albumArtist: String, album: String, date: String): AlbumRatingResult {
-        val lines = cmd("getalbumrating ${mpdEscape(albumArtist)} ${mpdEscape(album)} ${mpdEscape(date)}")
+        val lines = cmd("getalbumrating ${mpdEscape(albumArtist)} ${mpdEscape(album)} ${mpdEscape(date)}", idempotent = true)
         var rating = 0
         var computed = 0.0
         for (line in lines) {
@@ -704,7 +785,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
 
     suspend fun getLyrics(uri: String): LyricsResult? {
         return try {
-            val lines = cmd("readlyrics ${mpdEscape(uri)}")
+            val lines = cmd("readlyrics ${mpdEscape(uri)}", idempotent = true)
             var text = ""
             var type = "plain"
             for (line in lines) {
@@ -769,6 +850,24 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
         }
     }
 
+    /** Replaces the queue with the given tracks and starts playing at [startIndex]. */
+    suspend fun replaceQueueWithTracks(uris: List<String>, startIndex: Int) {
+        val cmds = mutableListOf("clear")
+        uris.forEach { cmds.add("add ${mpdEscape(it)}") }
+        cmds.add("play ${startIndex.coerceIn(0, (uris.size - 1).coerceAtLeast(0))}")
+        cmdBatch(cmds)
+    }
+
+    /** Replaces the queue with an album in shuffled order and starts playing. */
+    suspend fun playAlbumShuffled(artist: String, album: String) {
+        cmdBatch(listOf(
+            "clear",
+            "findadd ${mpdFilterEq("AlbumArtist", artist)} ${mpdFilterEq("Album", album)}",
+            "shuffle",
+            "play"
+        ))
+    }
+
     suspend fun addAllArtistAlbums(artist: String, mode: String) {
         when (mode) {
             "replace" -> {
@@ -798,7 +897,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     // ---- Devices / Outputs ----
 
     suspend fun getOutputs(): List<DeviceInfo> {
-        val lines = cmd("outputs")
+        val lines = cmd("outputs", idempotent = true)
         val groups = parseGroups(lines, "outputid")
         return groups.map { g ->
             val plugin = g["plugin"] ?: g["outputtype"] ?: ""
@@ -820,7 +919,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     // ---- Playlists ----
 
     suspend fun getPlaylists(): List<PlaylistInfo> {
-        val lines = cmd("listplaylists")
+        val lines = cmd("listplaylists", idempotent = true)
         val groups = parseGroups(lines, "playlist")
         return groups.map { g ->
             PlaylistInfo(
@@ -834,7 +933,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     }
 
     suspend fun getPlaylistTracks(name: String): List<Track> {
-        val lines = cmd("listplaylistinfo ${mpdEscape(name)}")
+        val lines = cmd("listplaylistinfo ${mpdEscape(name)}", idempotent = true)
         val groups = parseGroups(lines, "file")
         return groups.mapIndexed { idx, g ->
             Track(
@@ -867,6 +966,14 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
         cmd("playlistadd ${mpdEscape(playlistName)} ${mpdEscape(uri)}")
     }
 
+    suspend fun saveQueueAsPlaylist(name: String) {
+        cmd("save ${mpdEscape(name)}")
+    }
+
+    suspend fun deletePlaylist(name: String) {
+        cmd("rm ${mpdEscape(name)}")
+    }
+
     // ---- Cover art ----
 
     fun coverUrl(albumId: String, size: Int = 300): String? {
@@ -885,3 +992,7 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
 
 open class MpdException(message: String) : Exception(message)
 class MpdAckException(message: String) : MpdException(message)
+
+// Thrown when a command was definitely NOT delivered (no connection, or the
+// WebSocket send failed) — always safe to retry after reconnecting.
+class MpdSendException(message: String) : MpdException(message)

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Cloud backup / device-transfer rules (API 31+).
+     The offline music cache is excluded: it blows the backup quota and a
+     restore without the audio files would leave the "downloaded albums"
+     prefs claiming albums that aren't on disk. The offline prefs are
+     excluded for the same reason. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="offline/" />
+        <exclude domain="sharedpref" path="melody_offline.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="offline/" />
+        <exclude domain="sharedpref" path="melody_offline.xml" />
+    </device-transfer>
+</data-extraction-rules>

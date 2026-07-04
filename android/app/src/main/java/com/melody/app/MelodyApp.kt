@@ -56,13 +56,25 @@ class MelodyApp : Application() {
                 onMpdClientChanged?.invoke(mpd)
                 if (addr.host.isNotBlank()) mpd.connect()
                 PlaybackService.instance?.reconnect()
+            } else if (lastOnHome != null && onHome != lastOnHome) {
+                // Same server, but home/away changed — re-register so the agent
+                // streaming format (direct on home WiFi vs transcoded elsewhere)
+                // follows the network.
+                android.util.Log.d("MelodyApp", "Home status $lastOnHome -> $onHome; re-registering agent")
+                PlaybackService.instance?.reconnect()
             }
         } else {
             mpd = MpdClient(addr.host, addr.port, addr.ssl)
             if (addr.host.isNotBlank()) mpd.connect()
             android.util.Log.d("MelodyApp", "Initial MPD: ${addr.host}:${addr.port}")
         }
+        lastOnHome = onHome
+        // Network changed — parked downloads may be allowed to run now
+        // (e.g. back on unmetered Wi-Fi).
+        offlineManager.retryPending()
     }
+
+    private var lastOnHome: Boolean? = null
 
     private fun schemeName(ssl: Boolean) = if (ssl) "https" else "http"
 
@@ -94,6 +106,11 @@ class MelodyApp : Application() {
 
     fun isOnHomeWifi(): Boolean = isOnHomeWifi(getCurrentSSID())
 
+    // Result of probing the home server when the SSID can't be read (no
+    // location permission). null = probe not run yet for this network.
+    @Volatile private var homeProbeResult: Boolean? = null
+    @Volatile private var homeProbeRunning = false
+
     private fun isOnHomeWifi(currentSSID: String?): Boolean {
         val prefs = getSharedPreferences("melody", Context.MODE_PRIVATE)
         val homeSSID = prefs.getString("home_wifi_ssid", "") ?: ""
@@ -104,12 +121,38 @@ class MelodyApp : Application() {
         }
         if (currentSSID == null) {
             if (onWifi) {
-                android.util.Log.d("MelodyApp", "SSID unavailable on WiFi; keeping local server preference")
-                return true
+                // SSID unreadable (usually missing location permission).
+                // Blindly assuming "home" routes traffic to the LAN address on
+                // any foreign Wi-Fi — instead probe whether the home server is
+                // actually reachable and re-apply once we know.
+                homeProbeResult?.let { return it }
+                startHomeProbe()
+                return true // optimistic until the probe answers
             }
             return false
         }
         return currentSSID == homeSSID
+    }
+
+    private fun startHomeProbe() {
+        if (homeProbeRunning) return
+        homeProbeRunning = true
+        Thread {
+            val prefs = getSharedPreferences("melody", Context.MODE_PRIVATE)
+            val addr = parseServerAddress(prefs.getString("server", "") ?: "")
+            val reachable = if (addr.host.isBlank()) false else try {
+                java.net.Socket().use {
+                    it.connect(java.net.InetSocketAddress(addr.host, addr.port), 1500)
+                    true
+                }
+            } catch (_: Exception) {
+                false
+            }
+            android.util.Log.d("MelodyApp", "Home server probe: reachable=$reachable")
+            homeProbeResult = reachable
+            homeProbeRunning = false
+            if (!reachable) handler.post { applyServerForCurrentNetwork() }
+        }.start()
     }
 
     private fun isOnWifi(): Boolean {
@@ -139,6 +182,8 @@ class MelodyApp : Application() {
 
     /** Debounced network apply — waits for transitions to settle before switching servers. */
     private fun scheduleNetworkApply() {
+        // A new network invalidates the previous reachability probe.
+        homeProbeResult = null
         pendingNetworkApply?.let { handler.removeCallbacks(it) }
         val r = Runnable { applyServerForCurrentNetwork() }
         pendingNetworkApply = r

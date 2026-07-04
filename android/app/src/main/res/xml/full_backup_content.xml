@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Legacy full-backup rules (pre-API-31 devices); mirrors backup_rules.xml. -->
+<full-backup-content>
+    <exclude domain="file" path="offline/" />
+    <exclude domain="sharedpref" path="melody_offline.xml" />
+</full-backup-content>

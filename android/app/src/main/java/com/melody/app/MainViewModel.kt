@@ -5,17 +5,38 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 enum class LibView { Artists, Albums, Tracks }
 
 class MainViewModel : ViewModel() {
     private val mpd get() = MelodyApp.instance.mpd
     private val offline = MelodyApp.instance.offlineManager
+
+    // Transient user-visible message (shown as a snackbar); null when nothing to show
+    var toast by mutableStateOf<String?>(null); private set
+    fun clearToast() { toast = null }
+
+    // Runs a user action, surfacing failures instead of swallowing them.
+    // CancellationException must propagate or cancelled jobs keep running.
+    private fun runAction(label: String, block: suspend () -> Unit): Job =
+        viewModelScope.launch {
+            try {
+                block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.e("MainViewModel", "$label failed", e)
+                toast = "$label failed"
+            }
+        }
 
     // Playback status
     var status by mutableStateOf<PlaybackStatus?>(null); private set
@@ -85,6 +106,11 @@ class MainViewModel : ViewModel() {
     private var pollJob: Job? = null
     private var playbackPollJob: Job? = null
     private var lastPlaylistVersion = 0
+    // Serializes concurrent refresh() calls (poll, idle, reconnect, foreground)
+    // so an older status/queue snapshot can't overwrite a newer one.
+    // MUST be declared before the init block below: startPolling() can enter
+    // refresh() synchronously (Main.immediate) during construction.
+    private val refreshMutex = Mutex()
     private val mpdClientChangedHandler: (MpdClient) -> Unit = {
         attachMpdCallbacks()
         viewModelScope.launch {
@@ -107,6 +133,11 @@ class MainViewModel : ViewModel() {
         if (MelodyApp.instance.onMpdClientChanged === mpdClientChangedHandler) {
             MelodyApp.instance.onMpdClientChanged = null
         }
+        // Detach download observers — the pipeline keeps running app-scoped,
+        // but must not hold a reference to this dead ViewModel.
+        offline.onProgress = null
+        offline.onDownloadedAlbumsChanged = null
+        offline.onDownloadError = null
         super.onCleared()
     }
 
@@ -121,18 +152,30 @@ class MainViewModel : ViewModel() {
     }
 
     private var idleRefreshJob: Job? = null
+    // Idle subsystems that arrived while a refresh was already running —
+    // coalesced into a follow-up refresh instead of being dropped.
+    // Main-thread confined (viewModelScope).
+    private val pendingIdleChanged = mutableSetOf<String>()
+
+    private fun handleIdleChanged(changed: Set<String>) {
+        pendingIdleChanged.addAll(changed)
+        if ("output" in changed) loadDevices()
+        if (idleRefreshJob?.isActive == true) return
+        idleRefreshJob = viewModelScope.launch {
+            while (pendingIdleChanged.isNotEmpty()) {
+                val batch = pendingIdleChanged.toSet()
+                pendingIdleChanged.clear()
+                refresh(forceQueue = "rating" in batch)
+            }
+        }
+    }
 
     private fun attachMpdCallbacks() {
         val client = mpd
         if (callbacksClient === client) return
         callbacksClient = client
         client.onIdleNotification = { changed ->
-            if (idleRefreshJob?.isActive != true) {
-                idleRefreshJob = viewModelScope.launch { refresh(forceQueue = "rating" in changed) }
-            }
-            if ("output" in changed) {
-                viewModelScope.launch { loadDevices() }
-            }
+            viewModelScope.launch { handleIdleChanged(changed) }
         }
         client.onReconnected = {
             isConnected = true
@@ -158,16 +201,20 @@ class MainViewModel : ViewModel() {
         }
     }
 
-    private suspend fun refresh(forceQueue: Boolean = false) {
+    private suspend fun refresh(forceQueue: Boolean = false) = refreshMutex.withLock {
         try {
             val newStatus = mpd.getStatus() ?: run {
                 isConnected = mpd.connected
-                return
+                return@withLock
             }
             isConnected = true
             status = newStatus
             if (newStatus.title.isNotBlank() || newStatus.artist.isNotBlank()) {
                 lastPlayingStatus = newStatus
+            } else if (newStatus.playlistLength == 0 || newStatus.state == "stopped") {
+                // Queue emptied / playback fully stopped — drop the stale
+                // snapshot so the mini player doesn't show a dead track.
+                lastPlayingStatus = null
             }
             val curPos = newStatus.currentSongPos
             val plVersion = newStatus.playlistVersion
@@ -188,16 +235,25 @@ class MainViewModel : ViewModel() {
             } else {
                 queue = queue.map { it.copy(current = it.position == curPos) }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Exception) {}
         currentTrackOffline = PlaybackService.instance?.isCurrentTrackOffline ?: false
         codecInfo = PlaybackService.instance?.codecInfo ?: ""
-        // Fetch lyrics when track changes
+        // Fetch lyrics when track changes; clear them when nothing is current
         val curUri = queue.firstOrNull { it.current }?.uri ?: ""
-        if (curUri.isNotBlank() && curUri != lyricsForUri) {
+        if (curUri.isBlank()) {
+            if (lyricsForUri.isNotBlank()) {
+                lyricsForUri = ""
+                lyrics = null
+            }
+        } else if (curUri != lyricsForUri) {
             lyricsForUri = curUri
             lyrics = null
             viewModelScope.launch {
-                lyrics = mpd.getLyrics(curUri)
+                val result = try { mpd.getLyrics(curUri) } catch (_: Exception) { null }
+                // Guard against slow responses landing after another track change
+                if (lyricsForUri == curUri) lyrics = result
             }
         }
         // Cancel existing poll so it restarts immediately with fresh status
@@ -216,14 +272,21 @@ class MainViewModel : ViewModel() {
                     while (true) {
                         delay(1000)
                         try {
+                            // A transient failure returns null — keep the last
+                            // status and keep polling instead of blanking the
+                            // now-playing UI and killing the loop mid-song.
                             val s = mpd.getStatus()
-                            status = s
-                            if (s != null && (s.title.isNotBlank() || s.artist.isNotBlank())) {
-                                lastPlayingStatus = s
+                            if (s != null) {
+                                status = s
+                                if (s.title.isNotBlank() || s.artist.isNotBlank()) {
+                                    lastPlayingStatus = s
+                                }
+                                if (s.state != "playing") break
                             }
                             codecInfo = PlaybackService.instance?.codecInfo ?: ""
+                        } catch (e: CancellationException) {
+                            throw e
                         } catch (_: Exception) {}
-                        if (status?.state != "playing") break
                     }
                 }
             }
@@ -243,6 +306,8 @@ class MainViewModel : ViewModel() {
 
     fun toggleLibSortLatest() {
         libSortLatest = !libSortLatest
+        savedAlbumScrollIndex = 0
+        savedAlbumScrollOffset = 0
         if (libSortLatest) {
             loadAllAlbumsLatest()
         } else {
@@ -268,6 +333,12 @@ class MainViewModel : ViewModel() {
     }
 
     fun loadAlbums(artist: String) {
+        // A different artist's album list must not restore the previous
+        // artist's scroll position.
+        if (artist != curArtist) {
+            savedAlbumScrollIndex = 0
+            savedAlbumScrollOffset = 0
+        }
         if (showCachedOnly) { loadCachedAlbums(artist); return }
         viewModelScope.launch {
             curArtist = artist
@@ -359,7 +430,7 @@ class MainViewModel : ViewModel() {
             }
         }
         if (mode == "replace" && shouldPromptPhone(doIt)) return
-        viewModelScope.launch { try { doIt() } catch (_: Exception) {} }
+        runAction("Add to queue") { doIt() }
     }
 
     fun browseIntoAction() {
@@ -387,41 +458,33 @@ class MainViewModel : ViewModel() {
     fun rateCurrentTrack(rating: Int) {
         val songId = status?.songId ?: return
         if (songId.isBlank()) return
-        viewModelScope.launch {
-            try {
-                mpd.rateTrack(songId, rating)
-                // Update queue item locally for immediate UI feedback
-                queue = queue.map { if (it.songId == songId) it.copy(rating = rating) else it }
-                refresh()
-            } catch (_: Exception) {}
+        runAction("Rating") {
+            mpd.rateTrack(songId, rating)
+            // Update queue item locally for immediate UI feedback
+            queue = queue.map { if (it.songId == songId) it.copy(rating = rating) else it }
+            refresh()
         }
     }
 
     fun rateAlbum(rating: Int) {
         val album = curAlbum ?: return
-        viewModelScope.launch {
-            try {
-                mpd.rateAlbum(album.albumArtist, album.album, album.date, rating)
-                val r = mpd.getAlbumRating(album.albumArtist, album.album, album.date)
-                albumRating = r.rating
-                albumComputedRating = r.computed
-            } catch (_: Exception) {}
+        runAction("Album rating") {
+            mpd.rateAlbum(album.albumArtist, album.album, album.date, rating)
+            val r = mpd.getAlbumRating(album.albumArtist, album.album, album.date)
+            albumRating = r.rating
+            albumComputedRating = r.computed
         }
     }
 
     fun rateAlbumDirect(album: Album, rating: Int) {
-        viewModelScope.launch {
-            try { mpd.rateAlbum(album.albumArtist, album.album, album.date, rating) } catch (_: Exception) {}
-        }
+        runAction("Album rating") { mpd.rateAlbum(album.albumArtist, album.album, album.date, rating) }
     }
 
     fun rateQueueTrack(songId: String, rating: Int) {
-        viewModelScope.launch {
-            try {
-                mpd.rateTrack(songId, rating)
-                // Update queue item locally for immediate UI feedback
-                queue = queue.map { if (it.songId == songId) it.copy(rating = rating) else it }
-            } catch (_: Exception) {}
+        runAction("Rating") {
+            mpd.rateTrack(songId, rating)
+            // Update queue item locally for immediate UI feedback
+            queue = queue.map { if (it.songId == songId) it.copy(rating = rating) else it }
         }
     }
 
@@ -529,40 +592,58 @@ class MainViewModel : ViewModel() {
             if (mode == "replace") mpd.resume()
         }
         if (mode == "replace" && shouldPromptPhone(doIt)) return
-        viewModelScope.launch { try { doIt() } catch (_: Exception) {} }
+        runAction("Add to queue") { doIt() }
     }
 
     // --- Playback ---
 
     fun togglePlay() {
-        viewModelScope.launch {
-            try {
-                if (status?.state == "playing") mpd.pause() else mpd.cmd("play")
-                refresh()
-            } catch (_: Exception) {}
+        runAction("Play/pause") {
+            if (status?.state == "playing") mpd.pause() else mpd.cmd("play")
+            refresh()
         }
     }
 
-    fun playNext() { viewModelScope.launch { try { mpd.next(); refresh() } catch (e: Exception) { android.util.Log.e("VM", "next: ${e.message}") } } }
-    fun playPrev() { viewModelScope.launch { try { mpd.prev(); refresh() } catch (e: Exception) { android.util.Log.e("VM", "prev: ${e.message}") } } }
-    fun stopPlayback() { viewModelScope.launch { try { mpd.stop() } catch (_: Exception) {} } }
-    fun seek(pos: Double) { viewModelScope.launch { try { mpd.seek(pos) } catch (_: Exception) {} } }
+    fun playNext() { runAction("Next") { mpd.next(); refresh() } }
+    fun playPrev() { runAction("Previous") { mpd.prev(); refresh() } }
+    fun stopPlayback() { runAction("Stop") { mpd.stop() } }
+    fun seek(pos: Double) { runAction("Seek") { mpd.seek(pos) } }
+    fun setVolume(volume: Int) { runAction("Volume") { mpd.setVolume(volume) } }
 
-    fun toggleRepeat() { viewModelScope.launch { try { mpd.cmd("repeat ${if (status?.repeat == true) "0" else "1"}") } catch (_: Exception) {} } }
-    fun toggleRandom() { viewModelScope.launch { try { mpd.cmd("random ${if (status?.random == true) "0" else "1"}") } catch (_: Exception) {} } }
-    fun toggleSingle() { viewModelScope.launch { try { mpd.cmd("single ${if (status?.single == true) "0" else "1"}") } catch (_: Exception) {} } }
-    fun toggleConsume() { viewModelScope.launch { try { mpd.cmd("consume ${if (status?.consume == true) "0" else "1"}") } catch (_: Exception) {} } }
+    fun toggleRepeat() { runAction("Repeat") { mpd.cmd("repeat ${if (status?.repeat == true) "0" else "1"}") } }
+    fun toggleRandom() { runAction("Random") { mpd.cmd("random ${if (status?.random == true) "0" else "1"}") } }
+    fun toggleSingle() { runAction("Single") { mpd.cmd("single ${if (status?.single == true) "0" else "1"}") } }
+    fun toggleConsume() { runAction("Consume") { mpd.cmd("consume ${if (status?.consume == true) "0" else "1"}") } }
+    fun setReplayGain(mode: String) { runAction("ReplayGain") { mpd.cmd("replay_gain_mode $mode"); refresh() } }
     fun cycleReplayGain() {
-        viewModelScope.launch {
-            try {
-                val next = when (status?.replayGainMode) {
-                    "track" -> "album"
-                    "album" -> "off"
-                    else -> "track"
-                }
-                mpd.cmd("replay_gain_mode $next")
-            } catch (_: Exception) {}
+        val next = when (status?.replayGainMode) {
+            "track" -> "album"
+            "album" -> "off"
+            else -> "track"
         }
+        setReplayGain(next)
+    }
+
+    // Tap-to-play: replace the queue with the visible track list and start at
+    // the tapped track — the standard music-app gesture.
+    fun playTrackInContext(tracks: List<Track>, index: Int) {
+        val uris = tracks.map { it.uri }.filter { it.isNotBlank() }
+        if (uris.isEmpty()) return
+        val doIt: suspend () -> Unit = { mpd.replaceQueueWithTracks(uris, index) }
+        if (shouldPromptPhone(doIt)) return
+        runAction("Play") { doIt() }
+    }
+
+    fun playAlbum(album: Album) {
+        val doIt: suspend () -> Unit = { mpd.addAlbum(album.albumArtist, album.album, "replace") }
+        if (shouldPromptPhone(doIt)) return
+        runAction("Play album") { doIt() }
+    }
+
+    fun playAlbumShuffled(album: Album) {
+        val doIt: suspend () -> Unit = { mpd.playAlbumShuffled(album.albumArtist, album.album) }
+        if (shouldPromptPhone(doIt)) return
+        runAction("Shuffle album") { doIt() }
     }
 
     fun randomAlbum() {
@@ -574,98 +655,73 @@ class MainViewModel : ViewModel() {
             }
         }
         if (shouldPromptPhone(doIt)) return
-        viewModelScope.launch { try { doIt() } catch (_: Exception) {} }
+        runAction("Random album") { doIt() }
     }
 
     // --- Queue ---
 
-    fun queuePlay(position: Int) { viewModelScope.launch { try { mpd.queuePlay(position) } catch (_: Exception) {} } }
-    fun queueRemove(position: Int) { viewModelScope.launch { try { mpd.queueRemove(position) } catch (_: Exception) {} } }
-    fun queueMove(from: Int, to: Int) { viewModelScope.launch { try { mpd.queueMove(from, to) } catch (_: Exception) {} } }
-    fun queueClear() { viewModelScope.launch { try { mpd.queueClear() } catch (_: Exception) {} } }
+    fun queuePlay(position: Int) { runAction("Play") { mpd.queuePlay(position) } }
+    fun queueRemove(position: Int) { runAction("Remove") { mpd.queueRemove(position) } }
+    fun queueMove(from: Int, to: Int): Job = runAction("Move") { mpd.queueMove(from, to) }
+
+    // Drag-reorder: apply the move to the local list immediately so the row
+    // follows the finger; the server round-trip confirms it later. Without
+    // this, `position` fields lag a full round-trip behind and the dragged
+    // row's highlight jumps to the wrong item.
+    fun queueMoveOptimistic(from: Int, to: Int) {
+        val list = queue.toMutableList()
+        val idx = list.indexOfFirst { it.position == from }
+        if (idx >= 0) {
+            val item = list.removeAt(idx)
+            list.add(to.coerceIn(0, list.size), item)
+            queue = list.mapIndexed { i, entry -> entry.copy(position = i) }
+        }
+        runAction("Move") { mpd.queueMove(from, to) }
+    }
+    fun queueClear() { runAction("Clear queue") { mpd.queueClear() } }
+    fun queueShuffle() { runAction("Shuffle") { mpd.queueShuffle(); refresh(forceQueue = true) } }
+    fun saveQueueAsPlaylist(name: String) {
+        runAction("Save playlist") {
+            mpd.saveQueueAsPlaylist(name)
+            toast = "Saved as \"$name\""
+        }
+    }
+    fun setQueuePriority(position: Int, priority: Int) {
+        runAction("Priority") { mpd.setPriority(position, priority); refresh(forceQueue = true) }
+    }
+    fun updateLibrary() {
+        runAction("Library update") {
+            mpd.updateLibrary()
+            toast = "Library update started"
+        }
+    }
 
     // --- Offline downloads ---
-
-    private val downloadQueue = kotlinx.coroutines.channels.Channel<Album>(kotlinx.coroutines.channels.Channel.UNLIMITED)
-    private val queuedDownloadAlbumIds = mutableSetOf<String>()
-    private val pendingDownloadRetries = linkedMapOf<String, Album>()
-    private val cancelledDownloadAlbumIds = mutableSetOf<String>()
-    private var pendingDownloadRetryJob: Job? = null
+    // The pipeline itself lives in OfflineManager (application scope) so
+    // downloads survive the UI being destroyed; the ViewModel only observes.
 
     init {
-        // Process download queue sequentially
-        viewModelScope.launch {
-            for (album in downloadQueue) {
-                queuedDownloadAlbumIds.remove(album.id)
-                if (cancelledDownloadAlbumIds.remove(album.id)) continue
-                var completed = false
-                try {
-                    val albumTracks = mpd.getTracks(album.albumArtist, album.album)
-                    if (albumTracks.isEmpty()) {
-                        rememberDownloadRetry(album)
-                        continue
-                    }
-                    val prefs = MelodyApp.instance.getSharedPreferences("melody", android.content.Context.MODE_PRIVATE)
-                    val format = prefs.getString("audio_format", "")?.ifBlank { null }
-                    val bitrate = prefs.getInt("audio_bitrate", 0)
-                    completed = offline.downloadAlbum(album.id, album.albumArtist, album.album, album.date, albumTracks, mpd, format, bitrate) { progress ->
-                        downloadProgress = progress
-                    }
-                } catch (e: Exception) {
-                    android.util.Log.e("MainViewModel", "download failed for ${album.albumArtist} - ${album.album}: ${e.message}")
-                } finally {
-                    downloadProgress = null
-                    downloadedAlbums = offline.getDownloadedAlbumIds()
-                    if (completed) {
-                        pendingDownloadRetries.remove(album.id)
-                    } else {
-                        rememberDownloadRetry(album)
-                    }
-                }
-            }
-        }
+        offline.onProgress = { progress -> downloadProgress = progress }
+        offline.onDownloadedAlbumsChanged = { ids -> downloadedAlbums = ids }
+        offline.onDownloadError = { message -> toast = message }
     }
 
     fun downloadAlbum(album: Album) {
-        cancelledDownloadAlbumIds.remove(album.id)
-        pendingDownloadRetries.remove(album.id)
-        enqueueDownload(album)
-    }
-
-    private fun enqueueDownload(album: Album) {
-        if (!queuedDownloadAlbumIds.add(album.id)) return
-        val result = downloadQueue.trySend(album)
-        if (result.isFailure) queuedDownloadAlbumIds.remove(album.id)
-    }
-
-    private fun rememberDownloadRetry(album: Album) {
-        pendingDownloadRetries[album.id] = album
-        if (mpd.connected) schedulePendingDownloadRetry()
-    }
-
-    private fun schedulePendingDownloadRetry() {
-        if (pendingDownloadRetryJob?.isActive == true) return
-        pendingDownloadRetryJob = viewModelScope.launch {
-            delay(5000)
-            retryPendingDownloads()
-        }
+        offline.enqueueAlbum(album)
     }
 
     private fun retryPendingDownloads() {
-        if (!mpd.connected || pendingDownloadRetries.isEmpty()) return
-        val retryAlbums = pendingDownloadRetries.values.toList()
-        retryAlbums.forEach { enqueueDownload(it) }
+        if (mpd.connected) offline.retryPending()
     }
 
     fun removeOfflineAlbum(albumId: String) {
-        cancelledDownloadAlbumIds.add(albumId)
-        queuedDownloadAlbumIds.remove(albumId)
-        pendingDownloadRetries.remove(albumId)
-        offline.removeAlbum(albumId)
-        downloadedAlbums = offline.getDownloadedAlbumIds()
+        offline.cancelAndRemoveAlbum(albumId)
+        downloadedAlbums = downloadedAlbums - albumId
     }
 
-    fun isAlbumDownloaded(albumId: String): Boolean = offline.isAlbumDownloaded(albumId)
+    // Uses the in-memory set (reconciled with disk at startup) — checking the
+    // filesystem per call would run disk IO on the main thread for every row.
+    fun isAlbumDownloaded(albumId: String): Boolean = albumId in downloadedAlbums
 
     fun toggleCachedOnly() {
         showCachedOnly = !showCachedOnly
@@ -676,6 +732,7 @@ class MainViewModel : ViewModel() {
         }
     }
 
+    // Reads meta files and stats audio files — must run on Dispatchers.IO.
     private fun cachedAlbumsWithFiles(): List<OfflineManager.DownloadedAlbumInfo> {
         return offline.getDownloadedAlbums()
             .filter { it.albumArtist.isNotBlank() && it.album.isNotBlank() }
@@ -683,26 +740,36 @@ class MainViewModel : ViewModel() {
     }
 
     private fun loadCachedLibrary() {
-        val cached = cachedAlbumsWithFiles()
-        artists = cached.map { it.albumArtist }.distinct().sorted()
-        libView = LibView.Artists
+        viewModelScope.launch {
+            val cached = withContext(Dispatchers.IO) { cachedAlbumsWithFiles() }
+            artists = cached.map { it.albumArtist }.distinct().sorted()
+            libView = LibView.Artists
+        }
     }
 
     fun loadCachedAlbums(artist: String) {
-        curArtist = artist
-        val cached = cachedAlbumsWithFiles().filter { it.albumArtist == artist }
-        albums = cached.map { Album(it.albumId, it.albumArtist, it.album, it.date) }
-            .sortedBy { it.date + it.album }
-        libView = LibView.Albums
+        viewModelScope.launch {
+            curArtist = artist
+            val cached = withContext(Dispatchers.IO) {
+                cachedAlbumsWithFiles().filter { it.albumArtist == artist }
+            }
+            albums = cached.map { Album(it.albumId, it.albumArtist, it.album, it.date) }
+                .sortedBy { it.date + it.album }
+            libView = LibView.Albums
+        }
     }
 
     fun loadCachedTracks(album: Album) {
-        curAlbum = album
-        val cached = cachedAlbumsWithFiles().find { it.albumId == album.id }
-        tracks = cached?.tracks?.filter { offline.isSongDownloaded(it.songId) }
-            ?.sortedWith(compareBy({ it.disc }, { it.trackNumber }))
-            ?: emptyList()
-        libView = LibView.Tracks
+        viewModelScope.launch {
+            curAlbum = album
+            tracks = withContext(Dispatchers.IO) {
+                cachedAlbumsWithFiles().find { it.albumId == album.id }
+                    ?.tracks?.filter { offline.isSongDownloaded(it.songId) }
+                    ?.sortedWith(compareBy({ it.disc }, { it.trackNumber }))
+                    ?: emptyList()
+            }
+            libView = LibView.Tracks
+        }
     }
 
     // --- Add to playlist ---
@@ -721,9 +788,7 @@ class MainViewModel : ViewModel() {
     fun addToPlaylist(playlistName: String) {
         val uri = playlistPickerUri
         if (uri.isBlank()) return
-        viewModelScope.launch {
-            try { mpd.addToPlaylist(playlistName, uri) } catch (_: Exception) {}
-        }
+        runAction("Add to playlist") { mpd.addToPlaylist(playlistName, uri) }
         showPlaylistPicker = false
         playlistPickerUri = ""
     }
@@ -735,10 +800,21 @@ class MainViewModel : ViewModel() {
 
     // --- Playlists ---
 
-    fun loadPlaylists() {
+    fun loadPlaylists(resetView: Boolean = true) {
         viewModelScope.launch {
             try { playlists = mpd.getPlaylists() } catch (_: Exception) {}
-            playlistView = false
+            // Re-tapping the Playlists tab refreshes the list without kicking
+            // the user out of an open playlist.
+            if (resetView) playlistView = false
+        }
+    }
+
+    fun deletePlaylist(playlist: PlaylistInfo) {
+        runAction("Delete playlist") {
+            mpd.deletePlaylist(playlist.name)
+            if (curPlaylist?.name == playlist.name) playlistBack()
+            playlists = mpd.getPlaylists()
+            toast = "Deleted \"${playlist.name}\""
         }
     }
 
@@ -779,12 +855,10 @@ class MainViewModel : ViewModel() {
     }
 
     fun setActiveDevice(id: String) {
-        viewModelScope.launch {
-            try {
-                mpd.enableOutput(id)
-                delay(300)
-                devices = mpd.getOutputs()
-            } catch (_: Exception) {}
+        runAction("Switch device") {
+            mpd.enableOutput(id)
+            delay(300)
+            devices = mpd.getOutputs()
         }
     }
 
@@ -832,12 +906,18 @@ class MainViewModel : ViewModel() {
         }
     }
 
+    // Dismissing the prompt (tap outside / back) cancels the action entirely —
+    // it must not silently start playback on the remote device.
     fun phonePromptDismiss() {
+        showPhonePrompt = false
+        pendingPhoneAction = null
+    }
+
+    // Explicit "keep current device" choice: run the action without switching.
+    fun phonePromptPlayOnCurrent() {
         val action = pendingPhoneAction
         showPhonePrompt = false
         pendingPhoneAction = null
-        viewModelScope.launch {
-            try { action?.invoke() } catch (_: Exception) {}
-        }
+        runAction("Play") { action?.invoke() }
     }
 }
