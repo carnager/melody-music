@@ -1,9 +1,12 @@
 # Changelog
 
-## Unreleased
+## 1.3.0 (2026-07-20)
 
 ### Features
 
+- Add synchronized multi-output playback with additive output toggles, exclusive handoff, and a designated primary output for queue advancement.
+- Add targeted library subtree updates and `melody-watcher` for forwarding filesystem changes from a remote file server to melodyd.
+- Reintroduce `melody-rofi`, a fast rofi/dmenu launcher for browsing albums or tracks and adding, inserting, or replacing the queue.
 - Add `melody-macos-agent`, a macOS-only playback target with its own generated config file.
 - Android: volume control slider in Now Playing.
 - Android: queue shuffle, save queue as playlist, delete playlists (with confirmation), and set/clear track priorities from the queue.
