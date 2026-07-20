@@ -2687,6 +2687,7 @@ fun DevicesSheet(vm: MainViewModel, onDismiss: () -> Unit) {
                                 if (dev.maxBitrate > 0) q += " ${dev.maxBitrate}k"
                                 parts.add(q)
                             }
+                            if (dev.primary) parts.add("Primary")
                             Text(parts.joinToString(" \u2022 "))
                         },
                         leadingContent = {
@@ -2700,16 +2701,25 @@ fun DevicesSheet(vm: MainViewModel, onDismiss: () -> Unit) {
                             )
                         },
                         trailingContent = {
-                            if (dev.active) {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.VolumeUp,
-                                    "Active",
-                                    tint = MaterialTheme.colorScheme.primary
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (dev.active) {
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.VolumeUp,
+                                        "Playing on this output",
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                }
+                                // Toggle this output on/off; other outputs keep playing
+                                Switch(
+                                    checked = dev.active,
+                                    onCheckedChange = { vm.toggleDevice(dev.id) }
                                 )
                             }
                         },
                         modifier = Modifier.clickable {
-                            vm.setActiveDevice(dev.id)
+                            // Tap the row = play only here (exclusive switch)
+                            vm.switchDevice(dev.id)
                             onDismiss()
                         }
                     )

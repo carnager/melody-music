@@ -503,7 +503,6 @@ func (c *mpdConn) handleAgentRegister(args []string) {
 
 	c.app.devicesMu.Lock()
 	// Close old agent with same name if it exists
-	wasActive := c.app.activeDevice == devID
 	var resume *agentResume
 	if oldAt, ok := c.app.agentTargets[devID]; ok {
 		resume = oldAt.playbackSnapshot()
@@ -515,12 +514,18 @@ func (c *mpdConn) handleAgentRegister(args []string) {
 	}
 	c.app.devices[devID] = dev
 	c.app.agentTargets[devID] = at
-	// Auto-activate the local embedded agent if no device is active
-	if isLocal && c.app.activeDevice == "" {
-		c.app.activeDevice = devID
-		wasActive = true
+	// Auto-enable the local embedded agent if nothing is enabled yet
+	if isLocal && len(c.app.enabledOutputs) == 0 {
+		c.app.enabledOutputs[devID] = true
+	}
+	isEnabled := c.app.enabledOutputs[devID]
+	if isEnabled && c.app.primaryOutput == "" {
+		c.app.primaryOutput = devID
 	}
 	c.app.devicesMu.Unlock()
+	if isEnabled {
+		c.app.persistOutputs()
+	}
 
 	c.app.logger.Printf("agent registered: %s (id=%s, addr=%s)", name, devID, dev.Address)
 	c.writeLine("OK")
@@ -529,9 +534,10 @@ func (c *mpdConn) handleAgentRegister(args []string) {
 	// Start reader goroutine — processes all incoming messages from agent
 	go at.readLoop(c.reader)
 
-	// If this agent was the active device before reconnecting, reload the
-	// play queue into it so playback continues seamlessly.
-	if wasActive {
+	// If this agent is in the enabled set (it reconnected, or its enable
+	// survived a daemon restart), reload the play queue into it so playback
+	// continues seamlessly.
+	if isEnabled {
 		c.app.reloadQueueIntoAgent(at, dev, resume)
 	}
 
@@ -554,28 +560,26 @@ func (c *mpdConn) handleAgentRegister(args []string) {
 	// Clean up — only remove if we're still the registered agent (a newer
 	// connection may have already replaced us)
 	c.app.devicesMu.Lock()
+	removed := false
+	wasEnabled := false
 	if c.app.agentTargets[devID] == at {
+		removed = true
 		delete(c.app.devices, devID)
 		delete(c.app.agentTargets, devID)
-		if c.app.activeDevice == devID {
-			// Fall back to another connected device, preferring "local"
-			c.app.activeDevice = ""
-			if _, ok := c.app.agentTargets["local"]; ok {
-				c.app.activeDevice = "local"
-			} else {
-				for id, a := range c.app.agentTargets {
-					if a.isRunning() {
-						c.app.activeDevice = id
-						break
-					}
-				}
-			}
+		wasEnabled = c.app.enabledOutputs[devID]
+		delete(c.app.enabledOutputs, devID)
+		if c.app.primaryOutput == devID {
+			// Other enabled outputs keep playing; hand the clock to one of them.
+			c.app.promotePrimaryLocked()
 		}
 		c.app.logger.Printf("agent disconnected: %s", name)
 	} else {
 		c.app.logger.Printf("agent replaced (stale cleanup skipped): %s", name)
 	}
 	c.app.devicesMu.Unlock()
+	if removed && wasEnabled {
+		c.app.persistOutputs()
+	}
 	c.app.mpdHub.notify(SubOutput, SubPlayer)
 }
 
@@ -633,6 +637,13 @@ type agentResume struct {
 	state   string // "play" or "pause"
 	pos     int
 	elapsed float64
+}
+
+// isStopped reports whether the agent's last known state is "stop" (nothing loaded).
+func (at *agentTarget) isStopped() bool {
+	at.stateMu.RLock()
+	defer at.stateMu.RUnlock()
+	return at.agState == "stop"
 }
 
 // playbackSnapshot returns the agent's last reported playback position,
@@ -732,19 +743,29 @@ func (at *agentTarget) handleAgentState(line string) {
 	at.agStateTime = time.Now()
 	at.stateMu.Unlock()
 
-	if changed {
+	// Only the primary output drives player notifications — non-primary
+	// heartbeats would wake idle clients constantly for state that status
+	// doesn't report.
+	if changed && at.app.isPrimary(at.devID) {
 		at.app.mpdHub.notify(SubPlayer)
 	}
 }
 
 // handleAgentAdvance is called when the agent reports a natural track end.
 // It triggers the server's track advance logic (queue state, consume, preload next).
+// Only the primary output advances the queue — with several outputs enabled,
+// each mpv reaches the track end and reports independently, and honoring all
+// of them would advance the queue multiple times per track.
 func (at *agentTarget) handleAgentAdvance(line string) {
 	parts := strings.Fields(line)
 	if len(parts) < 2 {
 		return
 	}
 	oldPos, _ := strconv.Atoi(parts[1])
+	if !at.app.isPrimary(at.devID) {
+		at.app.logger.Printf("agent advance (ignored, non-primary %s): track ended at pos %d", at.devID, oldPos)
+		return
+	}
 	at.app.logger.Printf("agent advance: track ended at pos %d", oldPos)
 	at.app.advanceTrack()
 }

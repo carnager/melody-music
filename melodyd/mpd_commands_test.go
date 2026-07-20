@@ -50,40 +50,48 @@ func TestBumpQueueVersionLocked(t *testing.T) {
 }
 
 func TestVolumeCommandsUpdateTarget(t *testing.T) {
+	// Two enabled outputs: volume writes must fan out to both, relative
+	// changes are computed from the primary's volume.
 	wt := &webTarget{alive: true, volume: 40}
+	wt2 := &webTarget{alive: true, volume: 90}
 	a := &app{
-		webTargets:   map[string]*webTarget{"web": wt},
-		activeDevice: "web",
-		mpdHub:       newNotifyHub(),
+		devices: map[string]*device{
+			"web-a": {ID: "web-a", Type: "web"},
+			"web-b": {ID: "web-b", Type: "web"},
+		},
+		webTargets:     map[string]*webTarget{"web-a": wt, "web-b": wt2},
+		enabledOutputs: map[string]bool{"web-a": true, "web-b": true},
+		primaryOutput:  "web-a",
+		mpdHub:         newNotifyHub(),
 	}
 	c := &mpdConn{app: a}
 
 	if err := cmdSetVol(c, []string{"70"}); err != nil {
 		t.Fatalf("cmdSetVol: %v", err)
 	}
-	if wt.volume != 70 {
-		t.Fatalf("setvol target volume = %v, want 70", wt.volume)
+	if wt.volume != 70 || wt2.volume != 70 {
+		t.Fatalf("setvol volumes = %v/%v, want 70 on both", wt.volume, wt2.volume)
 	}
 
 	if err := cmdVolume(c, []string{"-50"}); err != nil {
 		t.Fatalf("cmdVolume: %v", err)
 	}
-	if wt.volume != 20 {
-		t.Fatalf("volume -50 target volume = %v, want 20", wt.volume)
+	if wt.volume != 20 || wt2.volume != 20 {
+		t.Fatalf("volume -50 volumes = %v/%v, want 20 on both", wt.volume, wt2.volume)
 	}
 
 	if err := cmdVolume(c, []string{"-50"}); err != nil {
 		t.Fatalf("cmdVolume clamp low: %v", err)
 	}
-	if wt.volume != 0 {
-		t.Fatalf("volume clamp low = %v, want 0", wt.volume)
+	if wt.volume != 0 || wt2.volume != 0 {
+		t.Fatalf("volume clamp low = %v/%v, want 0 on both", wt.volume, wt2.volume)
 	}
 
 	if err := cmdVolume(c, []string{"+150"}); err != nil {
 		t.Fatalf("cmdVolume clamp high: %v", err)
 	}
-	if wt.volume != 100 {
-		t.Fatalf("volume clamp high = %v, want 100", wt.volume)
+	if wt.volume != 100 || wt2.volume != 100 {
+		t.Fatalf("volume clamp high = %v/%v, want 100 on both", wt.volume, wt2.volume)
 	}
 }
 

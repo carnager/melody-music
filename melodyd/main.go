@@ -138,7 +138,12 @@ type app struct {
 	agentTargets map[string]*agentTarget // keyed by device ID
 	webTargets   map[string]*webTarget   // keyed by device ID
 	devicesMu    sync.RWMutex
-	activeDevice string // device ID, "" = local
+	// enabledOutputs is the set of device IDs enabled for playback (MPD-style:
+	// several may be enabled and play simultaneously, best-effort synced).
+	enabledOutputs map[string]bool
+	// primaryOutput is the enabled device that drives the playback clock and
+	// queue advancement. "" = none (no output enabled/connected).
+	primaryOutput string
 }
 
 func main() {
@@ -158,17 +163,18 @@ func main() {
 	}
 
 	a := &app{
-		cfg:           cfg,
-		paths:         pathCfg,
-		logger:        logger,
-		db:            db,
-		scanner:       newScanner(cfg.Library.MusicDir, db, logger, pathCfg.TranscodeCacheDir),
-		playQueue:     []string{},
-		devices:       make(map[string]*device),
-		agentTargets:  make(map[string]*agentTarget),
-		webTargets:    make(map[string]*webTarget),
-		prioReturnPos: -1,
-		mpdHub:        newNotifyHub(),
+		cfg:            cfg,
+		paths:          pathCfg,
+		logger:         logger,
+		db:             db,
+		scanner:        newScanner(cfg.Library.MusicDir, db, logger, pathCfg.TranscodeCacheDir),
+		playQueue:      []string{},
+		devices:        make(map[string]*device),
+		agentTargets:   make(map[string]*agentTarget),
+		webTargets:     make(map[string]*webTarget),
+		enabledOutputs: make(map[string]bool),
+		prioReturnPos:  -1,
+		mpdHub:         newNotifyHub(),
 	}
 	a.logConfigWarnings()
 
@@ -193,7 +199,7 @@ func main() {
 	db.warmCache()
 
 	a.restorePlayQueue()
-	a.restoreActiveDevice()
+	a.restoreOutputs()
 
 	// Assign MPD queue IDs for restored queue
 	a.playQueueMu.Lock()
@@ -557,9 +563,10 @@ func (a *app) handleMPDWebSocket(w http.ResponseWriter, r *http.Request) {
 // Stream URL helpers
 // ---------------------------------------------------------------------------
 
-// streamURL returns a URL or path for the given track.
-// For local agents, returns the file path. For remote, returns HTTP URL.
-func (a *app) streamURL(songID string) string {
+// streamURLFor resolves what the given device should be told to play:
+// a file path for the local device (or nil), a per-device transcode HTTP URL
+// for remote devices.
+func (a *app) streamURLFor(dev *device, songID string) string {
 	id, err := strconv.ParseInt(songID, 10, 64)
 	if err != nil {
 		return ""
@@ -568,58 +575,10 @@ func (a *app) streamURL(songID string) string {
 	if err != nil {
 		return ""
 	}
-	dev := a.activeDeviceInfo()
 	if dev == nil || dev.IsLocal {
 		return path
 	}
-	return a.buildStreamURL(songID, "", 0)
-}
-
-// streamURLForDevice builds an HTTP stream URL for remote devices.
-func (a *app) streamURLForDevice(songID, format string, maxBitRate int, _ string) string {
-	// For local playback target, use file path directly
-	id, err := strconv.ParseInt(songID, 10, 64)
-	if err != nil {
-		return ""
-	}
-	_, err = a.db.trackPathByID(id)
-	if err != nil {
-		return ""
-	}
-	// For remote devices, always use HTTP URL
-	if format == "" && maxBitRate == 0 {
-		return a.buildStreamURL(songID, "", 0)
-	}
-	return a.buildStreamURL(songID, format, maxBitRate)
-}
-
-func (a *app) streamURLForActiveDevice(songID string) string {
-	dev := a.activeDeviceInfo()
-	if dev == nil {
-		// No active device — return file path as fallback
-		id, err := strconv.ParseInt(songID, 10, 64)
-		if err != nil {
-			return ""
-		}
-		path, err := a.db.trackPathByID(id)
-		if err != nil {
-			return ""
-		}
-		return path
-	}
-	if dev.IsLocal {
-		// Local agent: return file path
-		id, err := strconv.ParseInt(songID, 10, 64)
-		if err != nil {
-			return ""
-		}
-		path, err := a.db.trackPathByID(id)
-		if err != nil {
-			return ""
-		}
-		return path
-	}
-	return a.streamURLForDevice(songID, dev.Format, dev.MaxBitRate, "")
+	return a.buildStreamURL(songID, dev.Format, dev.MaxBitRate)
 }
 
 // buildStreamURL constructs an HTTP URL to the server's stream endpoint.
@@ -662,14 +621,57 @@ func fallbackStreamBaseURL(bindAddresses []string) string {
 	return ""
 }
 
-func (a *app) restoreActiveDevice() {
+// savedOutputs is the on-disk format for the enabled-output set.
+type savedOutputs struct {
+	Enabled []string `json:"enabled"`
+	Primary string   `json:"primary"`
+}
+
+// persistOutputs writes the enabled-output set and primary to disk.
+func (a *app) persistOutputs() {
+	a.devicesMu.RLock()
+	so := savedOutputs{Primary: a.primaryOutput}
+	for id := range a.enabledOutputs {
+		so.Enabled = append(so.Enabled, id)
+	}
+	a.devicesMu.RUnlock()
+	sort.Strings(so.Enabled)
+	data, _ := json.Marshal(so)
+	_ = os.WriteFile(a.paths.ActiveDeviceFile, data, 0o644)
+}
+
+// restoreOutputs loads the enabled-output set from disk. Older versions stored
+// a single bare device ID; migrate that to a one-element set. Stale web device
+// IDs are pruned — browsers register fresh on connect.
+func (a *app) restoreOutputs() {
 	data, err := os.ReadFile(a.paths.ActiveDeviceFile)
 	if err != nil {
 		return
 	}
-	id := strings.TrimSpace(string(data))
-	if id != "" {
-		a.activeDevice = id
+	content := strings.TrimSpace(string(data))
+	if content == "" {
+		return
+	}
+	var so savedOutputs
+	if strings.HasPrefix(content, "{") {
+		if json.Unmarshal([]byte(content), &so) != nil {
+			return
+		}
+	} else {
+		// Legacy format: single device ID
+		so = savedOutputs{Enabled: []string{content}, Primary: content}
+	}
+	for _, id := range so.Enabled {
+		if strings.HasPrefix(id, "web-") {
+			continue
+		}
+		a.enabledOutputs[id] = true
+	}
+	if a.enabledOutputs[so.Primary] {
+		a.primaryOutput = so.Primary
+	}
+	if len(a.enabledOutputs) > 0 {
+		a.logger.Printf("restored enabled outputs: %v (primary %q)", so.Enabled, a.primaryOutput)
 	}
 }
 
@@ -789,23 +791,22 @@ func (a *app) nextQueuePos() int {
 // Sync plan types — separate state computation (under lock) from IPC execution
 // ---------------------------------------------------------------------------
 
-// syncPlan describes IPC operations to load tracks into the playback target.
+// syncPlan describes IPC operations to load tracks into the playback targets.
+// It is device-independent: per-device stream URLs are resolved at exec time.
 type syncPlan struct {
 	doClear    bool
-	currentURL string
-	nextURL    string
-	// for logging
+	hasCurrent bool
 	curPos     int
 	curSongID  string
-	nextPos    int
+	nextPos    int // -1 = none
 	nextSongID string
 }
 
 // nextTrackPlan describes IPC operations to update the preloaded next track.
 type nextTrackPlan struct {
-	removeOld bool
-	nextURL   string
-	nextPos   int // queue position for agent targets
+	removeOld  bool
+	nextPos    int // queue position, -1 = none
+	nextSongID string
 }
 
 // planSyncTarget computes what IPC calls are needed.
@@ -815,60 +816,64 @@ func (a *app) planSyncTarget() syncPlan {
 
 	if qLen == 0 || a.curQueuePos < 0 || a.curQueuePos >= qLen {
 		a.pendingNextPos = -1
-		return syncPlan{doClear: true}
+		return syncPlan{doClear: true, nextPos: -1}
 	}
 
 	plan := syncPlan{
-		doClear:   true,
-		curPos:    a.curQueuePos,
-		curSongID: a.playQueue[a.curQueuePos],
-		nextPos:   -1,
+		doClear:    true,
+		hasCurrent: true,
+		curPos:     a.curQueuePos,
+		curSongID:  a.playQueue[a.curQueuePos],
+		nextPos:    -1,
 	}
-	plan.currentURL = a.streamURLForActiveDevice(plan.curSongID)
 
 	a.pendingNextPos = a.nextQueuePos()
 	if a.pendingNextPos >= 0 && a.pendingNextPos < qLen {
 		plan.nextPos = a.pendingNextPos
 		plan.nextSongID = a.playQueue[a.pendingNextPos]
-		plan.nextURL = a.streamURLForActiveDevice(plan.nextSongID)
 	}
 
 	return plan
 }
 
-// execSyncPlan executes the IPC calls described by the plan.
+// execSyncPlan executes the IPC calls described by the plan on every enabled output.
 // Must NOT be called with playQueueMu held.
 func (a *app) execSyncPlan(plan syncPlan) {
-	t := a.target()
+	for _, ti := range a.enabledTargetInfos() {
+		a.execSyncPlanOn(ti, plan)
+	}
+}
 
+// execSyncPlanOn executes the sync plan on a single output.
+func (a *app) execSyncPlanOn(ti targetInfo, plan syncPlan) {
 	// Agent targets use position-based commands
-	if at, ok := t.(*agentTarget); ok {
-		if plan.currentURL == "" {
+	if at, ok := ti.t.(*agentTarget); ok {
+		if !plan.hasCurrent {
 			_ = at.playlistClear()
 			return
 		}
-		a.logger.Printf("syncTarget(agent): play pos %d next=%d", plan.curPos, plan.nextPos)
+		a.logger.Printf("syncTarget(agent %s): play pos %d next=%d", ti.dev.ID, plan.curPos, plan.nextPos)
 		if err := at.agentPlay(plan.curPos, plan.nextPos); err != nil {
-			a.logger.Printf("syncTarget(agent): play failed: %v", err)
+			a.logger.Printf("syncTarget(agent %s): play failed: %v", ti.dev.ID, err)
 		}
 		return
 	}
 
 	if plan.doClear {
-		_ = t.playlistClear()
+		_ = ti.t.playlistClear()
 	}
-	if plan.currentURL == "" {
+	if !plan.hasCurrent {
 		return
 	}
 
-	a.logger.Printf("syncTarget: loading pos %d (songID=%s)", plan.curPos, plan.curSongID)
-	if err := t.loadFile(plan.currentURL, "replace", nil); err != nil {
-		a.logger.Printf("syncTarget: loadFile replace failed: %v", err)
+	a.logger.Printf("syncTarget(%s): loading pos %d (songID=%s)", ti.dev.ID, plan.curPos, plan.curSongID)
+	if err := ti.t.loadFile(a.streamURLFor(ti.dev, plan.curSongID), "replace", nil); err != nil {
+		a.logger.Printf("syncTarget(%s): loadFile replace failed: %v", ti.dev.ID, err)
 	}
 
-	if plan.nextURL != "" {
-		a.logger.Printf("syncTarget: preloading pos %d (songID=%s)", plan.nextPos, plan.nextSongID)
-		_ = t.loadFile(plan.nextURL, "append", nil)
+	if plan.nextSongID != "" {
+		a.logger.Printf("syncTarget(%s): preloading pos %d (songID=%s)", ti.dev.ID, plan.nextPos, plan.nextSongID)
+		_ = ti.t.loadFile(a.streamURLFor(ti.dev, plan.nextSongID), "append", nil)
 	}
 }
 
@@ -888,31 +893,36 @@ func (a *app) planNextTrack() nextTrackPlan {
 
 	a.pendingNextPos = a.nextQueuePos()
 	if a.pendingNextPos >= 0 && a.pendingNextPos < qLen {
-		plan.nextURL = a.streamURLForActiveDevice(a.playQueue[a.pendingNextPos])
+		plan.nextSongID = a.playQueue[a.pendingNextPos]
 		plan.nextPos = a.pendingNextPos
 	}
 
 	return plan
 }
 
-// execNextTrackPlan executes the next-track preload IPC.
+// execNextTrackPlan executes the next-track preload IPC on every enabled output.
 // Must NOT be called with playQueueMu held.
 func (a *app) execNextTrackPlan(plan nextTrackPlan) {
-	t := a.target()
+	for _, ti := range a.enabledTargetInfos() {
+		a.execNextTrackPlanOn(ti, plan)
+	}
+}
 
+// execNextTrackPlanOn executes the next-track preload on a single output.
+func (a *app) execNextTrackPlanOn(ti targetInfo, plan nextTrackPlan) {
 	// Agent targets use position-based preload
-	if at, ok := t.(*agentTarget); ok {
+	if at, ok := ti.t.(*agentTarget); ok {
 		if err := at.agentPreload(plan.nextPos); err != nil {
-			a.logger.Printf("execNextTrackPlan(agent): preload %d failed: %v", plan.nextPos, err)
+			a.logger.Printf("execNextTrackPlan(agent %s): preload %d failed: %v", ti.dev.ID, plan.nextPos, err)
 		}
 		return
 	}
 
 	if plan.removeOld {
-		_ = t.playlistRemove(1)
+		_ = ti.t.playlistRemove(1)
 	}
-	if plan.nextURL != "" {
-		_ = t.loadFile(plan.nextURL, "append", nil)
+	if plan.nextSongID != "" {
+		_ = ti.t.loadFile(a.streamURLFor(ti.dev, plan.nextSongID), "append", nil)
 	}
 }
 
@@ -1002,23 +1012,14 @@ func (a *app) advanceTrack() {
 		// Compute next preload under lock
 		a.pendingNextPos = a.nextQueuePos()
 		nextPreloadPos := a.pendingNextPos
-		var nextURL string
+		var nextSongID string
 		if a.pendingNextPos >= 0 && a.pendingNextPos < qLen {
-			nextURL = a.streamURLForActiveDevice(a.playQueue[a.pendingNextPos])
+			nextSongID = a.playQueue[a.pendingNextPos]
 		}
 		a.playQueueMu.Unlock()
 
 		// IPC calls outside lock
-		t := a.target()
-		if at, ok := t.(*agentTarget); ok {
-			// Agent: just tell it about the next track to preload
-			_ = at.agentPreload(nextPreloadPos)
-		} else {
-			_ = t.playlistRemove(0)
-			if nextURL != "" {
-				_ = t.loadFile(nextURL, "append", nil)
-			}
-		}
+		a.advancePreload(nextPreloadPos, nextSongID)
 		a.mpdHub.notify(SubPlaylist, SubPlayer)
 		return
 	}
@@ -1048,25 +1049,33 @@ func (a *app) advanceTrack() {
 	// Compute next preload under lock
 	a.pendingNextPos = a.nextQueuePos()
 	nextPreloadPos := a.pendingNextPos
-	var nextURL string
+	var nextSongID string
 	if a.pendingNextPos >= 0 && a.pendingNextPos < qLen {
-		nextURL = a.streamURLForActiveDevice(a.playQueue[a.pendingNextPos])
+		nextSongID = a.playQueue[a.pendingNextPos]
 	}
 	a.playQueueMu.Unlock()
 
 	// IPC calls outside lock — clients can query status while these run
-	t := a.target()
-	if at, ok := t.(*agentTarget); ok {
-		// Agent: just tell it about the next track to preload
-		_ = at.agentPreload(nextPreloadPos)
-	} else {
-		_ = t.playlistRemove(0)
-		if nextURL != "" {
-			_ = t.loadFile(nextURL, "append", nil)
-		}
-	}
+	a.advancePreload(nextPreloadPos, nextSongID)
 
 	a.mpdHub.notify(SubPlayer)
+}
+
+// advancePreload updates every enabled output after a natural track advance:
+// agents just learn the next preload position (their mpv already advanced
+// gaplessly on its own); URL-based targets drop the finished slot 0 and
+// append the new next track.
+func (a *app) advancePreload(nextPreloadPos int, nextSongID string) {
+	for _, ti := range a.enabledTargetInfos() {
+		if at, ok := ti.t.(*agentTarget); ok {
+			_ = at.agentPreload(nextPreloadPos)
+			continue
+		}
+		_ = ti.t.playlistRemove(0)
+		if nextSongID != "" {
+			_ = ti.t.loadFile(a.streamURLFor(ti.dev, nextSongID), "append", nil)
+		}
+	}
 }
 
 // removeFromQueue removes a single track at pos from the server's queue.
@@ -1105,17 +1114,133 @@ func (a *app) bumpQueueVersionLocked() {
 // Playback target / device helpers
 // ---------------------------------------------------------------------------
 
-func (a *app) target() playbackTarget {
-	a.devicesMu.RLock()
-	defer a.devicesMu.RUnlock()
-	devID := a.activeDevice
+// targetInfo pairs a device with its running playback target.
+type targetInfo struct {
+	dev *device
+	t   playbackTarget
+}
+
+// targetForLocked returns the running agent/web target for devID, or nil.
+// Caller must hold devicesMu.
+func (a *app) targetForLocked(devID string) playbackTarget {
 	if at, ok := a.agentTargets[devID]; ok && at.isRunning() {
 		return at
 	}
 	if wt, ok := a.webTargets[devID]; ok && wt.isRunning() {
 		return wt
 	}
+	return nil
+}
+
+// enabledTargetInfos returns running targets for all enabled devices,
+// primary first, the rest in sortedDevices order.
+func (a *app) enabledTargetInfos() []targetInfo {
+	a.devicesMu.RLock()
+	defer a.devicesMu.RUnlock()
+	var infos []targetInfo
+	if a.enabledOutputs[a.primaryOutput] {
+		if t := a.targetForLocked(a.primaryOutput); t != nil {
+			infos = append(infos, targetInfo{dev: a.devices[a.primaryOutput], t: t})
+		}
+	}
+	for _, dev := range a.sortedDevices() {
+		if dev.ID == a.primaryOutput || !a.enabledOutputs[dev.ID] {
+			continue
+		}
+		if t := a.targetForLocked(dev.ID); t != nil {
+			infos = append(infos, targetInfo{dev: dev, t: t})
+		}
+	}
+	return infos
+}
+
+// target returns a playbackTarget that broadcasts writes to all enabled
+// outputs and reads from the primary. With no enabled/running output it
+// behaves like noopTarget.
+func (a *app) target() playbackTarget {
+	return &fanoutTarget{infos: a.enabledTargetInfos()}
+}
+
+// primaryTarget returns the primary device's running target, or noopTarget.
+func (a *app) primaryTarget() playbackTarget {
+	a.devicesMu.RLock()
+	defer a.devicesMu.RUnlock()
+	if t := a.targetForLocked(a.primaryOutput); t != nil {
+		return t
+	}
 	return &noopTarget{}
+}
+
+// isPrimary reports whether devID is the current primary output.
+func (a *app) isPrimary(devID string) bool {
+	a.devicesMu.RLock()
+	defer a.devicesMu.RUnlock()
+	return devID != "" && a.primaryOutput == devID
+}
+
+// promotePrimaryLocked picks a new primary from the enabled set: first
+// enabled and running device in sortedDevices order (local first), "" if none.
+// Caller must hold devicesMu.
+func (a *app) promotePrimaryLocked() {
+	a.primaryOutput = ""
+	for _, dev := range a.sortedDevices() {
+		if a.enabledOutputs[dev.ID] && a.targetForLocked(dev.ID) != nil {
+			a.primaryOutput = dev.ID
+			return
+		}
+	}
+}
+
+// fanoutTarget broadcasts writes to all enabled outputs and reads from the
+// primary (infos[0]). Write errors on one output don't stop the others; the
+// first error is returned.
+type fanoutTarget struct {
+	infos []targetInfo // primary first; may be empty
+}
+
+func (f *fanoutTarget) each(fn func(playbackTarget) error) error {
+	var firstErr error
+	for _, ti := range f.infos {
+		if err := fn(ti.t); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (f *fanoutTarget) loadFile(url, mode string, meta map[string]any) error {
+	return f.each(func(t playbackTarget) error { return t.loadFile(url, mode, meta) })
+}
+
+func (f *fanoutTarget) loadFileBatch(urls []string, mode string) error {
+	return f.each(func(t playbackTarget) error { return t.loadFileBatch(urls, mode) })
+}
+
+func (f *fanoutTarget) playlistClear() error {
+	return f.each(func(t playbackTarget) error { return t.playlistClear() })
+}
+
+func (f *fanoutTarget) playlistRemove(index int) error {
+	return f.each(func(t playbackTarget) error { return t.playlistRemove(index) })
+}
+
+func (f *fanoutTarget) playlistMove(from, to int) error {
+	return f.each(func(t playbackTarget) error { return t.playlistMove(from, to) })
+}
+
+func (f *fanoutTarget) setProperty(name string, value any) error {
+	return f.each(func(t playbackTarget) error { return t.setProperty(name, value) })
+}
+
+func (f *fanoutTarget) getProperty(name string) (any, error) {
+	if len(f.infos) == 0 {
+		return nil, fmt.Errorf("no device")
+	}
+	return f.infos[0].t.getProperty(name)
+}
+
+func (f *fanoutTarget) isRunning() bool {
+	return len(f.infos) > 0
 }
 
 // noopTarget is returned when no playback device is available.
@@ -1150,12 +1275,6 @@ func (a *app) sortedDevices() []*device {
 		devs = append(devs, a.devices[id])
 	}
 	return devs
-}
-
-func (a *app) activeDeviceInfo() *device {
-	a.devicesMu.RLock()
-	defer a.devicesMu.RUnlock()
-	return a.devices[a.activeDevice]
 }
 
 // ---------------------------------------------------------------------------
@@ -1831,127 +1950,226 @@ func (a *app) handleCoverArt(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "no cover art", http.StatusNotFound)
 }
 
-// switchDevice performs a full device handoff: captures playback state from old device,
-// loads the queue into the new device, seeks to the same position, and resumes.
-func (a *app) switchDevice(newID string) error {
-	a.devicesMu.Lock()
-	_, exists := a.devices[newID]
-	if !exists {
-		a.devicesMu.Unlock()
-		return fmt.Errorf("device not found: %s", newID)
+// captureOutputState reads time-pos/pause/volume from a target. For agents it
+// queries fresh values over IPC rather than using the cached heartbeat state.
+// Returns volume=-1 if unknown.
+func captureOutputState(t playbackTarget) (timePos float64, paused bool, volume float64) {
+	volume = -1
+	if t == nil {
+		return
 	}
-
-	oldID := a.activeDevice
-	if oldID == newID {
-		a.devicesMu.Unlock()
-		return nil
+	getProp := t.getProperty
+	if at, ok := t.(*agentTarget); ok {
+		getProp = at.getFreshProperty
 	}
-
-	// Build old target while holding devicesMu
-	var oldTarget playbackTarget
-	if at, ok := a.agentTargets[oldID]; ok && at.isRunning() {
-		oldTarget = at
-	} else if wt, ok := a.webTargets[oldID]; ok && wt.isRunning() {
-		oldTarget = wt
-	}
-
-	// Build new target
-	var newTarget playbackTarget
-	if at, ok := a.agentTargets[newID]; ok && at.isRunning() {
-		newTarget = at
-	} else if wt, ok := a.webTargets[newID]; ok && wt.isRunning() {
-		newTarget = wt
-	} else {
-		a.devicesMu.Unlock()
-		return fmt.Errorf("device %s not connected", newID)
-	}
-
-	a.devicesMu.Unlock()
-
-	// Capture state from old target
-	var timePos float64
-	var volume float64 = -1
-	var wasPaused bool
-
-	if oldTarget != nil {
-		getOldProperty := oldTarget.getProperty
-		if at, ok := oldTarget.(*agentTarget); ok {
-			getOldProperty = at.getFreshProperty
+	if tpRaw, err := getProp("time-pos"); err == nil {
+		if f, ok := tpRaw.(float64); ok {
+			timePos = f
 		}
-
-		if tpRaw, err := getOldProperty("time-pos"); err == nil {
-			if f, ok := tpRaw.(float64); ok {
-				timePos = f
-			}
-		}
-		if pauseRaw, err := getOldProperty("pause"); err == nil {
-			if p, ok := pauseRaw.(bool); ok {
-				wasPaused = p
-			}
-		}
-		if volRaw, err := getOldProperty("volume"); err == nil {
-			if f, ok := volRaw.(float64); ok {
-				volume = f
-			}
-		}
-
-		// Stop old target
-		_ = oldTarget.setProperty("pause", true)
-		_ = oldTarget.playlistClear()
 	}
+	if pauseRaw, err := getProp("pause"); err == nil {
+		if p, ok := pauseRaw.(bool); ok {
+			paused = p
+		}
+	}
+	if volRaw, err := getProp("volume"); err == nil {
+		if f, ok := volRaw.(float64); ok {
+			volume = f
+		}
+	}
+	return
+}
 
-	// Update active device before syncing so target() returns the new one
-	a.devicesMu.Lock()
-	a.activeDevice = newID
-	a.devicesMu.Unlock()
-	_ = os.WriteFile(a.paths.ActiveDeviceFile, []byte(newID), 0o644)
+// stopOutput pauses and clears a single target.
+func stopOutput(t playbackTarget) {
+	_ = t.setProperty("pause", true)
+	_ = t.playlistClear()
+}
 
-	// Transfer volume and replaygain to new target
+// startOutputAt loads the current 2-track window into one output and seeks to
+// timePos, transferring volume/replaygain first. Resumes unless paused is set.
+func (a *app) startOutputAt(ti targetInfo, timePos float64, paused bool, volume float64) {
 	if volume >= 0 {
-		_ = newTarget.setProperty("volume", volume)
+		_ = ti.t.setProperty("volume", volume)
 	}
 	if a.cfg.Player.ReplayGain != "" {
-		_ = newTarget.setProperty("replaygain", a.cfg.Player.ReplayGain)
+		_ = ti.t.setProperty("replaygain", a.cfg.Player.ReplayGain)
 	}
 
-	// Load 2-track window into new target with seek position
 	a.playQueueMu.Lock()
 	qLen := len(a.playQueue)
 	plan := a.planSyncTarget()
 	a.playQueueMu.Unlock()
 
-	if qLen > 0 {
-		// For agent targets, use agentPlayAt to seek atomically before audio starts
-		if at, ok := newTarget.(*agentTarget); ok {
-			at.ensureQueueSync()
-			if err := at.agentPlayAt(plan.curPos, plan.nextPos, timePos); err != nil {
-				a.logger.Printf("switchDevice: agentPlayAt failed: %v", err)
+	if qLen == 0 {
+		return
+	}
+
+	// For agent targets, use agentPlayAt to seek atomically before audio starts
+	if at, ok := ti.t.(*agentTarget); ok {
+		at.ensureQueueSync()
+		if err := at.agentPlayAt(plan.curPos, plan.nextPos, timePos); err != nil {
+			a.logger.Printf("startOutputAt(%s): agentPlayAt failed: %v", ti.dev.ID, err)
+		}
+		if paused {
+			_ = ti.t.setProperty("pause", true)
+		}
+		return
+	}
+
+	a.execSyncPlanOn(ti, plan)
+	// Wait for track to load before seeking
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if v, err := ti.t.getProperty("duration"); err == nil {
+			if d, ok := v.(float64); ok && d > 0 {
+				break
 			}
-			if wasPaused {
-				_ = newTarget.setProperty("pause", true)
-			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if timePos > 0 {
+		_ = ti.t.setProperty("time-pos", timePos)
+	}
+	if !paused {
+		_ = ti.t.setProperty("pause", false)
+	}
+}
+
+// enableOutput adds a device to the enabled set without touching other
+// outputs. The first enabled output becomes primary. If playback is under way
+// the new output joins at the primary's position (best-effort sync),
+// inheriting the primary's volume.
+func (a *app) enableOutput(devID string) error {
+	a.devicesMu.Lock()
+	if _, exists := a.devices[devID]; !exists {
+		a.devicesMu.Unlock()
+		return fmt.Errorf("device not found: %s", devID)
+	}
+	if a.enabledOutputs[devID] {
+		a.devicesMu.Unlock()
+		return nil
+	}
+	primaryT := a.targetForLocked(a.primaryOutput)
+	newT := a.targetForLocked(devID)
+	a.enabledOutputs[devID] = true
+	becamePrimary := false
+	if a.primaryOutput == "" || primaryT == nil {
+		a.primaryOutput = devID
+		becamePrimary = true
+	}
+	dev := a.devices[devID]
+	a.devicesMu.Unlock()
+	a.persistOutputs()
+
+	if newT != nil {
+		if becamePrimary {
+			// Nothing was playing — load the window paused at the queue position.
+			a.startOutputAt(targetInfo{dev: dev, t: newT}, 0, true, -1)
 		} else {
-			a.execSyncPlan(plan)
-			// Wait for track to load before seeking
-			deadline := time.Now().Add(5 * time.Second)
-			for time.Now().Before(deadline) {
-				if v, err := newTarget.getProperty("duration"); err == nil {
-					if d, ok := v.(float64); ok && d > 0 {
-						break
-					}
-				}
-				time.Sleep(50 * time.Millisecond)
-			}
-			if timePos > 0 {
-				_ = newTarget.setProperty("time-pos", timePos)
-			}
-			if !wasPaused {
-				_ = newTarget.setProperty("pause", false)
-			}
+			timePos, paused, volume := captureOutputState(primaryT)
+			a.startOutputAt(targetInfo{dev: dev, t: newT}, timePos, paused, volume)
 		}
 	}
 
-	a.logger.Printf("active device switched: %s -> %s", oldID, newID)
+	a.logger.Printf("output enabled: %s", devID)
+	a.mpdHub.notify(SubOutput, SubPlayer, SubMixer)
+	return nil
+}
+
+// disableOutput stops a device and removes it from the enabled set. Other
+// outputs keep playing. If it was the primary, another enabled output is
+// promoted; if it was the last one, playback is left without a clock and
+// status reports "stop" until an output is enabled again.
+func (a *app) disableOutput(devID string) error {
+	a.devicesMu.Lock()
+	if !a.enabledOutputs[devID] {
+		a.devicesMu.Unlock()
+		return nil
+	}
+	delete(a.enabledOutputs, devID)
+	t := a.targetForLocked(devID)
+	if a.primaryOutput == devID {
+		a.promotePrimaryLocked()
+	}
+	a.devicesMu.Unlock()
+	a.persistOutputs()
+
+	if t != nil {
+		stopOutput(t)
+	}
+
+	a.logger.Printf("output disabled: %s", devID)
+	a.mpdHub.notify(SubOutput, SubPlayer, SubMixer)
+	return nil
+}
+
+// toggleOutput flips a device's enabled state.
+func (a *app) toggleOutput(devID string) error {
+	a.devicesMu.RLock()
+	enabled := a.enabledOutputs[devID]
+	a.devicesMu.RUnlock()
+	if enabled {
+		return a.disableOutput(devID)
+	}
+	return a.enableOutput(devID)
+}
+
+// switchOutput is the exclusive switch: enable devID and disable everything
+// else, handing playback over at the current position. This preserves the
+// quick "move playback to this room" workflow on top of the toggle model.
+func (a *app) switchOutput(devID string) error {
+	a.devicesMu.Lock()
+	if _, exists := a.devices[devID]; !exists {
+		a.devicesMu.Unlock()
+		return fmt.Errorf("device not found: %s", devID)
+	}
+	newT := a.targetForLocked(devID)
+	if newT == nil {
+		a.devicesMu.Unlock()
+		return fmt.Errorf("device %s not connected", devID)
+	}
+	alreadyOnly := a.enabledOutputs[devID] && len(a.enabledOutputs) == 1
+	if alreadyOnly && a.primaryOutput == devID {
+		a.devicesMu.Unlock()
+		return nil
+	}
+	primaryT := a.targetForLocked(a.primaryOutput)
+	// Collect the targets being switched away from
+	var oldTargets []playbackTarget
+	for id := range a.enabledOutputs {
+		if id == devID {
+			continue
+		}
+		if t := a.targetForLocked(id); t != nil {
+			oldTargets = append(oldTargets, t)
+		}
+	}
+	wasEnabled := a.enabledOutputs[devID]
+	a.enabledOutputs = map[string]bool{devID: true}
+	a.primaryOutput = devID
+	dev := a.devices[devID]
+	a.devicesMu.Unlock()
+	a.persistOutputs()
+
+	// Capture handoff state from the old primary before stopping it
+	var timePos, volume float64
+	var paused bool
+	volume = -1
+	if primaryT != nil && primaryT != newT {
+		timePos, paused, volume = captureOutputState(primaryT)
+	}
+
+	for _, t := range oldTargets {
+		stopOutput(t)
+	}
+
+	// If the device was already enabled and playing, leave it undisturbed.
+	if !wasEnabled {
+		a.startOutputAt(targetInfo{dev: dev, t: newT}, timePos, paused, volume)
+	}
+
+	a.logger.Printf("output switched exclusively to: %s", devID)
 	a.mpdHub.notify(SubOutput, SubPlayer, SubMixer)
 	return nil
 }
@@ -1975,7 +2193,7 @@ func (a *app) reloadQueueIntoAgent(at *agentTarget, dev *device, resume *agentRe
 
 	// If the replaced connection was mid-track on the same position, resume
 	// there instead of restarting the track from the beginning.
-	if resume != nil && resume.pos == plan.curPos && resume.elapsed > 0 && plan.currentURL != "" {
+	if resume != nil && resume.pos == plan.curPos && resume.elapsed > 0 && plan.hasCurrent {
 		a.logger.Printf("agent reload: resuming %s at pos %d elapsed=%.1fs", dev.Name, plan.curPos, resume.elapsed)
 		if err := at.agentPlayAt(plan.curPos, plan.nextPos, resume.elapsed); err != nil {
 			a.logger.Printf("agent reload: resume failed, falling back to full reload: %v", err)
@@ -1989,7 +2207,7 @@ func (a *app) reloadQueueIntoAgent(at *agentTarget, dev *device, resume *agentRe
 		}
 	}
 
-	a.execSyncPlan(plan)
+	a.execSyncPlanOn(targetInfo{dev: dev, t: at}, plan)
 	a.logger.Printf("agent reload: loaded 2-track window into %s at pos %d", dev.Name, a.curQueuePos)
 }
 

@@ -854,9 +854,19 @@ class MainViewModel : ViewModel() {
         }
     }
 
-    fun setActiveDevice(id: String) {
+    // Exclusive switch: play only on this device (disables all other outputs).
+    fun switchDevice(id: String) {
         runAction("Switch device") {
-            mpd.enableOutput(id)
+            mpd.switchOutput(id)
+            delay(300)
+            devices = mpd.getOutputs()
+        }
+    }
+
+    // Toggle a single output on/off without touching the others.
+    fun toggleDevice(id: String) {
+        runAction("Toggle output") {
+            mpd.toggleOutput(id)
             delay(300)
             devices = mpd.getOutputs()
         }
@@ -864,7 +874,7 @@ class MainViewModel : ViewModel() {
 
     /**
      * Check if we should prompt to switch to phone. Returns true (and shows dialog)
-     * if on mobile data and phone agent isn't the active device.
+     * if on mobile data and the phone agent isn't among the enabled outputs.
      */
     private fun isPhoneAgent(dev: DeviceInfo): Boolean {
         return dev.type == "agent" && dev.name.contains("android", ignoreCase = true)
@@ -872,8 +882,7 @@ class MainViewModel : ViewModel() {
 
     private fun shouldPromptPhone(action: suspend () -> Unit): Boolean {
         if (!MelodyApp.instance.isOnMobileData()) return false
-        val active = devices.firstOrNull { it.active }
-        if (active != null && isPhoneAgent(active)) return false
+        if (devices.any { it.active && isPhoneAgent(it) }) return false
         pendingPhoneAction = action
         showPhonePrompt = true
         return true
@@ -886,12 +895,14 @@ class MainViewModel : ViewModel() {
         viewModelScope.launch {
             // Stop playback before switching so the old track doesn't briefly play on phone
             try { mpd.stop() } catch (_: Exception) {}
-            // Switch to phone first, then run the play action
+            // Switch to phone first, then run the play action. Exclusive switch:
+            // leaving the house must take playback over, not add the phone to
+            // the speakers at home.
             try {
                 devices = mpd.getOutputs()
                 val phoneDev = devices.find { isPhoneAgent(it) }
-                if (phoneDev != null && !phoneDev.active) {
-                    mpd.enableOutput(phoneDev.id)
+                if (phoneDev != null && !(phoneDev.active && devices.count { it.active } == 1)) {
+                    mpd.switchOutput(phoneDev.id)
                     delay(500)
                     devices = mpd.getOutputs()
                 }

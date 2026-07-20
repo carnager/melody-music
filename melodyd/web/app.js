@@ -494,7 +494,10 @@
     if (advancing) return;
     advancing = true;
     currentStreamId = null;
-    mpd.cmd("trackended").then(function () {
+    // Include our device ID so the server only advances the queue when this
+    // browser is the primary output.
+    var cmd = webDeviceId ? "trackended " + webDeviceId : "trackended";
+    mpd.cmd(cmd).then(function () {
       refreshNowPlaying();
     });
   }
@@ -523,10 +526,11 @@
     var cur = document.getElementById("np-time-current");
     if (cur) cur.textContent = formatTime(audio.currentTime);
 
-    // Report to server every ~5 seconds
-    if (Math.abs(audio.currentTime - lastReportedTime) > 5) {
+    // Report to server every ~5 seconds. web_timepos only updates this
+    // device's state — a real seekcur would seek every other enabled output.
+    if (webIsActive && webDeviceId && Math.abs(audio.currentTime - lastReportedTime) > 5) {
       lastReportedTime = audio.currentTime;
-      mpd.cmd("seekcur " + audio.currentTime).catch(function () {});
+      mpd.cmd("web_timepos " + webDeviceId + " " + audio.currentTime).catch(function () {});
     }
   });
 
@@ -1401,7 +1405,9 @@
   function enableWebCmd() {
     if (webDeviceId) {
       webIsActive = true;
-      return "enableoutput " + webDeviceId + "\n";
+      // Exclusive switch: starting playback in the browser takes over from
+      // other outputs instead of joining them.
+      return "switchoutput " + webDeviceId + "\n";
     }
     return "";
   }

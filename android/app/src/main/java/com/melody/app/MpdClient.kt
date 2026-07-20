@@ -909,12 +909,28 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
                 online = true,
                 format = g["outputformat"] ?: "",
                 maxBitrate = g["outputmaxbitrate"]?.toIntOrNull() ?: 0,
-                active = g["outputenabled"] == "1"
+                active = g["outputenabled"] == "1",
+                primary = g["outputprimary"] == "1"
             )
         }
     }
 
     suspend fun enableOutput(id: String) { cmd("enableoutput $id") }
+
+    suspend fun disableOutput(id: String) { cmd("disableoutput $id") }
+
+    suspend fun toggleOutput(id: String) { cmd("toggleoutput $id") }
+
+    // Exclusive switch: enable this output, disable all others. Falls back to
+    // enableoutput for daemons that predate multi-output (where enableoutput
+    // was itself an exclusive switch).
+    suspend fun switchOutput(id: String) {
+        try {
+            cmd("switchoutput $id")
+        } catch (e: Exception) {
+            cmd("enableoutput $id")
+        }
+    }
 
     // ---- Playlists ----
 

@@ -496,6 +496,7 @@ type deviceInfo struct {
 	ID      string
 	Name    string
 	Enabled bool
+	Primary bool // drives the playback clock and queue advancement
 }
 
 type trackEntry struct {
@@ -564,7 +565,7 @@ type plPickerFilesMsg []string
 
 type devicesMsg struct {
 	devices []deviceInfo
-	active  int // output ID of enabled device, -1 if none
+	active  int // output ID of the primary device, -1 if none
 }
 
 type albumArtMsg struct {
@@ -1684,8 +1685,9 @@ func fetchDevices() tea.Msg {
 			ID:      g["outputid"],
 			Name:    g["outputname"],
 			Enabled: g["outputenabled"] == "1",
+			Primary: g["outputprimary"] == "1",
 		}
-		if d.Enabled {
+		if d.Primary {
 			id, _ := strconv.Atoi(d.ID)
 			active = id
 		}
@@ -1694,10 +1696,16 @@ func fetchDevices() tea.Msg {
 	return devicesMsg{devices: devs, active: active}
 }
 
-func setActiveDevice(id string) tea.Cmd {
+// outputCmd sends an output verb ("toggleoutput", "switchoutput") for the
+// given output id and refreshes the device list.
+func outputCmd(verb, id string) tea.Cmd {
 	return func() tea.Msg {
 		if mpd != nil {
-			mpd.cmd("enableoutput " + id)
+			if _, err := mpd.cmd(verb + " " + id); err != nil && verb == "switchoutput" {
+				// Older daemons don't know switchoutput; fall back to the old
+				// exclusive-switch semantics of enableoutput.
+				mpd.cmd("enableoutput " + id)
+			}
 		}
 		return fetchDevices()
 	}
@@ -4018,10 +4026,17 @@ func (m model) handleDeviceKey(key string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "enter":
+		// Exclusive switch: play only on this output. The picker stays
+		// open until explicitly closed (esc/q/D).
 		if m.devCursor < len(m.devices) {
 			dev := m.devices[m.devCursor]
-			m.showDevices = false
-			return m, setActiveDevice(dev.ID)
+			return m, outputCmd("switchoutput", dev.ID)
+		}
+	case " ":
+		// Toggle this output on/off; picker stays open for more toggles
+		if m.devCursor < len(m.devices) {
+			dev := m.devices[m.devCursor]
+			return m, outputCmd("toggleoutput", dev.ID)
 		}
 	}
 	return m, nil
@@ -6071,7 +6086,7 @@ func (m model) deviceView() string {
 		}
 	}
 
-	hints := "\n\n" + dimStyle.Render("[\u2191\u2193]navigate [enter]switch [esc]close")
+	hints := "\n\n" + dimStyle.Render("[↑↓]navigate [space]toggle [enter]switch only [esc]close")
 	content := header + strings.Join(items, "\n") + hints
 
 	box := lipgloss.NewStyle().

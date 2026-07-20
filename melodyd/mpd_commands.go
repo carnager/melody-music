@@ -80,6 +80,8 @@ func init() {
 		"outputs":       cmdOutputs,
 		"enableoutput":  cmdEnableOutput,
 		"disableoutput": cmdDisableOutput,
+		"toggleoutput":  cmdToggleOutput,
+		"switchoutput":  cmdSwitchOutput, // melody extension: exclusive switch
 
 		// Volume
 		"setvol": cmdSetVol,
@@ -104,6 +106,7 @@ func init() {
 		// Web client
 		"web_register":   cmdWebRegister,
 		"web_unregister": cmdWebUnregister,
+		"web_timepos":    cmdWebTimePos,
 
 		// Cover art
 		"albumart":    cmdAlbumArt,
@@ -324,6 +327,7 @@ func cmdStats(c *mpdConn, args []string) *mpdError {
 func cmdPlay(c *mpdConn, args []string) *mpdError {
 	a := c.app
 	var plan *syncPlan
+	syncStoppedOnly := false
 	a.playQueueMu.Lock()
 	if len(args) > 0 {
 		pos, err := strconv.Atoi(args[0])
@@ -342,22 +346,25 @@ func cmdPlay(c *mpdConn, args []string) *mpdError {
 		p := a.planSyncTarget()
 		plan = &p
 	} else if len(a.playQueue) > 0 {
-		// No position arg — for agent targets, only send a full play
-		// command if the agent is stopped (nothing loaded). If it's
-		// already playing or paused, just let the resume below handle it.
-		if at, ok := a.target().(*agentTarget); ok {
-			at.stateMu.RLock()
-			stopped := at.agState == "stop"
-			at.stateMu.RUnlock()
-			if stopped {
-				p := a.planSyncTarget()
-				plan = &p
-			}
-		}
+		// No position arg — outputs that are stopped (nothing loaded) need a
+		// full play command; outputs already playing or paused just get the
+		// resume below. Re-sync only the stopped ones so playing outputs
+		// aren't restarted.
+		p := a.planSyncTarget()
+		plan = &p
+		syncStoppedOnly = true
 	}
 	a.playQueueMu.Unlock()
 	if plan != nil {
-		a.execSyncPlan(*plan)
+		if syncStoppedOnly {
+			for _, ti := range a.enabledTargetInfos() {
+				if at, ok := ti.t.(*agentTarget); ok && at.isStopped() {
+					a.execSyncPlanOn(ti, *plan)
+				}
+			}
+		} else {
+			a.execSyncPlan(*plan)
+		}
 	}
 	if err := a.target().setProperty("pause", false); err != nil {
 		return mpdErr(errSystem, "play", err.Error())
@@ -2041,12 +2048,17 @@ func cmdOutputs(c *mpdConn, args []string) *mpdError {
 	devs := a.sortedDevices()
 	for i, dev := range devs {
 		enabled := 0
-		if dev.ID == a.activeDevice {
+		if a.enabledOutputs[dev.ID] {
 			enabled = 1
+		}
+		primary := 0
+		if dev.ID == a.primaryOutput {
+			primary = 1
 		}
 		c.writeKV("outputid", i)
 		c.writeKV("outputname", dev.Name)
 		c.writeKV("outputenabled", enabled)
+		c.writeKV("outputprimary", primary)
 		c.writeKV("plugin", dev.Type)
 		if dev.Format != "" {
 			c.writeKV("outputformat", dev.Format)
@@ -2058,37 +2070,35 @@ func cmdOutputs(c *mpdConn, args []string) *mpdError {
 	return nil
 }
 
+// resolveOutputArg maps an MPD numeric output index or a melody device ID to
+// a device. Returns nil if not found.
+func resolveOutputArg(a *app, arg string) *device {
+	a.devicesMu.RLock()
+	defer a.devicesMu.RUnlock()
+	devs := a.sortedDevices()
+	if idx, err := strconv.Atoi(arg); err == nil {
+		if idx >= 0 && idx < len(devs) {
+			return devs[idx]
+		}
+		return nil
+	}
+	for _, d := range devs {
+		if d.ID == arg {
+			return d
+		}
+	}
+	return nil
+}
+
 func cmdEnableOutput(c *mpdConn, args []string) *mpdError {
 	if len(args) < 1 {
 		return mpdErr(errArg, "enableoutput", "need output id")
 	}
-
-	a := c.app
-	a.devicesMu.RLock()
-	devs := a.sortedDevices()
-	var target *device
-	if idx, err := strconv.Atoi(args[0]); err == nil {
-		// Numeric index
-		if idx >= 0 && idx < len(devs) {
-			target = devs[idx]
-		}
-	} else {
-		// String device ID
-		for _, d := range devs {
-			if d.ID == args[0] {
-				target = d
-				break
-			}
-		}
-	}
-	a.devicesMu.RUnlock()
-
-	if target == nil {
+	dev := resolveOutputArg(c.app, args[0])
+	if dev == nil {
 		return mpdErr(errNoExist, "enableoutput", "output not found")
 	}
-
-	// Full device handoff (capture state, transfer queue, resume)
-	if err := a.switchDevice(target.ID); err != nil {
+	if err := c.app.enableOutput(dev.ID); err != nil {
 		return mpdErr(errSystem, "enableoutput", err.Error())
 	}
 	return nil
@@ -2098,9 +2108,42 @@ func cmdDisableOutput(c *mpdConn, args []string) *mpdError {
 	if len(args) < 1 {
 		return mpdErr(errArg, "disableoutput", "need output id")
 	}
-	// Disabling an output switches back to local with full handoff
-	if err := c.app.switchDevice("local"); err != nil {
+	dev := resolveOutputArg(c.app, args[0])
+	if dev == nil {
+		return mpdErr(errNoExist, "disableoutput", "output not found")
+	}
+	if err := c.app.disableOutput(dev.ID); err != nil {
 		return mpdErr(errSystem, "disableoutput", err.Error())
+	}
+	return nil
+}
+
+func cmdToggleOutput(c *mpdConn, args []string) *mpdError {
+	if len(args) < 1 {
+		return mpdErr(errArg, "toggleoutput", "need output id")
+	}
+	dev := resolveOutputArg(c.app, args[0])
+	if dev == nil {
+		return mpdErr(errNoExist, "toggleoutput", "output not found")
+	}
+	if err := c.app.toggleOutput(dev.ID); err != nil {
+		return mpdErr(errSystem, "toggleoutput", err.Error())
+	}
+	return nil
+}
+
+// cmdSwitchOutput is a melody extension: enable the given output and disable
+// all others, handing playback over at the current position.
+func cmdSwitchOutput(c *mpdConn, args []string) *mpdError {
+	if len(args) < 1 {
+		return mpdErr(errArg, "switchoutput", "need output id")
+	}
+	dev := resolveOutputArg(c.app, args[0])
+	if dev == nil {
+		return mpdErr(errNoExist, "switchoutput", "output not found")
+	}
+	if err := c.app.switchOutput(dev.ID); err != nil {
+		return mpdErr(errSystem, "switchoutput", err.Error())
 	}
 	return nil
 }
@@ -2129,22 +2172,26 @@ func cmdWebRegister(c *mpdConn, args []string) *mpdError {
 
 	a.devicesMu.Lock()
 	// Close old web target with same name if it exists
-	wasActive := a.activeDevice == devID
 	if oldWt, ok := a.webTargets[devID]; ok {
 		oldWt.close()
 	}
 	a.devices[devID] = dev
 	a.webTargets[devID] = wt
+	isEnabled := a.enabledOutputs[devID]
+	if isEnabled && a.primaryOutput == "" {
+		a.primaryOutput = devID
+	}
 	a.devicesMu.Unlock()
 
 	a.logger.Printf("web client registered: %s (id=%s)", name, devID)
 
-	if wasActive {
-		// Re-registering the already-active web device: load 2-track window
+	if isEnabled {
+		// Re-registering an already-enabled web device: load the 2-track
+		// window into this output only — other outputs keep playing.
 		a.playQueueMu.Lock()
 		plan := a.planSyncTarget()
 		a.playQueueMu.Unlock()
-		a.execSyncPlan(plan)
+		a.execSyncPlanOn(targetInfo{dev: dev, t: wt}, plan)
 		_ = wt.setProperty("pause", false)
 	}
 
@@ -2160,19 +2207,46 @@ func cmdWebUnregister(c *mpdConn, args []string) *mpdError {
 	devID := args[0]
 	a := c.app
 
+	wasEnabled := false
 	a.devicesMu.Lock()
 	if wt, ok := a.webTargets[devID]; ok {
 		wt.close()
 		delete(a.webTargets, devID)
 		delete(a.devices, devID)
-		if a.activeDevice == devID {
-			a.activeDevice = "local"
+		wasEnabled = a.enabledOutputs[devID]
+		delete(a.enabledOutputs, devID)
+		if a.primaryOutput == devID {
+			a.promotePrimaryLocked()
 		}
 		a.logger.Printf("web client unregistered: %s", devID)
 	}
 	a.devicesMu.Unlock()
+	if wasEnabled {
+		a.persistOutputs()
+	}
 
 	a.mpdHub.notify(SubOutput)
+	return nil
+}
+
+// cmdWebTimePos records a web client's playback position report.
+// Format: web_timepos <deviceID> <seconds>. Unlike seekcur this only updates
+// the reporting device's state — it must not seek the other outputs.
+func cmdWebTimePos(c *mpdConn, args []string) *mpdError {
+	if len(args) < 2 {
+		return mpdErr(errArg, "web_timepos", "need device id and seconds")
+	}
+	secs, err := strconv.ParseFloat(args[1], 64)
+	if err != nil {
+		return mpdErr(errArg, "web_timepos", "invalid seconds")
+	}
+	a := c.app
+	a.devicesMu.RLock()
+	wt := a.webTargets[args[0]]
+	a.devicesMu.RUnlock()
+	if wt != nil {
+		_ = wt.setProperty("time-pos", secs)
+	}
 	return nil
 }
 
@@ -2247,10 +2321,15 @@ func cmdReplayGainStatus(c *mpdConn, args []string) *mpdError {
 	return nil
 }
 
-// cmdTrackEnded is called by clients (web, Android, melody-agent) when a track
 // cmdTrackEnded is sent by web clients when a track finishes naturally.
-// Agent targets use agent_advance instead.
+// Agent targets use agent_advance instead. With a device-ID argument the
+// advance only counts when that device is the primary output — non-primary
+// outputs finishing must not advance the queue again. The bare form is kept
+// for older web clients and always advances.
 func cmdTrackEnded(c *mpdConn, args []string) *mpdError {
+	if len(args) > 0 && !c.app.isPrimary(args[0]) {
+		return nil
+	}
 	c.app.advanceTrack()
 	return nil
 }
