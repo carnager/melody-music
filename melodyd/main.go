@@ -28,6 +28,11 @@ import (
 	"github.com/coder/websocket"
 )
 
+// melodyVersion is the melodyd release version reported by the
+// `melody_version` MPD command. Bump it as part of the release flow
+// (see RELEASE.md).
+const melodyVersion = "1.4.0-dev"
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -40,9 +45,10 @@ type config struct {
 		WebSecret     string   `toml:"web_secret"`
 	} `toml:"server"`
 	Library struct {
-		MusicDir    string `toml:"music_dir"`
-		EmbedLyrics bool   `toml:"embed_lyrics"`
-		SaveLRC     bool   `toml:"save_lrc"`
+		MusicDir       string   `toml:"music_dir"`
+		RequiredMounts []string `toml:"required_mounts"`
+		EmbedLyrics    bool     `toml:"embed_lyrics"`
+		SaveLRC        bool     `toml:"save_lrc"`
 	} `toml:"library"`
 	Player struct {
 		ReplayGain string  `toml:"replaygain"` // "off", "track", "album"
@@ -86,6 +92,36 @@ type playbackTarget interface {
 	isRunning() bool
 }
 
+// stoppedTarget is an optional playbackTarget extension reporting whether the
+// output has nothing loaded — "stop" in MPD terms, as opposed to paused.
+type stoppedTarget interface {
+	isStopped() bool
+}
+
+// targetStopped reports whether t has nothing loaded. Targets that don't
+// implement stoppedTarget are assumed to have content loaded.
+func targetStopped(t playbackTarget) bool {
+	if st, ok := t.(stoppedTarget); ok {
+		return st.isStopped()
+	}
+	return false
+}
+
+// transportState captures the primary output's transport so queue mutations
+// can preserve it. Must NOT be called with playQueueMu held.
+func (a *app) transportState() (stopped, paused bool) {
+	t := a.target()
+	if !t.isRunning() || targetStopped(t) {
+		return true, false
+	}
+	if pRaw, err := t.getProperty("pause"); err == nil {
+		if p, ok := pRaw.(bool); ok {
+			paused = p
+		}
+	}
+	return false, paused
+}
+
 // ---------------------------------------------------------------------------
 // Device management
 // ---------------------------------------------------------------------------
@@ -120,9 +156,10 @@ type app struct {
 	queuePriority  []int // parallel to playQueue, 0=normal, 10=low, 20=medium, 30=high
 	queueIDCounter int   // monotonically incrementing counter for MPD songids
 	// playback state
-	curQueuePos    int // authoritative current position in playQueue
-	pendingNextPos int // queue position preloaded at target slot 1 (-1 if none)
-	prioReturnPos  int // position to resume after priority tracks are consumed (-1 = none)
+	curQueuePos    int          // authoritative current position in playQueue
+	pendingNextPos int          // queue position preloaded at target slot 1 (-1 if none)
+	prioReturnPos  int          // position to resume after priority tracks have played (-1 = none)
+	prioPlayedIDs  map[int]bool // song IDs whose spent priority already played this cycle
 	// shuffle state for random mode
 	shuffleOrder []int // permutation of queue indices, walked sequentially
 	shufflePos   int   // current position within shuffleOrder
@@ -140,7 +177,14 @@ type app struct {
 	devicesMu    sync.RWMutex
 	// enabledOutputs is the set of device IDs enabled for playback (MPD-style:
 	// several may be enabled and play simultaneously, best-effort synced).
+	// It is configuration, not connection state: an agent going offline never
+	// removes it from the set, so the output comes back enabled when the agent
+	// reconnects. Only an explicit disable takes an entry out.
 	enabledOutputs map[string]bool
+	// agentResumes holds the last known playback position of agents that went
+	// offline while enabled, so a reconnect can pick up mid-track instead of
+	// restarting it. Keyed by device ID, guarded by devicesMu.
+	agentResumes map[string]*agentResume
 	// primaryOutput is the enabled device that drives the playback clock and
 	// queue advancement. "" = none (no output enabled/connected).
 	primaryOutput string
@@ -173,9 +217,11 @@ func main() {
 		agentTargets:   make(map[string]*agentTarget),
 		webTargets:     make(map[string]*webTarget),
 		enabledOutputs: make(map[string]bool),
+		agentResumes:   make(map[string]*agentResume),
 		prioReturnPos:  -1,
 		mpdHub:         newNotifyHub(),
 	}
+	a.scanner.requiredMounts = cfg.Library.RequiredMounts
 	a.logConfigWarnings()
 
 	a.scanner.onScanComplete = func(fullRebuild bool) {
@@ -304,6 +350,7 @@ func loadConfig() (config, paths, error) {
 	cfg.Server.BaseURL = stringify(server["base_url"])
 	cfg.Server.WebSecret = stringify(server["web_secret"])
 	cfg.Library.MusicDir = stringify(library["music_dir"])
+	cfg.Library.RequiredMounts = stringSlice(library["required_mounts"])
 	cfg.Library.EmbedLyrics = boolFromAny(library["embed_lyrics"], false)
 	cfg.Library.SaveLRC = boolFromAny(library["save_lrc"], false)
 	cfg.Player.ReplayGain = stringify(playerSection["replaygain"])
@@ -328,6 +375,7 @@ web_secret = ""
 
 [library]
 music_dir = ""
+required_mounts = []
 embed_lyrics = false
 save_lrc = false
 
@@ -666,6 +714,16 @@ func (a *app) restoreOutputs() {
 			continue
 		}
 		a.enabledOutputs[id] = true
+		// List the output as offline until its agent connects, so it can be
+		// seen and disabled in the meantime. The agent's own registration
+		// replaces this placeholder with the real device record.
+		if id != "local" && a.devices[id] == nil {
+			a.devices[id] = &device{
+				ID:   id,
+				Name: strings.TrimPrefix(id, "agent-"),
+				Type: "agent",
+			}
+		}
 	}
 	if a.enabledOutputs[so.Primary] {
 		a.primaryOutput = so.Primary
@@ -710,6 +768,41 @@ func (a *app) generateShuffle() {
 	a.shufflePos = 0
 }
 
+// markPrioPlayed remembers that the song with the given queue ID played
+// through a spent priority. Sequential advancement skips it until the cycle
+// wraps, it is played explicitly, or it is prioritized again.
+func (a *app) markPrioPlayed(songID int) {
+	if a.prioPlayedIDs == nil {
+		a.prioPlayedIDs = make(map[int]bool)
+	}
+	a.prioPlayedIDs[songID] = true
+}
+
+// prioPlayedAt reports whether the track at queue position pos already played
+// through a spent priority in the current cycle.
+func (a *app) prioPlayedAt(pos int) bool {
+	if len(a.prioPlayedIDs) == 0 || pos < 0 || pos >= len(a.queueIDs) {
+		return false
+	}
+	return a.prioPlayedIDs[a.queueIDs[pos]]
+}
+
+// nextSequentialPos returns the first position at or after from whose track
+// has not already played through a priority jump. A repeat wraparound starts
+// a new cycle: the played memory is cleared and every track is eligible again.
+func (a *app) nextSequentialPos(from int) int {
+	for pos := from; pos < len(a.playQueue); pos++ {
+		if !a.prioPlayedAt(pos) {
+			return pos
+		}
+	}
+	if a.modeRepeat && len(a.playQueue) > 0 {
+		a.prioPlayedIDs = nil
+		return 0
+	}
+	return -1
+}
+
 // nextQueuePos returns the queue position that should follow the current one,
 // applying playback modes. Returns -1 if there's no next track.
 func (a *app) nextQueuePos() int {
@@ -750,23 +843,19 @@ func (a *app) nextQueuePos() int {
 		if ret < 0 {
 			return -1
 		}
-		// Next track after the saved position
-		next := ret + 1
-		if next >= qLen {
-			if a.modeRepeat {
-				return 0
-			}
-			return -1
-		}
-		return next
+		// Next track after the saved position, skipping tracks that already
+		// played through a priority jump this cycle.
+		return a.nextSequentialPos(ret + 1)
 	}
 
 	if a.modeRandom && qLen > 1 {
 		next := a.shufflePos + 1
 		if next >= len(a.shuffleOrder) {
 			if a.modeRepeat {
-				// Reshuffle for next pass
+				// Reshuffle for next pass — a new cycle, so the priority
+				// played-memory is cleared as well
 				a.generateShuffle()
+				a.prioPlayedIDs = nil
 				// Skip index 0 since that's the track we just finished
 				if len(a.shuffleOrder) > 1 {
 					return a.shuffleOrder[1]
@@ -777,14 +866,9 @@ func (a *app) nextQueuePos() int {
 		}
 		return a.shuffleOrder[next]
 	}
-	next := a.curQueuePos + 1
-	if next >= qLen {
-		if a.modeRepeat {
-			return 0
-		}
-		return -1
-	}
-	return next
+	// Sequential advance, skipping tracks that already played through a
+	// priority jump this cycle.
+	return a.nextSequentialPos(a.curQueuePos + 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -800,6 +884,10 @@ type syncPlan struct {
 	curSongID  string
 	nextPos    int // -1 = none
 	nextSongID string
+	// startPaused loads the current track without starting audio, preserving
+	// a paused transport across track switches. Set by callers after
+	// planSyncTarget based on the transport state they observed.
+	startPaused bool
 }
 
 // nextTrackPlan describes IPC operations to update the preloaded next track.
@@ -852,8 +940,8 @@ func (a *app) execSyncPlanOn(ti targetInfo, plan syncPlan) {
 			_ = at.playlistClear()
 			return
 		}
-		a.logger.Printf("syncTarget(agent %s): play pos %d next=%d", ti.dev.ID, plan.curPos, plan.nextPos)
-		if err := at.agentPlay(plan.curPos, plan.nextPos); err != nil {
+		a.logger.Printf("syncTarget(agent %s): play pos %d next=%d paused=%v", ti.dev.ID, plan.curPos, plan.nextPos, plan.startPaused)
+		if err := at.agentPlay(plan.curPos, plan.nextPos, plan.startPaused); err != nil {
 			a.logger.Printf("syncTarget(agent %s): play failed: %v", ti.dev.ID, err)
 		}
 		return
@@ -910,6 +998,12 @@ func (a *app) execNextTrackPlan(plan nextTrackPlan) {
 
 // execNextTrackPlanOn executes the next-track preload on a single output.
 func (a *app) execNextTrackPlanOn(ti targetInfo, plan nextTrackPlan) {
+	// An output with nothing loaded has no current track to preload after —
+	// agent players no-op this themselves; skip uniformly so stopped outputs
+	// stay untouched until an explicit play.
+	if targetStopped(ti.t) {
+		return
+	}
 	// Agent targets use position-based preload
 	if at, ok := ti.t.(*agentTarget); ok {
 		if err := at.agentPreload(plan.nextPos); err != nil {
@@ -944,24 +1038,31 @@ func (a *app) advanceTrack() {
 
 	// Single mode: stop or repeat the current track
 	if a.modeSingle {
-		plan := a.planSyncTarget()
-		paused := !a.modeRepeat
-		a.playQueueMu.Unlock()
-		a.execSyncPlan(plan)
-		if paused {
-			_ = a.target().setProperty("pause", true)
+		if a.modeRepeat {
+			plan := a.planSyncTarget()
+			a.playQueueMu.Unlock()
+			a.execSyncPlan(plan)
+		} else {
+			// MPD stops after the track in single mode: unload, keep the
+			// queue pointer so play restarts the same track.
+			a.pendingNextPos = -1
+			a.playQueueMu.Unlock()
+			_ = a.target().playlistClear()
 		}
 		a.mpdHub.notify(SubPlayer)
 		return
 	}
 
-	// Auto-consume prioritized tracks: if the track that just finished had priority > 0, remove it
-	isPrioConsume := a.curQueuePos >= 0 && a.curQueuePos < len(a.queuePriority) && a.queuePriority[a.curQueuePos] > 0
+	// A nonzero priority on the finished track is spent: it is reset to zero
+	// further below so the priority jump happens once while the row stays in
+	// the queue (stock-MPD-style reset, no auto-consume).
+	finishedPos := a.curQueuePos
+	finishedHadPrio := finishedPos >= 0 && finishedPos < len(a.queuePriority) && a.queuePriority[finishedPos] > 0
 
-	// Consume mode or priority auto-consume: remove the track that just finished
-	if (a.modeConsume || isPrioConsume) && a.curQueuePos >= 0 && a.curQueuePos < qLen {
+	// Consume mode: remove the track that just finished
+	if a.modeConsume && a.curQueuePos >= 0 && a.curQueuePos < qLen {
 		// Adjust prioReturnPos for the removal
-		if isPrioConsume && a.prioReturnPos > a.curQueuePos {
+		if a.prioReturnPos > a.curQueuePos {
 			a.prioReturnPos--
 		}
 		a.playQueue = append(a.playQueue[:a.curQueuePos], a.playQueue[a.curQueuePos+1:]...)
@@ -1040,10 +1141,34 @@ func (a *app) advanceTrack() {
 		}
 	} else {
 		// No next track was preloaded — end of queue, stop playback
+		if finishedHadPrio {
+			if finishedPos < len(a.queueIDs) {
+				a.markPrioPlayed(a.queueIDs[finishedPos])
+			}
+			a.queuePriority[finishedPos] = 0
+			a.bumpQueueVersionLocked()
+			a.savePlayQueue()
+		}
 		a.playQueueMu.Unlock()
 		_ = a.target().playlistClear()
-		a.mpdHub.notify(SubPlayer)
+		if finishedHadPrio {
+			a.mpdHub.notify(SubPlaylist, SubPlayer)
+		} else {
+			a.mpdHub.notify(SubPlayer)
+		}
 		return
+	}
+
+	// Spend the finished track's priority before computing the next preload,
+	// otherwise nextQueuePos would keep jumping back to it. The played mark
+	// keeps it out of this cycle's sequential rotation.
+	if finishedHadPrio {
+		if finishedPos < len(a.queueIDs) {
+			a.markPrioPlayed(a.queueIDs[finishedPos])
+		}
+		a.queuePriority[finishedPos] = 0
+		a.bumpQueueVersionLocked()
+		a.savePlayQueue()
 	}
 
 	// Compute next preload under lock
@@ -1058,7 +1183,11 @@ func (a *app) advanceTrack() {
 	// IPC calls outside lock — clients can query status while these run
 	a.advancePreload(nextPreloadPos, nextSongID)
 
-	a.mpdHub.notify(SubPlayer)
+	if finishedHadPrio {
+		a.mpdHub.notify(SubPlaylist, SubPlayer)
+	} else {
+		a.mpdHub.notify(SubPlayer)
+	}
 }
 
 // advancePreload updates every enabled output after a natural track advance:
@@ -1084,6 +1213,9 @@ func (a *app) removeFromQueue(pos int) {
 	// Caller must hold playQueueMu
 	if pos < 0 || pos >= len(a.playQueue) {
 		return
+	}
+	if pos < len(a.queueIDs) {
+		delete(a.prioPlayedIDs, a.queueIDs[pos])
 	}
 	a.playQueue = append(a.playQueue[:pos], a.playQueue[pos+1:]...)
 	a.queueIDs = append(a.queueIDs[:pos], a.queueIDs[pos+1:]...)
@@ -1243,6 +1375,14 @@ func (f *fanoutTarget) isRunning() bool {
 	return len(f.infos) > 0
 }
 
+// isStopped reports whether the primary output has nothing loaded.
+func (f *fanoutTarget) isStopped() bool {
+	if len(f.infos) == 0 {
+		return true
+	}
+	return targetStopped(f.infos[0].t)
+}
+
 // noopTarget is returned when no playback device is available.
 type noopTarget struct{}
 
@@ -1254,6 +1394,7 @@ func (noopTarget) playlistMove(int, int) error                   { return nil }
 func (noopTarget) getProperty(string) (any, error)               { return nil, fmt.Errorf("no device") }
 func (noopTarget) setProperty(string, any) error                 { return nil }
 func (noopTarget) isRunning() bool                               { return false }
+func (noopTarget) isStopped() bool                               { return true }
 
 // sortedDevices returns devices in stable order: "local" first, then agents sorted by ID.
 // Caller must hold devicesMu.
@@ -1339,6 +1480,25 @@ func (a *app) addSongsWithPriority(songIDs []string, mode string, priority int) 
 		return a.target().setProperty("pause", false)
 
 	case "insert":
+		if len(a.playQueue) == 0 {
+			// Inserting into an empty queue behaves like add: place the
+			// tracks and point at the first one without touching playback.
+			a.playQueue = append(a.playQueue, songIDs...)
+			a.queuePriority = append(a.queuePriority, prios...)
+			for range songIDs {
+				a.queueIDCounter++
+				a.queueIDs = append(a.queueIDs, a.queueIDCounter)
+			}
+			a.bumpQueueVersionLocked()
+			a.curQueuePos = 0
+			a.pendingNextPos = -1
+			if a.modeRandom {
+				a.generateShuffle()
+			}
+			a.savePlayQueue()
+			a.playQueueMu.Unlock()
+			return nil
+		}
 		pos := a.curQueuePos + 1
 		var newIDs []int
 		for range songIDs {
@@ -1368,11 +1528,12 @@ func (a *app) addSongsWithPriority(songIDs []string, mode string, priority int) 
 		a.queuePriority = newPrios
 		a.bumpQueueVersionLocked()
 		a.savePlayQueue()
-		// Resync preloaded next track since insert may change it
+		// Resync preloaded next track since insert may change it. Queue
+		// mutation only — the transport state is left untouched.
 		ntPlan := a.planNextTrack()
 		a.playQueueMu.Unlock()
 		a.execNextTrackPlan(ntPlan)
-		return a.target().setProperty("pause", false)
+		return nil
 
 	default: // "add"
 		wasEmpty := len(a.playQueue) == 0
@@ -1386,10 +1547,16 @@ func (a *app) addSongsWithPriority(songIDs []string, mode string, priority int) 
 		a.bumpQueueVersionLocked()
 		a.savePlayQueue()
 		if wasEmpty {
+			// Adding to an empty queue only mutates the queue — it must not
+			// act like `play`. Point at the first track but leave every
+			// output untouched (stopped stays stopped); an explicit play
+			// command loads and starts it.
 			a.curQueuePos = 0
-			plan := a.planSyncTarget()
+			a.pendingNextPos = -1
+			if a.modeRandom {
+				a.generateShuffle()
+			}
 			a.playQueueMu.Unlock()
-			a.execSyncPlan(plan)
 		} else {
 			// Only resync preload if the next track actually changed
 			// (e.g. priority tracks were added). Appending to the end
@@ -1487,6 +1654,7 @@ func (a *app) reloadQueueIntoTarget() {
 
 	a.playQueueMu.Lock()
 	plan := a.planSyncTarget()
+	plan.startPaused = true
 	a.playQueueMu.Unlock()
 	a.execSyncPlan(plan)
 
@@ -2008,10 +2176,11 @@ func (a *app) startOutputAt(ti targetInfo, timePos float64, paused bool, volume 
 	// For agent targets, use agentPlayAt to seek atomically before audio starts
 	if at, ok := ti.t.(*agentTarget); ok {
 		at.ensureQueueSync()
-		if err := at.agentPlayAt(plan.curPos, plan.nextPos, timePos); err != nil {
+		if err := at.agentPlayAt(plan.curPos, plan.nextPos, timePos, paused); err != nil {
 			a.logger.Printf("startOutputAt(%s): agentPlayAt failed: %v", ti.dev.ID, err)
 		}
 		if paused {
+			// Redundant on agents that honor paused=, re-pauses older ones.
 			_ = ti.t.setProperty("pause", true)
 		}
 		return
@@ -2089,6 +2258,12 @@ func (a *app) disableOutput(devID string) error {
 	}
 	delete(a.enabledOutputs, devID)
 	t := a.targetForLocked(devID)
+	if t == nil {
+		// Offline output the user no longer wants: nothing left to keep it
+		// listed, so drop the record instead of leaving a ghost behind.
+		delete(a.devices, devID)
+		delete(a.agentResumes, devID)
+	}
 	if a.primaryOutput == devID {
 		a.promotePrimaryLocked()
 	}
@@ -2115,68 +2290,31 @@ func (a *app) toggleOutput(devID string) error {
 	return a.enableOutput(devID)
 }
 
-// switchOutput is the exclusive switch: enable devID and disable everything
-// else, handing playback over at the current position. This preserves the
-// quick "move playback to this room" workflow on top of the toggle model.
-func (a *app) switchOutput(devID string) error {
-	a.devicesMu.Lock()
-	if _, exists := a.devices[devID]; !exists {
-		a.devicesMu.Unlock()
-		return fmt.Errorf("device not found: %s", devID)
+// reloadTransportDecision decides how a (re)connecting enabled agent joins
+// playback: whether to load the queue window at all, and whether it starts
+// paused. Another output actively playing means this one joins it (additive
+// outputs). Otherwise the agent's own stashed state decides, then a paused
+// sibling. A fresh registration with no evidence of active playback anywhere
+// stays silent — Android restarting the app process in the background must
+// never start audio on its own.
+func reloadTransportDecision(othersPlaying, othersPaused bool,
+	resume *agentResume) (load, startPaused bool) {
+	switch {
+	case othersPlaying:
+		return true, false
+	case resume != nil:
+		return true, resume.state == "pause"
+	case othersPaused:
+		return true, true
+	default:
+		return false, false
 	}
-	newT := a.targetForLocked(devID)
-	if newT == nil {
-		a.devicesMu.Unlock()
-		return fmt.Errorf("device %s not connected", devID)
-	}
-	alreadyOnly := a.enabledOutputs[devID] && len(a.enabledOutputs) == 1
-	if alreadyOnly && a.primaryOutput == devID {
-		a.devicesMu.Unlock()
-		return nil
-	}
-	primaryT := a.targetForLocked(a.primaryOutput)
-	// Collect the targets being switched away from
-	var oldTargets []playbackTarget
-	for id := range a.enabledOutputs {
-		if id == devID {
-			continue
-		}
-		if t := a.targetForLocked(id); t != nil {
-			oldTargets = append(oldTargets, t)
-		}
-	}
-	wasEnabled := a.enabledOutputs[devID]
-	a.enabledOutputs = map[string]bool{devID: true}
-	a.primaryOutput = devID
-	dev := a.devices[devID]
-	a.devicesMu.Unlock()
-	a.persistOutputs()
-
-	// Capture handoff state from the old primary before stopping it
-	var timePos, volume float64
-	var paused bool
-	volume = -1
-	if primaryT != nil && primaryT != newT {
-		timePos, paused, volume = captureOutputState(primaryT)
-	}
-
-	for _, t := range oldTargets {
-		stopOutput(t)
-	}
-
-	// If the device was already enabled and playing, leave it undisturbed.
-	if !wasEnabled {
-		a.startOutputAt(targetInfo{dev: dev, t: newT}, timePos, paused, volume)
-	}
-
-	a.logger.Printf("output switched exclusively to: %s", devID)
-	a.mpdHub.notify(SubOutput, SubPlayer, SubMixer)
-	return nil
 }
 
 // reloadQueueIntoAgent loads the 2-track window into a reconnected agent.
 // Called when an agent re-registers and was already the active device.
-func (a *app) reloadQueueIntoAgent(at *agentTarget, dev *device, resume *agentResume) {
+func (a *app) reloadQueueIntoAgent(at *agentTarget, dev *device, resume *agentResume,
+	othersPlaying, othersPaused bool) {
 	// Apply replaygain setting
 	if a.cfg.Player.ReplayGain != "" {
 		_ = at.setProperty("replaygain", a.cfg.Player.ReplayGain)
@@ -2195,10 +2333,12 @@ func (a *app) reloadQueueIntoAgent(at *agentTarget, dev *device, resume *agentRe
 	// there instead of restarting the track from the beginning.
 	if resume != nil && resume.pos == plan.curPos && resume.elapsed > 0 && plan.hasCurrent {
 		a.logger.Printf("agent reload: resuming %s at pos %d elapsed=%.1fs", dev.Name, plan.curPos, resume.elapsed)
-		if err := at.agentPlayAt(plan.curPos, plan.nextPos, resume.elapsed); err != nil {
+		wasPaused := resume.state == "pause"
+		if err := at.agentPlayAt(plan.curPos, plan.nextPos, resume.elapsed, wasPaused); err != nil {
 			a.logger.Printf("agent reload: resume failed, falling back to full reload: %v", err)
 		} else {
-			if resume.state == "pause" {
+			if wasPaused {
+				// Redundant on agents that honor paused=, re-pauses older ones.
 				if _, err := at.sendCommand("pause"); err != nil {
 					a.logger.Printf("agent reload: re-pause failed: %v", err)
 				}
@@ -2207,8 +2347,16 @@ func (a *app) reloadQueueIntoAgent(at *agentTarget, dev *device, resume *agentRe
 		}
 	}
 
+	load, startPaused := reloadTransportDecision(othersPlaying, othersPaused, resume)
+	if !load {
+		a.logger.Printf("agent reload: %s joined with no active playback anywhere — staying silent",
+			dev.Name)
+		return
+	}
+	plan.startPaused = startPaused
 	a.execSyncPlanOn(targetInfo{dev: dev, t: at}, plan)
-	a.logger.Printf("agent reload: loaded 2-track window into %s at pos %d", dev.Name, a.curQueuePos)
+	a.logger.Printf("agent reload: loaded 2-track window into %s at pos %d (paused=%v)",
+		dev.Name, a.curQueuePos, startPaused)
 }
 
 func (a *app) deviceCleanup() {

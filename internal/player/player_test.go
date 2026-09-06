@@ -35,7 +35,7 @@ func (f *fakeMPV) command(args ...any) (mpvResponse, error) {
 		return mpvResponse{}, nil
 	}
 	switch args[0] {
-	case "playlist-clear":
+	case "playlist-clear", "stop":
 		f.slots = nil
 	case "loadfile":
 		if len(args) < 3 {
@@ -77,7 +77,7 @@ func TestPlayPairLoadsCurrentAndNext(t *testing.T) {
 	f := &fakeMPV{}
 	p := newTestPlayer(f)
 
-	err := p.PlayPair(TrackSpec{Path: "current.flac"}, &TrackSpec{Path: "next.flac"}, -1)
+	err := p.PlayPair(TrackSpec{Path: "current.flac"}, &TrackSpec{Path: "next.flac"}, -1, false)
 	if err != nil {
 		t.Fatalf("PlayPair: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestPlayPairSeekUsesLoadStartOption(t *testing.T) {
 	f := &fakeMPV{}
 	p := newTestPlayer(f)
 
-	if err := p.PlayPair(TrackSpec{Path: "current.flac"}, nil, 42.5); err != nil {
+	if err := p.PlayPair(TrackSpec{Path: "current.flac"}, nil, 42.5, false); err != nil {
 		t.Fatalf("PlayPair: %v", err)
 	}
 
@@ -117,10 +117,70 @@ func TestPlayPairSeekUsesLoadStartOption(t *testing.T) {
 	}
 }
 
+func TestPlayPairPausedNeverStartsAudio(t *testing.T) {
+	f := &fakeMPV{}
+	p := newTestPlayer(f)
+
+	if err := p.PlayPair(TrackSpec{Path: "current.flac"}, nil, -1, true); err != nil {
+		t.Fatalf("PlayPair: %v", err)
+	}
+	if p.state != "pause" {
+		t.Fatalf("state = %q after paused PlayPair, want pause", p.state)
+	}
+
+	// The pause must be asserted before the track is loaded so no audio
+	// escapes, and it must never be released.
+	pauseIdx, loadIdx := -1, -1
+	for i, cmd := range f.commands {
+		if strings.HasPrefix(cmd, "set_property pause true") && pauseIdx < 0 {
+			pauseIdx = i
+		}
+		if strings.HasPrefix(cmd, "loadfile current.flac") {
+			loadIdx = i
+		}
+		if strings.HasPrefix(cmd, "set_property pause false") {
+			t.Fatalf("paused PlayPair unpaused the player:\n%s", strings.Join(f.commands, "\n"))
+		}
+	}
+	if pauseIdx < 0 || loadIdx < 0 || pauseIdx > loadIdx {
+		t.Fatalf("pause (idx %d) must precede loadfile (idx %d):\n%s", pauseIdx, loadIdx, strings.Join(f.commands, "\n"))
+	}
+}
+
+func TestStopUnloadsAndResumeStaysSilent(t *testing.T) {
+	f := &fakeMPV{}
+	p := newTestPlayer(f)
+	if err := p.PlayPair(TrackSpec{Path: "current.flac"}, nil, -1, false); err != nil {
+		t.Fatal(err)
+	}
+
+	p.Stop()
+	joined := strings.Join(f.commands, "\n")
+	if !strings.Contains(joined, "stop") {
+		t.Fatalf("Stop must send mpv stop (playlist-clear keeps the playing entry):\n%s", joined)
+	}
+	if p.state != "stop" || p.currentLoaded {
+		t.Fatalf("state=%q currentLoaded=%v after Stop, want stop/false", p.state, p.currentLoaded)
+	}
+
+	// Resuming a stopped player must not unpause mpv — that would audibly
+	// resurrect whatever stale entry mpv still holds.
+	before := len(f.commands)
+	p.Resume()
+	for _, cmd := range f.commands[before:] {
+		if strings.Contains(cmd, "pause false") {
+			t.Fatalf("Resume on stopped player sent %q", cmd)
+		}
+	}
+	if p.state != "stop" {
+		t.Fatalf("state = %q after Resume on stopped player, want stop", p.state)
+	}
+}
+
 func TestPreloadReplacesOnlySlotOne(t *testing.T) {
 	f := &fakeMPV{}
 	p := newTestPlayer(f)
-	if err := p.PlayPair(TrackSpec{Path: "current.flac"}, &TrackSpec{Path: "old-next.flac"}, -1); err != nil {
+	if err := p.PlayPair(TrackSpec{Path: "current.flac"}, &TrackSpec{Path: "old-next.flac"}, -1, false); err != nil {
 		t.Fatal(err)
 	}
 	currentID := f.slots[0]
@@ -142,7 +202,7 @@ func TestPreloadReplacesOnlySlotOne(t *testing.T) {
 func TestClearPreloadKeepsCurrent(t *testing.T) {
 	f := &fakeMPV{}
 	p := newTestPlayer(f)
-	if err := p.PlayPair(TrackSpec{Path: "current.flac"}, &TrackSpec{Path: "next.flac"}, -1); err != nil {
+	if err := p.PlayPair(TrackSpec{Path: "current.flac"}, &TrackSpec{Path: "next.flac"}, -1, false); err != nil {
 		t.Fatal(err)
 	}
 	currentID := f.slots[0]
@@ -161,7 +221,7 @@ func TestClearPreloadKeepsCurrent(t *testing.T) {
 func TestEOFWithNextAdvancesAndCallsOnce(t *testing.T) {
 	f := &fakeMPV{}
 	p := newTestPlayer(f)
-	if err := p.PlayPair(TrackSpec{Path: "current.flac"}, &TrackSpec{Path: "next.flac"}, -1); err != nil {
+	if err := p.PlayPair(TrackSpec{Path: "current.flac"}, &TrackSpec{Path: "next.flac"}, -1, false); err != nil {
 		t.Fatal(err)
 	}
 	oldID := p.currentEntryID
@@ -184,7 +244,7 @@ func TestEOFWithNextAdvancesAndCallsOnce(t *testing.T) {
 func TestEOFWithoutNextStopsAndCallsOnce(t *testing.T) {
 	f := &fakeMPV{}
 	p := newTestPlayer(f)
-	if err := p.PlayPair(TrackSpec{Path: "current.flac"}, nil, -1); err != nil {
+	if err := p.PlayPair(TrackSpec{Path: "current.flac"}, nil, -1, false); err != nil {
 		t.Fatal(err)
 	}
 	oldID := p.currentEntryID
@@ -203,7 +263,7 @@ func TestEOFWithoutNextStopsAndCallsOnce(t *testing.T) {
 func TestEndFileReasonsAndStaleEOFDoNotAdvance(t *testing.T) {
 	f := &fakeMPV{}
 	p := newTestPlayer(f)
-	if err := p.PlayPair(TrackSpec{Path: "current.flac"}, nil, -1); err != nil {
+	if err := p.PlayPair(TrackSpec{Path: "current.flac"}, nil, -1, false); err != nil {
 		t.Fatal(err)
 	}
 	oldID := p.currentEntryID
@@ -213,7 +273,7 @@ func TestEndFileReasonsAndStaleEOFDoNotAdvance(t *testing.T) {
 	p.handleEvent(mpvEvent{Event: "end-file", Reason: "stop", PlaylistEntryID: oldID})
 	expectNoCall(t, calls)
 
-	if err := p.PlayPair(TrackSpec{Path: "new.flac"}, nil, -1); err != nil {
+	if err := p.PlayPair(TrackSpec{Path: "new.flac"}, nil, -1, false); err != nil {
 		t.Fatal(err)
 	}
 	p.handleEvent(mpvEvent{Event: "end-file", Reason: "eof", PlaylistEntryID: oldID})
@@ -227,7 +287,7 @@ func TestEndFileReasonsAndStaleEOFDoNotAdvance(t *testing.T) {
 func TestControlsIssueExpectedCommands(t *testing.T) {
 	f := &fakeMPV{}
 	p := newTestPlayer(f)
-	if err := p.PlayPair(TrackSpec{Path: "current.flac"}, nil, -1); err != nil {
+	if err := p.PlayPair(TrackSpec{Path: "current.flac"}, nil, -1, false); err != nil {
 		t.Fatal(err)
 	}
 	f.commands = nil

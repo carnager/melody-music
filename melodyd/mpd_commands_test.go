@@ -106,10 +106,19 @@ func TestAgentPreloadSendsClearCommand(t *testing.T) {
 
 func TestAgentPlaySendsNegativeNext(t *testing.T) {
 	got := captureAgentCommand(t, func(at *agentTarget) error {
-		return at.agentPlayAt(3, -1, -1)
+		return at.agentPlayAt(3, -1, -1, false)
 	})
 	if got != "play 3 next=-1" {
 		t.Fatalf("agentPlayAt sent %q, want play 3 next=-1", got)
+	}
+}
+
+func TestAgentPlaySendsPausedFlag(t *testing.T) {
+	got := captureAgentCommand(t, func(at *agentTarget) error {
+		return at.agentPlayAt(3, 4, -1, true)
+	})
+	if got != "play 3 next=4 paused=1" {
+		t.Fatalf("agentPlayAt sent %q, want play 3 next=4 paused=1", got)
 	}
 }
 

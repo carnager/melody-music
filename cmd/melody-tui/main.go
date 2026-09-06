@@ -497,6 +497,7 @@ type deviceInfo struct {
 	Name    string
 	Enabled bool
 	Primary bool // drives the playback clock and queue advancement
+	Online  bool // false while an enabled output's agent is away
 }
 
 type trackEntry struct {
@@ -1686,6 +1687,8 @@ func fetchDevices() tea.Msg {
 			Name:    g["outputname"],
 			Enabled: g["outputenabled"] == "1",
 			Primary: g["outputprimary"] == "1",
+			// Daemons predating outputonline only list connected outputs.
+			Online: g["outputonline"] != "0",
 		}
 		if d.Primary {
 			id, _ := strconv.Atoi(d.ID)
@@ -1696,16 +1699,11 @@ func fetchDevices() tea.Msg {
 	return devicesMsg{devices: devs, active: active}
 }
 
-// outputCmd sends an output verb ("toggleoutput", "switchoutput") for the
-// given output id and refreshes the device list.
-func outputCmd(verb, id string) tea.Cmd {
+// outputCmd toggles the given output on/off and refreshes the device list.
+func outputCmd(id string) tea.Cmd {
 	return func() tea.Msg {
 		if mpd != nil {
-			if _, err := mpd.cmd(verb + " " + id); err != nil && verb == "switchoutput" {
-				// Older daemons don't know switchoutput; fall back to the old
-				// exclusive-switch semantics of enableoutput.
-				mpd.cmd("enableoutput " + id)
-			}
+			mpd.cmd("toggleoutput " + id)
 		}
 		return fetchDevices()
 	}
@@ -4025,18 +4023,12 @@ func (m model) handleDeviceKey(key string) (tea.Model, tea.Cmd) {
 			m.devCursor--
 		}
 		return m, nil
-	case "enter":
-		// Exclusive switch: play only on this output. The picker stays
-		// open until explicitly closed (esc/q/D).
+	case "enter", " ":
+		// Toggle this output on/off (plain MPD semantics); picker stays
+		// open for more toggles until explicitly closed (esc/q/D).
 		if m.devCursor < len(m.devices) {
 			dev := m.devices[m.devCursor]
-			return m, outputCmd("switchoutput", dev.ID)
-		}
-	case " ":
-		// Toggle this output on/off; picker stays open for more toggles
-		if m.devCursor < len(m.devices) {
-			dev := m.devices[m.devCursor]
-			return m, outputCmd("toggleoutput", dev.ID)
+			return m, outputCmd(dev.ID)
 		}
 	}
 	return m, nil
@@ -6065,7 +6057,11 @@ func (m model) deviceView() string {
 	for i, d := range m.devices {
 		status := dimStyle.Render("\u25cb")
 		if d.Enabled {
-			status = lipgloss.NewStyle().Foreground(lipgloss.Color("#22c55e")).Render("\u25cf")
+			colour := "#22c55e"
+			if !d.Online {
+				colour = "#eab308" // enabled, waiting for the agent to come back
+			}
+			status = lipgloss.NewStyle().Foreground(lipgloss.Color(colour)).Render("\u25cf")
 		}
 		active := "  "
 		id, _ := strconv.Atoi(d.ID)
@@ -6074,6 +6070,10 @@ func (m model) deviceView() string {
 		}
 
 		name := d.Name
+		if !d.Online {
+			// Enabled but away — it rejoins playback on its own when it returns.
+			name += dimStyle.Render(" (offline)")
+		}
 
 		isCursor := i == m.devCursor
 		s := lipgloss.NewStyle()
@@ -6086,7 +6086,7 @@ func (m model) deviceView() string {
 		}
 	}
 
-	hints := "\n\n" + dimStyle.Render("[↑↓]navigate [space]toggle [enter]switch only [esc]close")
+	hints := "\n\n" + dimStyle.Render("[↑↓]navigate [space/enter]toggle [esc]close")
 	content := header + strings.Join(items, "\n") + hints
 
 	box := lipgloss.NewStyle().

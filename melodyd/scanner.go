@@ -29,6 +29,8 @@ type scanner struct {
 	db                *musicDB
 	logger            *log.Logger
 	transcodeCacheDir string
+	requiredMounts    []string
+	readMounts        func() ([]string, error) // nil uses the platform mount table
 	scanning          bool
 	updateJobID       int                 // last issued MPD update job id
 	lastUpdate        int64               // unix seconds of the last completed scan
@@ -69,6 +71,10 @@ func (s *scanner) fullScan() error {
 
 	start := time.Now()
 	s.logger.Printf("scanner: starting full scan of %s", s.musicDir)
+	storage, err := s.checkStorage()
+	if err != nil {
+		return err
+	}
 
 	// Load all known file mod times in one query for fast skip checks
 	modTimes, err := s.db.allFileModTimes()
@@ -81,7 +87,7 @@ func (s *scanner) fullScan() error {
 	var files []string
 	err = filepath.WalkDir(s.musicDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return nil // skip errors
+			return err // An incomplete listing must never drive deletion.
 		}
 		if d.IsDir() {
 			return nil
@@ -181,9 +187,11 @@ func (s *scanner) fullScan() error {
 			tx.Rollback()
 			return fmt.Errorf("prepare album stmt: %w", err)
 		}
+		// "added" (MPD 0.24 Added timestamp) is set on first insert only; the
+		// conflict branch leaves it alone so it survives rescans.
 		stmtTrack, err := tx.Prepare(`INSERT INTO tracks(album_id, artist, title, track_number, disc_number,
-			duration, path, file_modified, replay_gain_track, replay_gain_album, peak_track, peak_album, rating_hash)
-			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			duration, path, file_modified, replay_gain_track, replay_gain_album, peak_track, peak_album, rating_hash, added)
+			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(strftime('%s','now') AS INTEGER))
 			ON CONFLICT(path) DO UPDATE SET
 				album_id = excluded.album_id,
 				artist = excluded.artist,
@@ -196,7 +204,8 @@ func (s *scanner) fullScan() error {
 				replay_gain_album = excluded.replay_gain_album,
 				peak_track = excluded.peak_track,
 				peak_album = excluded.peak_album,
-				rating_hash = excluded.rating_hash`)
+				rating_hash = excluded.rating_hash
+			RETURNING id`)
 		if err != nil {
 			tx.Rollback()
 			return fmt.Errorf("prepare track stmt: %w", err)
@@ -225,9 +234,10 @@ func (s *scanner) fullScan() error {
 			}
 
 			rHash := trackRatingHash(t.albumArtist, t.album, t.Title, t.TrackNumber)
-			_, err := stmtTrack.Exec(albumID, t.Artist, t.Title, t.TrackNumber, t.DiscNumber,
+			var trackID int64
+			err := stmtTrack.QueryRow(albumID, t.Artist, t.Title, t.TrackNumber, t.DiscNumber,
 				t.Duration, t.Path, t.FileModified,
-				t.ReplayGainTrack, t.ReplayGainAlbum, t.PeakTrack, t.PeakAlbum, rHash)
+				t.ReplayGainTrack, t.ReplayGainAlbum, t.PeakTrack, t.PeakAlbum, rHash).Scan(&trackID)
 			if err != nil {
 				scanErrors++
 				if scanErrors <= 10 {
@@ -249,6 +259,12 @@ func (s *scanner) fullScan() error {
 	}
 
 	// Remove tracks for files that no longer exist
+	if err := storage.verify(); err != nil {
+		return err
+	}
+	if err := storage.remember(); err != nil {
+		return err
+	}
 	pathSet := make(map[string]struct{}, len(files))
 	for _, f := range files {
 		pathSet[f] = struct{}{}
@@ -391,9 +407,16 @@ func (s *scanner) scanPath(uri string) error {
 
 	start := time.Now()
 	s.logger.Printf("scanner: starting targeted scan of %s", target)
+	storage, err := s.checkStorage()
+	if err != nil {
+		return err
+	}
 
 	info, err := os.Stat(target)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("stat update target: %w", err)
+		}
 		// Target is missing — but only treat that as a real deletion if the
 		// target's PARENT directory still exists. A missing parent means either
 		// a malformed URI (e.g. a wrong "flac/…" prefix yielding a doubled path)
@@ -410,6 +433,12 @@ func (s *scanner) scanPath(uri string) error {
 		// and any tracks beneath it (directory). The trailing separator on the
 		// subtree prefix avoids pruning a sibling whose name merely shares this
 		// prefix (e.g. "Album2" vs "Album2 Deluxe").
+		if err := storage.verify(); err != nil {
+			return err
+		}
+		if err := storage.remember(); err != nil {
+			return err
+		}
 		if rmErr := s.db.removeTracksUnderPrefixNotIn(target+string(os.PathSeparator), nil); rmErr != nil {
 			s.logger.Printf("scanner: cleanup error for %s: %v", target, rmErr)
 		}
@@ -428,9 +457,9 @@ func (s *scanner) scanPath(uri string) error {
 	// Collect audio files under the target.
 	var files []string
 	if info.IsDir() {
-		filepath.WalkDir(target, func(path string, d os.DirEntry, walkErr error) error {
+		err := filepath.WalkDir(target, func(path string, d os.DirEntry, walkErr error) error {
 			if walkErr != nil {
-				return nil
+				return walkErr
 			}
 			if d.IsDir() {
 				return nil
@@ -440,6 +469,9 @@ func (s *scanner) scanPath(uri string) error {
 			}
 			return nil
 		})
+		if err != nil {
+			return fmt.Errorf("walk update target: %w", err)
+		}
 	} else if audioExtensions[strings.ToLower(filepath.Ext(target))] {
 		files = append(files, target)
 	}
@@ -463,6 +495,12 @@ func (s *scanner) scanPath(uri string) error {
 
 	// Prune tracks that disappeared from the scanned subtree. For a directory we
 	// constrain cleanup to that subtree; for a single file, to that exact path.
+	if err := storage.verify(); err != nil {
+		return err
+	}
+	if err := storage.remember(); err != nil {
+		return err
+	}
 	prefix := target
 	if info.IsDir() {
 		prefix = target + string(os.PathSeparator)
@@ -647,14 +685,17 @@ func (s *scanner) watchForChanges() {
 			if _, err := os.Stat(p); os.IsNotExist(err) {
 				// File deleted — full scan to clean up
 				s.logger.Printf("scanner: file deleted: %s, triggering cleanup", p)
-				go s.fullScan()
+				s.requestUpdate("")
 				return
 			}
-			if err := s.scanFile(p); err != nil && err.Error() != "unchanged" {
-				s.logger.Printf("scanner: error scanning %s: %v", p, err)
-			} else if err == nil {
-				s.logger.Printf("scanner: updated %s", filepath.Base(p))
+			uri, err := filepath.Rel(s.musicDir, p)
+			if err != nil {
+				s.logger.Printf("scanner: invalid watcher path %s: %v", p, err)
+				continue
 			}
+			// Use the same serialized storage checks as MPD updates, including
+			// mount discovery when files arrive on a newly mounted share.
+			s.requestUpdate(uri)
 		}
 	}
 
@@ -1028,8 +1069,8 @@ func mp3Duration(f *os.File) float64 {
 
 	b1 := buf[off+1]
 	b2 := buf[off+2]
-	version := (b1 >> 3) & 0x03    // 0=2.5, 2=2, 3=1
-	layer := (b1 >> 1) & 0x03      // 1=III, 2=II, 3=I
+	version := (b1 >> 3) & 0x03 // 0=2.5, 2=2, 3=1
+	layer := (b1 >> 1) & 0x03   // 1=III, 2=II, 3=I
 	bitrateIdx := (b2 >> 4) & 0x0F
 	sampleIdx := (b2 >> 2) & 0x03
 
@@ -1184,7 +1225,6 @@ func parseTagFloat(v any) float64 {
 	f, _ := strconv.ParseFloat(strings.TrimSpace(s), 64)
 	return f
 }
-
 
 // ---------------------------------------------------------------------------
 // Cover art extraction

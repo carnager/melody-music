@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bufio"
+	"io"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // newOutputsTestApp builds an app with three registered web devices and no
@@ -26,6 +30,7 @@ func newOutputsTestApp(t *testing.T) (*app, map[string]*webTarget) {
 		agentTargets:   make(map[string]*agentTarget),
 		webTargets:     wts,
 		enabledOutputs: make(map[string]bool),
+		agentResumes:   make(map[string]*agentResume),
 		mpdHub:         newNotifyHub(),
 	}
 	a.paths.ActiveDeviceFile = filepath.Join(t.TempDir(), "active_device")
@@ -123,26 +128,6 @@ func TestToggleOutput(t *testing.T) {
 	}
 }
 
-func TestSwitchOutputExclusive(t *testing.T) {
-	a, wts := newOutputsTestApp(t)
-	a.enabledOutputs = map[string]bool{"web-a": true, "web-b": true, "web-c": true}
-	a.primaryOutput = "web-a"
-	wts["web-a"].paused = false
-
-	if err := a.switchOutput("web-b"); err != nil {
-		t.Fatalf("switchOutput: %v", err)
-	}
-	if len(a.enabledOutputs) != 1 || !a.enabledOutputs["web-b"] {
-		t.Fatalf("enabled = %v, want only web-b", a.enabledOutputs)
-	}
-	if a.primaryOutput != "web-b" {
-		t.Fatalf("primary = %q, want web-b", a.primaryOutput)
-	}
-	if !wts["web-a"].paused || !wts["web-c"].paused {
-		t.Fatal("old outputs not stopped by exclusive switch")
-	}
-}
-
 func TestOutputsPersistenceRoundTripAndMigration(t *testing.T) {
 	a, _ := newOutputsTestApp(t)
 	a.enabledOutputs = map[string]bool{"agent-kitchen": true, "local": true}
@@ -180,6 +165,151 @@ func TestOutputsPersistenceRoundTripAndMigration(t *testing.T) {
 	web.restoreOutputs()
 	if len(web.enabledOutputs) != 0 || web.primaryOutput != "" {
 		t.Fatalf("web enabled = %v primary = %q, want pruned", web.enabledOutputs, web.primaryOutput)
+	}
+}
+
+// registerFakeAgent adds a connected agent output playing at pos/elapsed.
+func registerFakeAgent(a *app, devID, name string, pos int, elapsed float64) *agentTarget {
+	at := &agentTarget{
+		alive:     true,
+		app:       a,
+		devID:     devID,
+		agState:   "play",
+		agPos:     pos,
+		agElapsed: elapsed,
+	}
+	a.devices[devID] = &device{ID: devID, Name: name, Type: "agent"}
+	a.agentTargets[devID] = at
+	return at
+}
+
+// An agent losing its connection must not disable its output — that is what
+// made playback stop for good when a phone briefly dropped off the network.
+func TestAgentDisconnectKeepsOutputEnabled(t *testing.T) {
+	a, _ := newOutputsTestApp(t)
+	at := registerFakeAgent(a, "agent-phone", "phone", 4, 61.5)
+	a.enabledOutputs["agent-phone"] = true
+	a.primaryOutput = "agent-phone"
+
+	a.releaseAgent("agent-phone", "phone", at)
+
+	if !a.enabledOutputs["agent-phone"] {
+		t.Fatalf("enabled = %v, want agent-phone to survive the disconnect", a.enabledOutputs)
+	}
+	if a.devices["agent-phone"] == nil {
+		t.Fatal("device record dropped; output would vanish from the outputs list")
+	}
+	if a.targetForLocked("agent-phone") != nil {
+		t.Fatal("target still resolvable after disconnect, want offline")
+	}
+	resume := a.agentResumes["agent-phone"]
+	if resume == nil || resume.pos != 4 || resume.elapsed < 61.5 {
+		t.Fatalf("resume = %+v, want pos 4 at >=61.5s", resume)
+	}
+
+	// Reconnecting consumes the stashed position and re-enters playback.
+	a.restoreOutputs() // no-op here, but must not disturb the live set
+	if got := a.enabledOutputs["agent-phone"]; !got {
+		t.Fatal("enable lost after restoreOutputs")
+	}
+}
+
+// A disconnect while other outputs are playing hands the clock over instead of
+// stalling on the departed device.
+func TestAgentDisconnectPromotesPrimary(t *testing.T) {
+	a, _ := newOutputsTestApp(t)
+	at := registerFakeAgent(a, "agent-phone", "phone", 0, 0)
+	a.enabledOutputs = map[string]bool{"agent-phone": true, "web-b": true}
+	a.primaryOutput = "agent-phone"
+
+	a.releaseAgent("agent-phone", "phone", at)
+
+	if a.primaryOutput != "web-b" {
+		t.Fatalf("primary = %q, want web-b promoted", a.primaryOutput)
+	}
+	if !a.enabledOutputs["agent-phone"] {
+		t.Fatal("departed output was disabled, want it kept for its return")
+	}
+}
+
+// An agent that was never enabled leaves no trace behind.
+func TestAgentDisconnectDropsDisabledDevice(t *testing.T) {
+	a, _ := newOutputsTestApp(t)
+	at := registerFakeAgent(a, "agent-guest", "guest", 0, 0)
+
+	a.releaseAgent("agent-guest", "guest", at)
+
+	if a.devices["agent-guest"] != nil {
+		t.Fatal("disabled agent left a ghost device behind")
+	}
+}
+
+// A replaced connection must not tear down the newer one.
+func TestReleaseAgentIgnoresStaleConnection(t *testing.T) {
+	a, _ := newOutputsTestApp(t)
+	stale := registerFakeAgent(a, "agent-phone", "phone", 0, 0)
+	fresh := registerFakeAgent(a, "agent-phone", "phone", 0, 0)
+	a.enabledOutputs["agent-phone"] = true
+
+	a.releaseAgent("agent-phone", "phone", stale)
+
+	if a.agentTargets["agent-phone"] != fresh {
+		t.Fatal("stale cleanup removed the newer connection")
+	}
+}
+
+// An enabled-but-offline primary must not hold the clock hostage: whoever
+// connects next takes it, otherwise its track-end reports are ignored as
+// non-primary and the queue never advances.
+func TestOnlineOutputTakesClockFromOfflinePrimary(t *testing.T) {
+	a, _ := newOutputsTestApp(t)
+	at := registerFakeAgent(a, "agent-phone", "phone", 0, 0)
+	a.enabledOutputs = map[string]bool{"agent-phone": true, "web-b": true}
+	a.primaryOutput = "agent-phone"
+	a.releaseAgent("agent-phone", "phone", at)
+	// Simulate a restart that restored the offline agent as primary.
+	a.primaryOutput = "agent-phone"
+
+	if err := a.enableOutput("web-c"); err != nil {
+		t.Fatalf("enableOutput: %v", err)
+	}
+	if a.primaryOutput != "web-c" {
+		t.Fatalf("primary = %q, want the online output to take the clock", a.primaryOutput)
+	}
+	if !a.isPrimary("web-c") {
+		t.Fatal("online output not primary; its track-end reports would be dropped")
+	}
+}
+
+// Outputs enabled before a daemon restart are listed (offline) right away, so
+// they can be turned off without waiting for the agent to come back.
+func TestRestoreOutputsListsOfflineDevices(t *testing.T) {
+	a, _ := newOutputsTestApp(t)
+	a.enabledOutputs = map[string]bool{"agent-kitchen": true}
+	a.primaryOutput = "agent-kitchen"
+	a.persistOutputs()
+
+	b, _ := newOutputsTestApp(t)
+	b.paths.ActiveDeviceFile = a.paths.ActiveDeviceFile
+	b.restoreOutputs()
+
+	dev := b.devices["agent-kitchen"]
+	if dev == nil {
+		t.Fatal("restored output is not listed")
+	}
+	if dev.Name != "kitchen" {
+		t.Fatalf("placeholder name = %q, want kitchen", dev.Name)
+	}
+	if b.targetForLocked("agent-kitchen") != nil {
+		t.Fatal("placeholder resolves to a target, want offline")
+	}
+
+	// Disabling it while offline clears the record rather than leaving a ghost.
+	if err := b.disableOutput("agent-kitchen"); err != nil {
+		t.Fatalf("disableOutput: %v", err)
+	}
+	if b.devices["agent-kitchen"] != nil || b.enabledOutputs["agent-kitchen"] {
+		t.Fatalf("offline output not fully removed: devices=%v enabled=%v", b.devices["agent-kitchen"], b.enabledOutputs)
 	}
 }
 
@@ -249,5 +379,84 @@ func TestTrackEndedNonPrimaryIgnored(t *testing.T) {
 	}
 	if a.curQueuePos != 1 {
 		t.Fatalf("primary trackended: pos = %d, want 1", a.curQueuePos)
+	}
+}
+
+// newPipeAgent returns an agent target wired to an in-memory connection whose
+// far end answers nothing, so commands run into their timeout.
+func newPipeAgent(t *testing.T) *agentTarget {
+	t.Helper()
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	})
+	go func() { _, _ = io.Copy(io.Discard, serverConn) }()
+	return &agentTarget{
+		writer: bufio.NewWriter(clientConn),
+		conn:   clientConn,
+		alive:  true,
+		done:   make(chan struct{}),
+		app:    &app{},
+		respCh: make(chan agentResp, 1),
+	}
+}
+
+// A keepalive ping that goes unanswered must not by itself take the agent out
+// of playback — a phone on mobile data can stall and recover.
+func TestUnansweredPingDoesNotKillAgent(t *testing.T) {
+	old := agentCmdTimeout
+	agentCmdTimeout = 30 * time.Millisecond
+	t.Cleanup(func() { agentCmdTimeout = old })
+
+	at := newPipeAgent(t)
+
+	if _, err := at.sendCommandOpt("ping", false); err == nil {
+		t.Fatal("unanswered ping returned no error")
+	}
+	if !at.alive || !at.isRunning() {
+		t.Fatal("agent marked dead after one missed keepalive ping")
+	}
+
+	// A real command that times out still does mark it dead.
+	if _, err := at.sendCommand("play 0 1"); err == nil {
+		t.Fatal("unanswered command returned no error")
+	}
+	if at.alive {
+		t.Fatal("agent still alive after a command timed out")
+	}
+}
+
+// A late response to a timed-out command must not be handed to the next one.
+func TestStaleResponseIsNotReusedByNextCommand(t *testing.T) {
+	old := agentCmdTimeout
+	agentCmdTimeout = 30 * time.Millisecond
+	t.Cleanup(func() { agentCmdTimeout = old })
+
+	at := newPipeAgent(t)
+
+	if _, err := at.sendCommandOpt("ping", false); err == nil {
+		t.Fatal("unanswered ping returned no error")
+	}
+	// The agent finally answers the ping, after the caller gave up.
+	at.respCh <- agentResp{lines: []string{"stale"}}
+
+	lines, err := at.sendCommandOpt("ping", false)
+	if err == nil {
+		t.Fatalf("second ping took the stale response %v as its own", lines)
+	}
+}
+
+// The disconnect log names the cause, so a network drop can be told apart
+// from a keepalive timeout after the fact.
+func TestDisconnectReasonIsRecordedOnce(t *testing.T) {
+	at := newPipeAgent(t)
+	if got := at.disconnectReason(); got != "connection closed" {
+		t.Fatalf("default reason = %q", got)
+	}
+	at.closeWithReason("keepalive: 2 missed pings")
+	at.closeWithReason("read error: later observer")
+	if got := at.disconnectReason(); got != "keepalive: 2 missed pings" {
+		t.Fatalf("reason = %q, want the first one recorded", got)
 	}
 }

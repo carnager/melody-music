@@ -2718,9 +2718,9 @@ fun DevicesSheet(vm: MainViewModel, onDismiss: () -> Unit) {
                             }
                         },
                         modifier = Modifier.clickable {
-                            // Tap the row = play only here (exclusive switch)
-                            vm.switchDevice(dev.id)
-                            onDismiss()
+                            // Tap the row = toggle, same as the switch (plain
+                            // MPD output semantics); dialog stays open
+                            vm.toggleDevice(dev.id)
                         }
                     )
                 }

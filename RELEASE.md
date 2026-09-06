@@ -8,6 +8,7 @@ Pick the next version, then update:
 
 - `CHANGELOG.md`: move relevant `Unreleased` entries under the new version/date.
 - `PKGBUILD`: set `pkgver` to the new version without the leading `v`.
+- `melodyd/main.go`: set `melodyVersion` to the new version (and back to `<next>-dev` after tagging).
 - `android/app/build.gradle.kts`: increment `versionCode` and set `versionName`.
 
 Run the normal checks before tagging:

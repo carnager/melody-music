@@ -1405,9 +1405,9 @@
   function enableWebCmd() {
     if (webDeviceId) {
       webIsActive = true;
-      // Exclusive switch: starting playback in the browser takes over from
-      // other outputs instead of joining them.
-      return "switchoutput " + webDeviceId + "\n";
+      // Plain MPD toggle semantics: starting playback in the browser joins
+      // the enabled outputs; other outputs are toggled via the outputs menu.
+      return "enableoutput " + webDeviceId + "\n";
     }
     return "";
   }

@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+
+- melodyd: MPD 0.24 `Added` library support. Every track now carries a database insertion timestamp that survives rescans (existing libraries inherit their original scan-in time), song listings include `Added:` and `Last-Modified:` lines, and `find`/`search` accept `sort [-]Added` (plus `Last-Modified`, `Artist`, `AlbumArtist`, `Album`, `Title`, `Track`, `Disc`, `Date`) with `window` applied after sorting. The `added-since` and `modified-since` filters and the standalone `base` filter are supported, so 0.24-era clients can query recently added music (`find "(base '')" sort -Added window 0:50`). The connection banner now advertises `MPD 0.24.0`, and the "latest" album listings (`list ... sort latest`, `melody_albums_latest`) order by insertion time instead of file mtime, with mtime as tiebreaker.
+
+### Changed
+
+- Outputs are now plain MPD toggles, nothing else: the `switchoutput` extension (exclusive switch: enable one output, disable all others) is removed from melodyd and from every client. melody-tui's output picker toggles on both Enter and Space, the Android output list row toggles like its switch, and starting playback in the web client joins the enabled outputs instead of taking over. The Android mobile-data prompt ("play on phone?") still moves playback to the phone, but does it with standard `enableoutput`/`disableoutput` commands.
+
+### Bug Fixes
+
+- melodyd: an agent that (re)registers no longer starts playback on its own. The reload path only honored the agent's stashed pause state, so a fresh registration — Android restarting the app process in the background, or a daemon restart wiping the in-memory stash — loaded the queue and played it even though nothing was supposed to be playing. Joining now follows the cached transport state of the other enabled outputs: it plays only when another output is actively playing (additive-output semantics), loads paused when the agent's own stash or a sibling says paused, and stays completely silent when there is no evidence of active playback anywhere. This is the phone-randomly-starts-playing bug.
+- melodyd: prioritized tracks are no longer removed from the queue after playing. The priority jump still plays them next (in any mode) and playback still returns to the saved queue position afterwards, but the track now stays in the queue with its priority reset to zero — matching stock MPD's reset-on-play — instead of being auto-consumed. The track is remembered as played for the rest of the cycle, so the natural sequence skips it instead of playing it twice; the memory clears on a repeat wraparound (a new cycle), when the track is played explicitly, when it is prioritized again, or when the queue is cleared. This mirrors how stock MPD's hidden order array keeps a priority-played song behind the play cursor until the next reshuffle. Consume mode continues to remove finished tracks as before.
+- melodyd: managing the queue never changes playback state anymore. `add`, `addid`, `findadd`, `searchadd`, `load`, and `enqueue add|insert` only mutate the queue — adding to an empty queue no longer starts playback (MPD's add contract does not imply play), and insert no longer resumes a paused player. Stopped stays stopped, paused stays paused, and no output produces an audible transient; an explicit `play` (or replace-and-play) still starts playback, now loading any output that had nothing loaded, agents and web targets alike. Clients can detect fixed servers via the new `melody_version` command advertised in `commands`.
+- melodyd: `next`, `previous`, and `seek` to another song preserve the transport — paused stays paused on the new track, and while stopped they just move the queue pointer without starting any output. Deleting the currently playing track while paused loads its successor paused instead of starting playback. The agent `play` protocol command gained a `paused=1` flag (honored by the local, satellite, and Android players; older agents ignore it and are re-paused a moment later) so the track switches without an audible transient.
+- melodyd: `shuffle` no longer reloads — and thereby restarts — the current track; it keeps playing (or stays paused) and only the preloaded next track is resynced.
+- melodyd: `enqueue insert` into an empty queue crashed the daemon (slice out of range); it now behaves like add.
+- melodyd: `status` reports `state: stop` when the primary output has nothing loaded, instead of misreporting `pause`.
+- melodyd: `stop` really stops now instead of pausing: outputs are unloaded, `status` reports `stop`, and the next `play` restarts the current track from the beginning (MPD semantics). Single mode without repeat also stops after the track instead of holding it paused.
+- melodyd: replacing the queue while paused (the clear/add/play sequence clients send) could audibly resume the *old* track: the server's cached agent state lagged the just-sent stop by up to one 2s report interval, so `play` skipped the resync and unpaused a track mpv still held — mpv's `playlist-clear` keeps the playing entry, so the player's stop didn't actually unload it. The server now updates its cached agent state the moment it sends play/pause/resume/stop, and the player's stop uses mpv `stop` (a stopped player also refuses to resume).
+- melodyd: keep outputs enabled when an agent loses its connection. Enabled outputs are configuration, like MPD's, not a reflection of what is currently reachable — a phone dropping off the network no longer disables its output, and playback resumed on it from the same position when it comes back. Previously the enable was deleted (and persisted), so a brief disconnect stopped the music for good until the output was re-enabled by hand.
+- melodyd: list enabled-but-offline outputs (new `outputonline` field in `outputs`) so they can be seen and disabled while away, and restore them across daemon restarts. melody-tui marks them `(offline)` with an amber dot; the Android output list now reflects the real online state instead of always showing green.
+- melodyd: hand the playback clock to a connecting output when the primary is enabled but offline. A primary that never came back caused every other output's track-end report to be ignored as non-primary, stalling the queue at the end of the track.
+- melodyd: tolerate a single missed keepalive ping instead of dropping the agent immediately — one stalled response on a mobile connection is not proof of death. A late response to a timed-out command is also no longer handed to the next one.
+- melodyd: log why an agent disconnected (closed connection, read error, keepalive timeout, or replacement) rather than reporting the disconnect alone.
+
 ## 1.3.0 (2026-07-20)
 
 ### Features

@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"strconv"
@@ -146,6 +148,14 @@ type mpdConn struct {
 	windowEnd   int // -1 = no window
 	windowPos   int
 
+	// Sort support for search/find commands ("sort [-]TAG"). Empty = no sort.
+	sortTag  string
+	sortDesc bool
+
+	// added-since / modified-since filters (unix seconds, 0 = inactive)
+	addedSince    int64
+	modifiedSince int64
+
 	// enqueueMode selects how matched tracks are queued by the enqueue command
 	// ("add", "insert", or "replace"). Empty means the default "add" behaviour
 	// used by findadd/searchadd.
@@ -178,7 +188,9 @@ func (c *mpdConn) serve() {
 	c.app.mpdHub.register(c)
 	defer c.app.mpdHub.unregister(c)
 
-	c.writeLine("OK MPD 0.23.5")
+	// 0.24 signals support for the Added song attribute, "sort Added" on
+	// find/search, and the added-since filter.
+	c.writeLine("OK MPD 0.24.0")
 	c.flush()
 
 	for {
@@ -509,8 +521,30 @@ func (c *mpdConn) handleAgentRegister(args []string) {
 		if oldAt.instanceID != "" && instanceID != "" && oldAt.instanceID != instanceID {
 			c.app.logger.Printf("WARNING: agent %s replaced by a DIFFERENT process (old instance=%s, new instance=%s) — two agents may be running with the same name, fighting over the registration", name, oldAt.instanceID, instanceID)
 		}
-		oldAt.close()
+		oldAt.closeWithReason("replaced by a new connection from the same agent")
 		c.app.logger.Printf("agent replaced: %s (old connection closed)", name)
+	}
+	// No live predecessor, but the agent may have dropped off earlier while
+	// enabled — pick up where that connection left off.
+	if resume == nil {
+		resume = c.app.agentResumes[devID]
+	}
+	delete(c.app.agentResumes, devID)
+	// Cached transport states of the other enabled outputs decide how this
+	// agent joins playback; computed before inserting it so it cannot see
+	// itself, and from caches so no IPC runs under the lock.
+	othersPlaying := false
+	othersPaused := false
+	for id, other := range c.app.agentTargets {
+		if id == devID || !c.app.enabledOutputs[id] {
+			continue
+		}
+		switch other.cachedState() {
+		case "play":
+			othersPlaying = true
+		case "pause":
+			othersPaused = true
+		}
 	}
 	c.app.devices[devID] = dev
 	c.app.agentTargets[devID] = at
@@ -519,7 +553,10 @@ func (c *mpdConn) handleAgentRegister(args []string) {
 		c.app.enabledOutputs[devID] = true
 	}
 	isEnabled := c.app.enabledOutputs[devID]
-	if isEnabled && c.app.primaryOutput == "" {
+	// Take the clock if nothing holds it, or if the holder is itself offline —
+	// a primary that never came back would otherwise ignore this agent's
+	// track-end reports and stall the queue.
+	if isEnabled && (c.app.primaryOutput == "" || c.app.targetForLocked(c.app.primaryOutput) == nil) {
 		c.app.primaryOutput = devID
 	}
 	c.app.devicesMu.Unlock()
@@ -527,7 +564,11 @@ func (c *mpdConn) handleAgentRegister(args []string) {
 		c.app.persistOutputs()
 	}
 
-	c.app.logger.Printf("agent registered: %s (id=%s, addr=%s)", name, devID, dev.Address)
+	if isEnabled {
+		c.app.logger.Printf("agent registered: %s (id=%s, addr=%s, output enabled — rejoining playback)", name, devID, dev.Address)
+	} else {
+		c.app.logger.Printf("agent registered: %s (id=%s, addr=%s)", name, devID, dev.Address)
+	}
 	c.writeLine("OK")
 	c.flush()
 
@@ -538,49 +579,73 @@ func (c *mpdConn) handleAgentRegister(args []string) {
 	// survived a daemon restart), reload the play queue into it so playback
 	// continues seamlessly.
 	if isEnabled {
-		c.app.reloadQueueIntoAgent(at, dev, resume)
+		c.app.reloadQueueIntoAgent(at, dev, resume, othersPlaying, othersPaused)
 	}
 
 	c.app.mpdHub.notify(SubOutput)
 
-	// Keepalive: ping agent periodically to detect disconnection
+	// Keepalive: ping the agent periodically to detect a dead connection.
+	// A single missed ping is not proof of death — a phone on mobile data can
+	// stall past the response timeout and recover — so only give up after two
+	// in a row. A ping that times out is not treated as fatal to the
+	// connection either, which is why it uses the non-fatal send.
 	go func() {
+		misses := 0
 		for {
-			time.Sleep(15 * time.Second)
-			if _, err := at.sendCommand("ping"); err != nil {
-				at.close()
+			time.Sleep(agentPingInterval)
+			if _, err := at.sendCommandOpt("ping", false); err != nil {
+				misses++
+				if misses < agentPingMisses {
+					c.app.logger.Printf("agent %s: keepalive miss %d/%d (%v)", name, misses, agentPingMisses, err)
+					continue
+				}
+				at.closeWithReason(fmt.Sprintf("keepalive: %d missed pings (%v)", misses, err))
 				return
 			}
+			misses = 0
 		}
 	}()
 
 	// Block until agent disconnects
 	<-at.done
 
-	// Clean up — only remove if we're still the registered agent (a newer
-	// connection may have already replaced us)
-	c.app.devicesMu.Lock()
-	removed := false
-	wasEnabled := false
-	if c.app.agentTargets[devID] == at {
-		removed = true
-		delete(c.app.devices, devID)
-		delete(c.app.agentTargets, devID)
-		wasEnabled = c.app.enabledOutputs[devID]
-		delete(c.app.enabledOutputs, devID)
-		if c.app.primaryOutput == devID {
-			// Other enabled outputs keep playing; hand the clock to one of them.
-			c.app.promotePrimaryLocked()
+	c.app.releaseAgent(devID, name, at)
+}
+
+// releaseAgent cleans up after an agent connection ends. It only acts if the
+// connection is still the registered one — a newer connection may have already
+// replaced it.
+//
+// A dropped connection is not the user turning the output off, so the device
+// keeps its place in enabledOutputs (MPD never resets outputs) and stays listed
+// as an offline output, which targetForLocked reports by returning nil. The
+// agent's last playback position is stashed so its reconnect resumes mid-track
+// rather than restarting it.
+func (a *app) releaseAgent(devID, name string, at *agentTarget) {
+	a.devicesMu.Lock()
+	if a.agentTargets[devID] == at {
+		delete(a.agentTargets, devID)
+		if a.enabledOutputs[devID] {
+			if snap := at.playbackSnapshot(); snap != nil {
+				a.agentResumes[devID] = snap
+			}
+			if d, ok := a.devices[devID]; ok {
+				d.LastSeen = time.Now()
+			}
+			a.logger.Printf("agent disconnected: %s — %s (output stays enabled, offline until it returns)", name, at.disconnectReason())
+		} else {
+			delete(a.devices, devID)
+			a.logger.Printf("agent disconnected: %s — %s", name, at.disconnectReason())
 		}
-		c.app.logger.Printf("agent disconnected: %s", name)
+		if a.primaryOutput == devID {
+			// Other enabled outputs keep playing; hand the clock to one of them.
+			a.promotePrimaryLocked()
+		}
 	} else {
-		c.app.logger.Printf("agent replaced (stale cleanup skipped): %s", name)
+		a.logger.Printf("agent replaced (stale cleanup skipped): %s", name)
 	}
-	c.app.devicesMu.Unlock()
-	if removed && wasEnabled {
-		c.app.persistOutputs()
-	}
-	c.app.mpdHub.notify(SubOutput, SubPlayer)
+	a.devicesMu.Unlock()
+	a.mpdHub.notify(SubOutput, SubPlayer)
 }
 
 // ---------------------------------------------------------------------------
@@ -596,6 +661,17 @@ func (c *mpdConn) handleAgentRegister(args []string) {
 // Command responses (OK/ACK) are routed to a channel for sendCommand.
 // ---------------------------------------------------------------------------
 
+// Keepalive and command timing. An agent is only declared dead after
+// agentPingMisses consecutive unanswered pings, so a transient stall on a
+// mobile connection does not cost it its place in playback.
+// Variables rather than constants so tests can shorten them.
+var (
+	agentCmdTimeout   = 10 * time.Second
+	agentPingInterval = 15 * time.Second
+)
+
+const agentPingMisses = 2
+
 type agentTarget struct {
 	cmdMu     sync.Mutex // serializes sendCommand (write + wait for response)
 	writer    *bufio.Writer
@@ -605,6 +681,11 @@ type agentTarget struct {
 	closeOnce sync.Once
 	app       *app
 	devID     string
+
+	// Why the connection ended, for the disconnect log. First reason wins:
+	// whatever noticed first is the cause, later observers see the aftermath.
+	reasonMu    sync.Mutex
+	closeReason string
 
 	// Random per-process ID from agent_register (empty for older agents).
 	// Used to detect two distinct processes registering under the same name.
@@ -646,6 +727,14 @@ func (at *agentTarget) isStopped() bool {
 	return at.agState == "stop"
 }
 
+// cachedState returns the agent's last reported transport state ("play",
+// "pause", "stop", or "" before the first report), without any IPC.
+func (at *agentTarget) cachedState() string {
+	at.stateMu.RLock()
+	defer at.stateMu.RUnlock()
+	return at.agState
+}
+
 // playbackSnapshot returns the agent's last reported playback position,
 // extrapolated to now for playing tracks. Returns nil if the agent was
 // stopped or if the track would have ended by now.
@@ -665,6 +754,29 @@ func (at *agentTarget) playbackSnapshot() *agentResume {
 	return &agentResume{state: at.agState, pos: at.agPos, elapsed: elapsed}
 }
 
+// closeWithReason records why the connection is ending, then closes it. The
+// reason is reported by the disconnect log so a drop can be told apart from a
+// keepalive timeout or a deliberate replacement after the fact.
+func (at *agentTarget) closeWithReason(reason string) {
+	at.reasonMu.Lock()
+	if at.closeReason == "" {
+		at.closeReason = reason
+	}
+	at.reasonMu.Unlock()
+	at.close()
+}
+
+// disconnectReason returns the recorded cause, or a generic one if the
+// connection ended without any observer naming it.
+func (at *agentTarget) disconnectReason() string {
+	at.reasonMu.Lock()
+	defer at.reasonMu.Unlock()
+	if at.closeReason == "" {
+		return "connection closed"
+	}
+	return at.closeReason
+}
+
 func (at *agentTarget) close() {
 	at.closeOnce.Do(func() {
 		at.alive = false
@@ -676,11 +788,15 @@ func (at *agentTarget) close() {
 // readLoop processes all incoming messages from the agent.
 // Must be run as a goroutine. Calls close() on error.
 func (at *agentTarget) readLoop(reader *bufio.Reader) {
-	defer at.close()
 	var pendingLines []string
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				at.closeWithReason("agent closed the connection")
+			} else {
+				at.closeWithReason(fmt.Sprintf("read error: %v", err))
+			}
 			return
 		}
 		line = strings.TrimRight(line, "\r\n")
@@ -771,12 +887,28 @@ func (at *agentTarget) handleAgentAdvance(line string) {
 }
 
 // sendCommand sends a command to the agent and waits for the response.
-// Serialized by cmdMu so only one command is in flight at a time.
+// Serialized by cmdMu so only one command is in flight at a time. A timeout
+// marks the agent dead — callers of real commands cannot do anything useful
+// with an agent that stopped answering.
 func (at *agentTarget) sendCommand(cmdLine string) ([]string, error) {
+	return at.sendCommandOpt(cmdLine, true)
+}
+
+// sendCommandOpt is sendCommand with control over whether a response timeout
+// marks the connection dead. The keepalive passes false so that one slow
+// response — routine on a phone whose radio just stalled — does not by itself
+// take the agent out of playback.
+func (at *agentTarget) sendCommandOpt(cmdLine string, fatalTimeout bool) ([]string, error) {
 	at.cmdMu.Lock()
 	defer at.cmdMu.Unlock()
 	if !at.alive {
 		return nil, fmt.Errorf("agent disconnected")
+	}
+	// Discard any response left over from a command that timed out earlier —
+	// it belongs to that command, not this one.
+	select {
+	case <-at.respCh:
+	default:
 	}
 	fmt.Fprintf(at.writer, "%s\n", cmdLine)
 	if err := at.writer.Flush(); err != nil {
@@ -788,8 +920,10 @@ func (at *agentTarget) sendCommand(cmdLine string) ([]string, error) {
 		return resp.lines, resp.err
 	case <-at.done:
 		return nil, fmt.Errorf("agent disconnected")
-	case <-time.After(10 * time.Second):
-		at.alive = false
+	case <-time.After(agentCmdTimeout):
+		if fatalTimeout {
+			at.alive = false
+		}
 		return nil, fmt.Errorf("agent response timeout")
 	}
 }
@@ -825,20 +959,43 @@ func (at *agentTarget) ensureQueueSync() {
 	}
 }
 
-// agentPlay tells the agent to play a queue position with optional next track preload.
-func (at *agentTarget) agentPlay(curPos, nextPos int) error {
-	return at.agentPlayAt(curPos, nextPos, -1)
+// agentPlay tells the agent to play a queue position with optional next track
+// preload. With paused set, the agent loads the track without starting audio
+// (agents predating the flag ignore it and start playing).
+func (at *agentTarget) agentPlay(curPos, nextPos int, paused bool) error {
+	return at.agentPlayAt(curPos, nextPos, -1, paused)
 }
 
 // agentPlayAt tells the agent to play a queue position, optionally seeking to
 // a position before audio output starts.
-func (at *agentTarget) agentPlayAt(curPos, nextPos int, seekPos float64) error {
+func (at *agentTarget) agentPlayAt(curPos, nextPos int, seekPos float64, paused bool) error {
 	at.ensureQueueSync()
 	cmd := fmt.Sprintf("play %d next=%d", curPos, nextPos)
 	if seekPos > 0 {
 		cmd += fmt.Sprintf(" seek=%.3f", seekPos)
 	}
+	if paused {
+		cmd += " paused=1"
+	}
 	_, err := at.sendCommand(cmd)
+	if err == nil {
+		// Update the cached state immediately — the next periodic
+		// agent_state report is up to 2s away, and stopped/paused decisions
+		// (cmdPlay resync, transportState) must not act on the old state.
+		at.stateMu.Lock()
+		if paused {
+			at.agState = "pause"
+		} else {
+			at.agState = "play"
+		}
+		if seekPos > 0 {
+			at.agElapsed = seekPos
+		} else {
+			at.agElapsed = 0
+		}
+		at.agStateTime = time.Now()
+		at.stateMu.Unlock()
+	}
 	return err
 }
 
@@ -864,6 +1021,16 @@ func (at *agentTarget) loadFileBatch(urls []string, mode string) error {
 
 func (at *agentTarget) playlistClear() error {
 	_, err := at.sendCommand("stop")
+	if err == nil {
+		// Mark stopped immediately so a play issued right after (e.g. the
+		// clear/add/play replace sequence) sees the output as stopped and
+		// does a full resync instead of resuming a stale track.
+		at.stateMu.Lock()
+		at.agState = "stop"
+		at.agElapsed = 0
+		at.agStateTime = time.Now()
+		at.stateMu.Unlock()
+	}
 	return err
 }
 
@@ -951,11 +1118,31 @@ func (at *agentTarget) setProperty(name string, value any) error {
 	switch name {
 	case "pause":
 		if b, ok := value.(bool); ok {
+			cmd := "resume"
 			if b {
-				_, err := at.sendCommand("pause")
-				return err
+				cmd = "pause"
 			}
-			_, err := at.sendCommand("resume")
+			_, err := at.sendCommand(cmd)
+			if err == nil {
+				// Keep the cached state in sync ahead of the next periodic
+				// report. A stopped agent stays stopped: pause/resume don't
+				// load anything.
+				at.stateMu.Lock()
+				if b && at.agState == "play" {
+					// Freeze interpolated progress at the pause point.
+					if !at.agStateTime.IsZero() {
+						at.agElapsed += time.Since(at.agStateTime).Seconds()
+						if at.agDuration > 0 && at.agElapsed > at.agDuration {
+							at.agElapsed = at.agDuration
+						}
+					}
+					at.agState = "pause"
+				} else if !b && at.agState == "pause" {
+					at.agState = "play"
+				}
+				at.agStateTime = time.Now()
+				at.stateMu.Unlock()
+			}
 			return err
 		}
 	case "time-pos":

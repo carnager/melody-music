@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -68,6 +69,12 @@ func init() {
 		"melody_albums_latest": cmdMelodyAlbumsLatest,
 		"melody_tracks":        cmdMelodyTracks,
 
+		// Server identification (melody extension). Its presence in
+		// `commands` also tells clients that add/addid/findadd/searchadd
+		// preserve playback state (releases before it auto-played when
+		// populating an empty queue).
+		"melody_version": cmdMelodyVersion,
+
 		// Stored playlists
 		"listplaylists":    cmdListPlaylists,
 		"listplaylistinfo": cmdListPlaylistInfo,
@@ -81,7 +88,6 @@ func init() {
 		"enableoutput":  cmdEnableOutput,
 		"disableoutput": cmdDisableOutput,
 		"toggleoutput":  cmdToggleOutput,
-		"switchoutput":  cmdSwitchOutput, // melody extension: exclusive switch
 
 		// Volume
 		"setvol": cmdSetVol,
@@ -184,23 +190,27 @@ func cmdStatus(c *mpdConn, args []string) *mpdError {
 	var volume int = -1
 
 	if t.isRunning() {
-		if pauseRaw, err := t.getProperty("pause"); err == nil {
-			if p, ok := pauseRaw.(bool); ok {
-				if p {
-					state = "pause"
-				} else {
-					state = "play"
+		// An output with nothing loaded is stopped, not paused — only probe
+		// pause/position when a track is actually loaded.
+		if !targetStopped(t) {
+			if pauseRaw, err := t.getProperty("pause"); err == nil {
+				if p, ok := pauseRaw.(bool); ok {
+					if p {
+						state = "pause"
+					} else {
+						state = "play"
+					}
 				}
 			}
-		}
-		if tpRaw, err := t.getProperty("time-pos"); err == nil {
-			if f, ok := tpRaw.(float64); ok {
-				elapsed = f
+			if tpRaw, err := t.getProperty("time-pos"); err == nil {
+				if f, ok := tpRaw.(float64); ok {
+					elapsed = f
+				}
 			}
-		}
-		if durRaw, err := t.getProperty("duration"); err == nil {
-			if f, ok := durRaw.(float64); ok {
-				duration = f
+			if durRaw, err := t.getProperty("duration"); err == nil {
+				if f, ok := durRaw.(float64); ok {
+					duration = f
+				}
 			}
 		}
 		if volRaw, err := t.getProperty("volume"); err == nil {
@@ -340,6 +350,11 @@ func cmdPlay(c *mpdConn, args []string) *mpdError {
 			return mpdErr(errArg, "play", "invalid position")
 		}
 		a.curQueuePos = pos
+		// Explicitly playing a track makes it eligible again even if it
+		// already played through a priority jump this cycle.
+		if pos < len(a.queueIDs) {
+			delete(a.prioPlayedIDs, a.queueIDs[pos])
+		}
 		if a.modeRandom {
 			a.generateShuffle()
 		}
@@ -358,7 +373,7 @@ func cmdPlay(c *mpdConn, args []string) *mpdError {
 	if plan != nil {
 		if syncStoppedOnly {
 			for _, ti := range a.enabledTargetInfos() {
-				if at, ok := ti.t.(*agentTarget); ok && at.isStopped() {
+				if targetStopped(ti.t) {
 					a.execSyncPlanOn(ti, *plan)
 				}
 			}
@@ -408,14 +423,24 @@ func cmdPause(c *mpdConn, args []string) *mpdError {
 }
 
 func cmdStop(c *mpdConn, args []string) *mpdError {
-	t := c.app.target()
+	a := c.app
+	a.playQueueMu.Lock()
+	a.pendingNextPos = -1
+	a.playQueueMu.Unlock()
+	t := a.target()
+	// Pause first: agents predating the unloading stop keep the current
+	// entry loaded, and silencing before the unload avoids an audible cut.
 	_ = t.setProperty("pause", true)
-	c.app.mpdHub.notify(SubPlayer)
+	// Real stop: unload everything. The queue pointer stays, so a following
+	// play restarts the current track from the beginning, MPD-style.
+	_ = t.playlistClear()
+	a.mpdHub.notify(SubPlayer)
 	return nil
 }
 
 func cmdNext(c *mpdConn, args []string) *mpdError {
 	a := c.app
+	stopped, paused := a.transportState()
 	a.playQueueMu.Lock()
 	qLen := len(a.playQueue)
 	if qLen == 0 {
@@ -440,29 +465,37 @@ func cmdNext(c *mpdConn, args []string) *mpdError {
 		a.prioReturnPos = -1
 	}
 
-	// Auto-consume prioritized track that was playing
+	// A nonzero priority on the skipped track is spent: reset it so the
+	// priority jump happens once while the row stays in the queue
+	// (stock-MPD-style reset, no auto-consume).
 	oldHadPrio := oldPos >= 0 && oldPos < len(a.queuePriority) && a.queuePriority[oldPos] > 0
 	if oldHadPrio {
-		// Adjust prioReturnPos for the removal
-		if a.prioReturnPos > oldPos {
-			a.prioReturnPos--
+		if oldPos < len(a.queueIDs) {
+			a.markPrioPlayed(a.queueIDs[oldPos])
 		}
-		a.removeFromQueue(oldPos)
-		// Adjust next position after removal
-		if next > oldPos {
-			next--
-		}
+		a.queuePriority[oldPos] = 0
+		a.bumpQueueVersionLocked()
+		a.savePlayQueue()
 	}
 
 	a.curQueuePos = next
 	if a.modeRandom {
 		a.shufflePos++
 	}
-	plan := a.planSyncTarget()
-	a.playQueueMu.Unlock()
-	a.execSyncPlan(plan)
-	if err := a.target().setProperty("pause", false); err != nil {
-		a.logger.Printf("cmdNext: unpause failed: %v", err)
+	if stopped {
+		// Nothing is loaded — just move the pointer, MPD-style.
+		a.pendingNextPos = -1
+		a.playQueueMu.Unlock()
+	} else {
+		plan := a.planSyncTarget()
+		plan.startPaused = paused
+		a.playQueueMu.Unlock()
+		a.execSyncPlan(plan)
+		// Preserve the transport: paused stays paused (the set is redundant
+		// on agents that honor paused=, re-pauses older ones).
+		if err := a.target().setProperty("pause", paused); err != nil {
+			a.logger.Printf("cmdNext: set pause failed: %v", err)
+		}
 	}
 	if oldHadPrio {
 		a.mpdHub.notify(SubPlaylist, SubPlayer)
@@ -474,6 +507,7 @@ func cmdNext(c *mpdConn, args []string) *mpdError {
 
 func cmdPrevious(c *mpdConn, args []string) *mpdError {
 	a := c.app
+	stopped, paused := a.transportState()
 	a.playQueueMu.Lock()
 	qLen := len(a.playQueue)
 	if qLen == 0 {
@@ -498,10 +532,17 @@ func cmdPrevious(c *mpdConn, args []string) *mpdError {
 		}
 		a.curQueuePos = prev
 	}
-	plan := a.planSyncTarget()
-	a.playQueueMu.Unlock()
-	a.execSyncPlan(plan)
-	_ = a.target().setProperty("pause", false)
+	if stopped {
+		// Nothing is loaded — just move the pointer, MPD-style.
+		a.pendingNextPos = -1
+		a.playQueueMu.Unlock()
+	} else {
+		plan := a.planSyncTarget()
+		plan.startPaused = paused
+		a.playQueueMu.Unlock()
+		a.execSyncPlan(plan)
+		_ = a.target().setProperty("pause", paused)
+	}
 	a.mpdHub.notify(SubPlayer)
 	return nil
 }
@@ -549,6 +590,7 @@ func cmdSeek(c *mpdConn, args []string) *mpdError {
 	if err != nil {
 		return mpdErr(errArg, "seek", "invalid time")
 	}
+	stopped, paused := a.transportState()
 	var plan *syncPlan
 	a.playQueueMu.Lock()
 	if pos != a.curQueuePos {
@@ -557,12 +599,26 @@ func cmdSeek(c *mpdConn, args []string) *mpdError {
 			return mpdErr(errArg, "seek", "invalid position")
 		}
 		a.curQueuePos = pos
-		p := a.planSyncTarget()
-		plan = &p
+		if stopped {
+			a.pendingNextPos = -1
+		} else {
+			p := a.planSyncTarget()
+			p.startPaused = paused
+			plan = &p
+		}
 	}
 	a.playQueueMu.Unlock()
+	if stopped {
+		// Nothing is loaded — move the pointer without starting playback.
+		a.mpdHub.notify(SubPlayer)
+		return nil
+	}
 	if plan != nil {
 		a.execSyncPlan(*plan)
+		if paused {
+			// Redundant on agents that honor paused=, re-pauses older ones.
+			_ = a.target().setProperty("pause", true)
+		}
 	}
 	if err := a.target().setProperty("time-pos", timePos); err != nil {
 		return mpdErr(errSystem, "seek", err.Error())
@@ -812,6 +868,7 @@ func cmdDelete(c *mpdConn, args []string) *mpdError {
 		return mpdErr(errArg, "delete", "need position argument")
 	}
 	a := c.app
+	stopped, paused := a.transportState()
 	a.playQueueMu.Lock()
 
 	start, end, err := parseRange(args[0], len(a.playQueue))
@@ -843,9 +900,20 @@ func cmdDelete(c *mpdConn, args []string) *mpdError {
 
 	a.savePlayQueue()
 	if currentDeleted || len(a.playQueue) == 0 {
-		plan := a.planSyncTarget()
-		a.playQueueMu.Unlock()
-		a.execSyncPlan(plan)
+		if stopped && len(a.playQueue) > 0 {
+			// Nothing is loaded — just repoint without starting playback.
+			a.pendingNextPos = -1
+			a.playQueueMu.Unlock()
+		} else {
+			plan := a.planSyncTarget()
+			plan.startPaused = paused
+			a.playQueueMu.Unlock()
+			a.execSyncPlan(plan)
+			if paused && plan.hasCurrent {
+				// Redundant on agents that honor paused=, re-pauses older ones.
+				_ = a.target().setProperty("pause", true)
+			}
+		}
 	} else {
 		ntPlan := a.planNextTrack()
 		a.playQueueMu.Unlock()
@@ -879,6 +947,7 @@ func cmdClear(c *mpdConn, args []string) *mpdError {
 	a.curQueuePos = 0
 	a.pendingNextPos = -1
 	a.prioReturnPos = -1
+	a.prioPlayedIDs = nil
 	a.bumpQueueVersionLocked()
 	a.savePlayQueue()
 	a.playQueueMu.Unlock()
@@ -1039,11 +1108,13 @@ func cmdShuffle(c *mpdConn, args []string) *mpdError {
 		a.generateShuffle()
 	}
 
-	// Resync target with new queue order
+	// The current track kept its identity (we followed its queue id), so only
+	// the preloaded next track needs a resync — reloading the current one
+	// would restart it, and shuffling the queue must not touch playback.
 	_ = curID // suppress unused warning
-	plan := a.planSyncTarget()
+	ntPlan := a.planNextTrack()
 	a.playQueueMu.Unlock()
-	a.execSyncPlan(plan)
+	a.execNextTrackPlan(ntPlan)
 	a.mpdHub.notify(SubPlaylist)
 	return nil
 }
@@ -1077,6 +1148,11 @@ func cmdPrio(c *mpdConn, args []string) *mpdError {
 		}
 		for i := start; i < end; i++ {
 			a.queuePriority[i] = prio
+			// Re-prioritizing makes a track eligible again even if it
+			// already played through a priority jump this cycle.
+			if prio > 0 && i < len(a.queueIDs) {
+				delete(a.prioPlayedIDs, a.queueIDs[i])
+			}
 		}
 	}
 	a.bumpQueueVersionLocked()
@@ -1125,6 +1201,11 @@ func cmdPrioID(c *mpdConn, args []string) *mpdError {
 			return mpdErr(errNoExist, "prioid", "song not found")
 		}
 		a.queuePriority[pos] = prio
+		// Re-prioritizing makes a track eligible again even if it already
+		// played through a priority jump this cycle.
+		if prio > 0 {
+			delete(a.prioPlayedIDs, mpdID)
+		}
 	}
 	a.bumpQueueVersionLocked()
 	a.savePlayQueue()
@@ -1356,8 +1437,10 @@ func cmdSearchOrFind(c *mpdConn, args []string, cmdName string, caseInsensitive 
 }
 
 func cmdSearchOrFindInner(c *mpdConn, args []string, cmdName string, caseInsensitive, addToQueue bool) *mpdError {
-	// Extract "window" parameter if present (window START:END)
+	// Extract "window START:END" and "sort [-]TAG" parameters if present
 	var windowStart, windowEnd int = 0, -1
+	var sortTag string
+	var sortDesc bool
 	var filteredArgs []string
 	for i := 0; i < len(args); i++ {
 		if strings.ToLower(args[i]) == "window" && i+1 < len(args) {
@@ -1369,6 +1452,19 @@ func cmdSearchOrFindInner(c *mpdConn, args []string, cmdName string, caseInsensi
 			i++ // skip the value
 			continue
 		}
+		if strings.ToLower(args[i]) == "sort" && i+1 < len(args) {
+			tag := args[i+1]
+			if strings.HasPrefix(tag, "-") {
+				sortDesc = true
+				tag = tag[1:]
+			}
+			sortTag = strings.ToLower(tag)
+			if !sortableTags[sortTag] {
+				return mpdErr(errArg, cmdName, "Unsupported sort tag")
+			}
+			i++ // skip the value
+			continue
+		}
 		filteredArgs = append(filteredArgs, args[i])
 	}
 	args = filteredArgs
@@ -1376,14 +1472,18 @@ func cmdSearchOrFindInner(c *mpdConn, args []string, cmdName string, caseInsensi
 		return nil
 	}
 
-	// Save window state for writeTrack filtering
+	// Save window/sort state for writeTrack filtering
 	c.windowStart = windowStart
 	c.windowEnd = windowEnd
 	c.windowPos = 0
+	c.sortTag = sortTag
+	c.sortDesc = sortDesc
 	defer func() {
 		c.windowStart = 0
 		c.windowEnd = -1
 		c.windowPos = 0
+		c.sortTag = ""
+		c.sortDesc = false
 	}()
 
 	// Check if all args are filter expressions (start with paren)
@@ -1463,7 +1563,7 @@ func (rc *ratingCond) sqlOp() (string, int) {
 func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName string, caseInsensitive, addToQueue bool) *mpdError {
 	a := c.app
 
-	// Extract rating filters before building tag map
+	// Extract rating and timestamp filters before building tag map
 	var ratingFilter *ratingCond
 	var albumRatingFilter *ratingCond
 	var filteredConditions []filterCondition
@@ -1483,11 +1583,33 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 				op = "=="
 			}
 			albumRatingFilter = &ratingCond{op: op, value: v}
+		case "added-since":
+			ts, err := parseTimeArg(cond.value)
+			if err != nil {
+				return mpdErr(errArg, cmdName, "invalid timestamp for added-since")
+			}
+			c.addedSince = ts
+		case "modified-since":
+			ts, err := parseTimeArg(cond.value)
+			if err != nil {
+				return mpdErr(errArg, cmdName, "invalid timestamp for modified-since")
+			}
+			c.modifiedSince = ts
+		case "base":
+			// base "" matches everything; a non-empty base is kept as a condition
+			// and resolved via a path-prefix lookup below.
+			if cond.value != "" {
+				filteredConditions = append(filteredConditions, cond)
+			}
 		default:
 			filteredConditions = append(filteredConditions, cond)
 		}
 	}
 	conditions = filteredConditions
+	defer func() {
+		c.addedSince = 0
+		c.modifiedSince = 0
+	}()
 
 	// Build a map of tag → value for quick lookup
 	tags := map[string]string{}
@@ -1542,6 +1664,18 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 		}
 		return writeOrAddFilteredTracks(c, a, tracks, nil, nil, cmdName, addToQueue)
 	}
+
+	// base filter: restrict to a directory subtree. Only handled standalone —
+	// clients use it alone (typically with sort/window); combining it with other
+	// structured tags is not supported and falls through with base ignored.
+	if v, ok := tags["base"]; ok && len(conditions) == 1 {
+		tracks, err := a.db.tracksByPathPrefix(filepath.Join(a.cfg.Library.MusicDir, v) + string(filepath.Separator))
+		if err != nil {
+			return mpdErr(errSystem, cmdName, err.Error())
+		}
+		return writeOrAddFilteredTracks(c, a, tracks, ratingFilter, albumRatingFilter, cmdName, addToQueue)
+	}
+	delete(tags, "base")
 
 	// Album lookup by id (fast, unambiguous — used by the rofi/launcher client).
 	if v, ok := tags["albumid"]; ok && v != "" {
@@ -1704,7 +1838,7 @@ func writeOrAddFilteredTracks(c *mpdConn, a *app, tracks []map[string]any, ratin
 		}
 		albumRatings, _ = a.db.getRatingsBatch(hashes)
 	}
-	var allSongIDs []string
+	var matched []map[string]any
 	for _, track := range tracks {
 		r := intFromAny(track["rating"], 0)
 		if ratingFilter != nil && !ratingFilter.matches(r) {
@@ -1716,6 +1850,20 @@ func writeOrAddFilteredTracks(c *mpdConn, a *app, tracks []map[string]any, ratin
 				continue
 			}
 		}
+		if c.addedSince > 0 && int64(intFromAny(track["added"], 0)) < c.addedSince {
+			continue
+		}
+		// file_modified is unix milliseconds; the filter cutoff is seconds
+		if c.modifiedSince > 0 && int64(intFromAny(track["file_modified"], 0)) < c.modifiedSince*1000 {
+			continue
+		}
+		matched = append(matched, track)
+	}
+	if c.sortTag != "" {
+		sortTracks(matched, c.sortTag, c.sortDesc)
+	}
+	var allSongIDs []string
+	for _, track := range matched {
 		if addToQueue {
 			allSongIDs = append(allSongIDs, stringify(track["song_id"]))
 		} else {
@@ -1787,6 +1935,13 @@ func oldStyleToConditions(args []string) []filterCondition {
 		})
 	}
 	return conditions
+}
+
+// cmdMelodyVersion reports the melodyd release version so clients can
+// identify the server and gate compatibility workarounds by release.
+func cmdMelodyVersion(c *mpdConn, args []string) *mpdError {
+	c.writeKV("version", melodyVersion)
+	return nil
 }
 
 // cmdMelodyAlbums sends the pre-built album list for the launcher client.
@@ -2055,10 +2210,16 @@ func cmdOutputs(c *mpdConn, args []string) *mpdError {
 		if dev.ID == a.primaryOutput {
 			primary = 1
 		}
+		// An enabled output whose agent is away stays listed but offline.
+		online := 0
+		if a.targetForLocked(dev.ID) != nil {
+			online = 1
+		}
 		c.writeKV("outputid", i)
 		c.writeKV("outputname", dev.Name)
 		c.writeKV("outputenabled", enabled)
 		c.writeKV("outputprimary", primary)
+		c.writeKV("outputonline", online)
 		c.writeKV("plugin", dev.Type)
 		if dev.Format != "" {
 			c.writeKV("outputformat", dev.Format)
@@ -2132,22 +2293,6 @@ func cmdToggleOutput(c *mpdConn, args []string) *mpdError {
 	return nil
 }
 
-// cmdSwitchOutput is a melody extension: enable the given output and disable
-// all others, handing playback over at the current position.
-func cmdSwitchOutput(c *mpdConn, args []string) *mpdError {
-	if len(args) < 1 {
-		return mpdErr(errArg, "switchoutput", "need output id")
-	}
-	dev := resolveOutputArg(c.app, args[0])
-	if dev == nil {
-		return mpdErr(errNoExist, "switchoutput", "output not found")
-	}
-	if err := c.app.switchOutput(dev.ID); err != nil {
-		return mpdErr(errSystem, "switchoutput", err.Error())
-	}
-	return nil
-}
-
 // ---------------------------------------------------------------------------
 // Web client registration
 // ---------------------------------------------------------------------------
@@ -2178,7 +2323,9 @@ func cmdWebRegister(c *mpdConn, args []string) *mpdError {
 	a.devices[devID] = dev
 	a.webTargets[devID] = wt
 	isEnabled := a.enabledOutputs[devID]
-	if isEnabled && a.primaryOutput == "" {
+	// Also take over from a primary that is enabled but offline — see
+	// handleAgentRegister.
+	if isEnabled && (a.primaryOutput == "" || a.targetForLocked(a.primaryOutput) == nil) {
 		a.primaryOutput = devID
 	}
 	a.devicesMu.Unlock()
@@ -2433,6 +2580,11 @@ func cmdNotCommands(c *mpdConn, args []string) *mpdError {
 }
 
 func cmdTagTypes(c *mpdConn, args []string) *mpdError {
+	// Subcommands (all/clear/enable/disable) produce no output; we always
+	// send every tag we know, so they are accepted as no-ops.
+	if len(args) > 0 {
+		return nil
+	}
 	for _, t := range []string{"Artist", "AlbumArtist", "Album", "Title", "Track", "Date", "Disc"} {
 		c.writeKV("tagtype", t)
 	}
@@ -2484,6 +2636,14 @@ func (c *mpdConn) writeTrack(track map[string]any, pos int, mpdID int, prio ...i
 	if dur > 0 {
 		c.writeKV("Time", int(math.Ceil(dur)))
 		c.writef("duration: %.3f\n", dur)
+	}
+	// file_modified is stored in unix milliseconds (scanner uses UnixMilli)
+	if v := int64(intFromAny(track["file_modified"], 0)); v > 0 {
+		c.writeKV("Last-Modified", time.UnixMilli(v).UTC().Format(time.RFC3339))
+	}
+	// MPD 0.24: time the song was added to the database
+	if v := int64(intFromAny(track["added"], 0)); v > 0 {
+		c.writeKV("Added", time.Unix(v, 0).UTC().Format(time.RFC3339))
 	}
 	if pos >= 0 {
 		c.writeKV("Pos", pos)
@@ -2631,7 +2791,9 @@ func splitFilterAND(s string) []string {
 	return parts
 }
 
-// parseOneCondition parses "Tag == \"value\"" or "Tag contains \"value\"".
+// parseOneCondition parses "Tag == \"value\"" or "Tag contains \"value\"",
+// plus the operator-less prefix forms "base \"uri\"", "added-since \"ts\"" and
+// "modified-since \"ts\"".
 func parseOneCondition(s string) filterCondition {
 	s = strings.TrimSpace(s)
 	for _, op := range []string{" >= ", " <= ", " == ", " > ", " < ", " contains "} {
@@ -2649,7 +2811,79 @@ func parseOneCondition(s string) filterCondition {
 			value: val,
 		}
 	}
+	if idx := strings.Index(s, " "); idx > 0 {
+		tag := strings.ToLower(strings.TrimSpace(s[:idx]))
+		switch tag {
+		case "base", "added-since", "modified-since":
+			return filterCondition{
+				tag:   tag,
+				value: stripQuotes(strings.TrimSpace(s[idx+1:])),
+			}
+		}
+	}
 	return filterCondition{}
+}
+
+// sortableTags lists the tags find/search accept in "sort [-]TAG" (lowercased).
+var sortableTags = map[string]bool{
+	"added":         true, // MPD 0.24: database insertion time
+	"last-modified": true,
+	"artist":        true,
+	"albumartist":   true,
+	"album":         true,
+	"title":         true,
+	"track":         true,
+	"disc":          true,
+	"date":          true,
+}
+
+// sortTracks stably sorts find/search results by a (lowercased) sort tag.
+func sortTracks(tracks []map[string]any, tag string, desc bool) {
+	numKey := func(t map[string]any) (int64, bool) {
+		switch tag {
+		case "added":
+			return int64(intFromAny(t["added"], 0)), true
+		case "last-modified":
+			return int64(intFromAny(t["file_modified"], 0)), true
+		case "track":
+			return int64(intFromAny(t["tracknumber"], 0)), true
+		case "disc":
+			return int64(intFromAny(t["discnumber"], 0)), true
+		}
+		return 0, false
+	}
+	strKey := func(t map[string]any) string {
+		// artist/albumartist/album/title/date tags match the track map keys
+		return strings.ToLower(stringify(t[tag]))
+	}
+	less := func(a, b map[string]any) bool {
+		if na, ok := numKey(a); ok {
+			nb, _ := numKey(b)
+			return na < nb
+		}
+		return strKey(a) < strKey(b)
+	}
+	sort.SliceStable(tracks, func(i, j int) bool {
+		if desc {
+			return less(tracks[j], tracks[i])
+		}
+		return less(tracks[i], tracks[j])
+	})
+}
+
+// parseTimeArg parses MPD timestamp filter values: unix seconds or ISO8601
+// ("2024-01-02T15:04:05Z" or a plain "2024-01-02" date).
+func parseTimeArg(s string) (int64, error) {
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return n, nil
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.Unix(), nil
+	}
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t.Unix(), nil
+	}
+	return 0, fmt.Errorf("invalid timestamp: %s", s)
 }
 
 func stripQuotes(s string) string {

@@ -153,6 +153,13 @@ func (wt *webTarget) isRunning() bool {
 	return wt.alive
 }
 
+// isStopped reports whether no track is loaded ("stop" in MPD terms).
+func (wt *webTarget) isStopped() bool {
+	wt.mu.Lock()
+	defer wt.mu.Unlock()
+	return len(wt.playlist) == 0 || wt.playlistPos < 0
+}
+
 func (wt *webTarget) close() {
 	wt.mu.Lock()
 	wt.alive = false

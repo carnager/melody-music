@@ -20,7 +20,7 @@ Binaries are written to `bin/`. Create `~/.config/melody/melodyd.toml`
 
 ```toml
 [library]
-music_dir = "/path/to/music"
+music_dir = "/mnt/music"
 ```
 
 Start the server:

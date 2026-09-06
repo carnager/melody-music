@@ -259,11 +259,14 @@ func (la *localAgent) handlePlay(w *bufio.Writer, args []string) {
 
 	nextPos := -1
 	var seekPos float64 = -1
+	paused := false
 	for _, arg := range args[1:] {
 		if strings.HasPrefix(arg, "next=") {
 			nextPos, _ = strconv.Atoi(strings.TrimPrefix(arg, "next="))
 		} else if strings.HasPrefix(arg, "seek=") {
 			seekPos, _ = strconv.ParseFloat(strings.TrimPrefix(arg, "seek="), 64)
+		} else if arg == "paused=1" {
+			paused = true
 		}
 	}
 
@@ -306,7 +309,7 @@ func (la *localAgent) handlePlay(w *bufio.Writer, args []string) {
 		}
 	}
 
-	if err := la.player.PlayPair(currentSpec, nextSpec, seekPos); err != nil {
+	if err := la.player.PlayPair(currentSpec, nextSpec, seekPos, paused); err != nil {
 		fmt.Fprintf(w, "ACK [56@0] {play} %s\n", err)
 		return
 	}

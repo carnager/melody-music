@@ -387,10 +387,13 @@ func (p *Player) Play(path, formatHint string, rgTrack, rgAlbum float64) error {
 		FormatHint: formatHint,
 		RGTrack:    rgTrack,
 		RGAlbum:    rgAlbum,
-	}, nil, -1)
+	}, nil, -1, false)
 }
 
-func (p *Player) PlayPair(current TrackSpec, next *TrackSpec, seek float64) error {
+// PlayPair loads current (and optionally next) into the playlist. With paused
+// set, the track is loaded without starting audio and the player ends up in
+// the "pause" state — used when the server switches tracks while paused.
+func (p *Player) PlayPair(current TrackSpec, next *TrackSpec, seek float64, paused bool) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -405,6 +408,12 @@ func (p *Player) PlayPair(current TrackSpec, next *TrackSpec, seek float64) erro
 	p.generation++
 	if err := p.clearPlaylistLocked(); err != nil {
 		return err
+	}
+	if paused {
+		// Pause before loading so the new track never produces audio.
+		if _, err := p.commandLocked("set_property", "pause", true); err != nil {
+			return err
+		}
 	}
 	if _, err := p.loadCurrentLocked(current.Path, seek); err != nil {
 		p.currentLoaded = false
@@ -435,7 +444,7 @@ func (p *Player) PlayPair(current TrackSpec, next *TrackSpec, seek float64) erro
 
 	_ = p.setReplayGainLocked(p.replayGain)
 	_, _ = p.commandLocked("set_property", "volume", p.volume)
-	if _, err := p.commandLocked("set_property", "pause", false); err != nil {
+	if _, err := p.commandLocked("set_property", "pause", paused); err != nil {
 		return err
 	}
 
@@ -445,7 +454,11 @@ func (p *Player) PlayPair(current TrackSpec, next *TrackSpec, seek float64) erro
 	p.nextLoaded = nextLoaded
 	p.nextPath = nextPath
 	p.nextEntryID = nextID
-	p.state = "play"
+	if paused {
+		p.state = "pause"
+	} else {
+		p.state = "play"
+	}
 	return nil
 }
 
@@ -534,6 +547,11 @@ func (p *Player) Resume() {
 		p.startErr = err
 		return
 	}
+	if !p.currentLoaded {
+		// Stopped: nothing legitimately loaded, so there is nothing to
+		// resume — unpausing could only surface stale player state.
+		return
+	}
 	_, _ = p.commandLocked("set_property", "pause", false)
 	if p.currentLoaded {
 		p.state = "play"
@@ -544,8 +562,10 @@ func (p *Player) Stop() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.generation++
-	if p.conn != nil {
-		_ = p.clearPlaylistLocked()
+	if p.conn != nil || p.commandHook != nil {
+		// mpv's playlist-clear keeps the currently playing entry loaded — a
+		// later unpause would audibly resurrect it. "stop" unloads everything.
+		_, _ = p.commandLocked("stop")
 	}
 	p.currentLoaded = false
 	p.nextLoaded = false

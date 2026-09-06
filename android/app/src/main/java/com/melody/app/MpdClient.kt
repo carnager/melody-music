@@ -906,7 +906,9 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
                 name = g["outputname"] ?: "",
                 isLocal = plugin == "local",
                 type = plugin,
-                online = true,
+                // Enabled outputs stay listed while their agent is away;
+                // daemons predating outputonline only list connected ones.
+                online = g["outputonline"]?.let { it == "1" } ?: true,
                 format = g["outputformat"] ?: "",
                 maxBitrate = g["outputmaxbitrate"]?.toIntOrNull() ?: 0,
                 active = g["outputenabled"] == "1",
@@ -920,17 +922,6 @@ class MpdClient(val serverHost: String, val serverPort: Int = 6701, val useSSL: 
     suspend fun disableOutput(id: String) { cmd("disableoutput $id") }
 
     suspend fun toggleOutput(id: String) { cmd("toggleoutput $id") }
-
-    // Exclusive switch: enable this output, disable all others. Falls back to
-    // enableoutput for daemons that predate multi-output (where enableoutput
-    // was itself an exclusive switch).
-    suspend fun switchOutput(id: String) {
-        try {
-            cmd("switchoutput $id")
-        } catch (e: Exception) {
-            cmd("enableoutput $id")
-        }
-    }
 
     // ---- Playlists ----
 

@@ -854,15 +854,6 @@ class MainViewModel : ViewModel() {
         }
     }
 
-    // Exclusive switch: play only on this device (disables all other outputs).
-    fun switchDevice(id: String) {
-        runAction("Switch device") {
-            mpd.switchOutput(id)
-            delay(300)
-            devices = mpd.getOutputs()
-        }
-    }
-
     // Toggle a single output on/off without touching the others.
     fun toggleDevice(id: String) {
         runAction("Toggle output") {
@@ -895,14 +886,16 @@ class MainViewModel : ViewModel() {
         viewModelScope.launch {
             // Stop playback before switching so the old track doesn't briefly play on phone
             try { mpd.stop() } catch (_: Exception) {}
-            // Switch to phone first, then run the play action. Exclusive switch:
-            // leaving the house must take playback over, not add the phone to
-            // the speakers at home.
+            // Move playback to the phone with plain MPD toggles: enable the
+            // phone output, then disable the others — leaving the house must
+            // take playback over, not add the phone to the speakers at home.
             try {
                 devices = mpd.getOutputs()
                 val phoneDev = devices.find { isPhoneAgent(it) }
                 if (phoneDev != null && !(phoneDev.active && devices.count { it.active } == 1)) {
-                    mpd.switchOutput(phoneDev.id)
+                    if (!phoneDev.active) mpd.enableOutput(phoneDev.id)
+                    devices.filter { it.active && it.id != phoneDev.id }
+                        .forEach { mpd.disableOutput(it.id) }
                     delay(500)
                     devices = mpd.getOutputs()
                 }

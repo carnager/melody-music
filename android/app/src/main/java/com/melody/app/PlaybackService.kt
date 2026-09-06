@@ -515,10 +515,12 @@ class PlaybackService : Service() {
 
         var nextPos = -1
         var seekPos = -1.0
+        var startPaused = false
         for (arg in args.drop(1)) {
             when {
                 arg.startsWith("next=") -> nextPos = arg.removePrefix("next=").toIntOrNull() ?: -1
                 arg.startsWith("seek=") -> seekPos = arg.removePrefix("seek=").toDoubleOrNull() ?: -1.0
+                arg == "paused=1" -> startPaused = true
             }
         }
 
@@ -576,7 +578,7 @@ class PlaybackService : Service() {
             // before prepare, unlike seekTo which can be ignored
             p.setMediaItems(mediaItems, 0, startPositionMs)
             p.prepare()
-            p.play()
+            if (startPaused) p.pause() else p.play()
 
             curPos = pos
             pendingNextPos = nextPos
