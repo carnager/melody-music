@@ -107,6 +107,25 @@ func (m *musicDB) migrate() error {
 	if err != nil {
 		return err
 	}
+
+	// Generic per-track tags (genre, composer, MusicBrainz IDs, ...).
+	// Detect first-time creation so existing libraries get a forced metadata
+	// re-read: the scanner skips files whose mtime is unchanged, which would
+	// otherwise leave track_tags empty forever.
+	var hadTrackTags int
+	m.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='track_tags'`).Scan(&hadTrackTags)
+	if _, err := m.db.Exec(`CREATE TABLE IF NOT EXISTS track_tags (
+			track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+			tag TEXT NOT NULL,
+			value TEXT NOT NULL
+		)`); err != nil {
+		return err
+	}
+	m.db.Exec(`CREATE INDEX IF NOT EXISTS idx_track_tags_track ON track_tags(track_id)`)
+	m.db.Exec(`CREATE INDEX IF NOT EXISTS idx_track_tags_tag_value ON track_tags(tag, value)`)
+	if hadTrackTags == 0 {
+		m.db.Exec(`UPDATE tracks SET file_modified = 0`)
+	}
 	// Performance indexes
 	m.db.Exec(`CREATE INDEX IF NOT EXISTS idx_tracks_album_id ON tracks(album_id)`)
 	m.db.Exec(`CREATE INDEX IF NOT EXISTS idx_albums_created_at ON albums(created_at)`)
@@ -521,6 +540,10 @@ type trackMeta struct {
 	albumArtist string
 	album       string
 	date        string
+
+	// Generic tags (genre, composer, MusicBrainz IDs, ...) keyed by
+	// canonical name; written to the track_tags table.
+	tags map[string][]string
 }
 
 func (m *musicDB) upsertTrack(t *trackMeta) (int64, error) {
@@ -557,7 +580,252 @@ func (m *musicDB) upsertTrack(t *trackMeta) (int64, error) {
 	m.db.Exec(`DELETE FROM tracks_fts WHERE rowid = ?`, id)
 	m.db.Exec(`INSERT INTO tracks_fts(rowid, artist, albumartist, title, album) VALUES(?, ?, ?, ?, ?)`,
 		id, t.Artist, t.albumArtist, t.Title, t.album)
+	m.replaceTrackTags(id, t.tags)
 	return id, nil
+}
+
+// replaceTrackTags rewrites the generic tag rows for a track.
+func (m *musicDB) replaceTrackTags(trackID int64, tags map[string][]string) {
+	m.db.Exec(`DELETE FROM track_tags WHERE track_id = ?`, trackID)
+	for name, vals := range tags {
+		for _, v := range vals {
+			m.db.Exec(`INSERT INTO track_tags(track_id, tag, value) VALUES(?, ?, ?)`, trackID, name, v)
+		}
+	}
+}
+
+// tagsForTracks batch-fetches generic tags for a set of track IDs. For large
+// sets a full table read avoids oversized IN clauses (SQLite variable limit).
+func (m *musicDB) tagsForTracks(ids []int64) (map[int64]map[string][]string, error) {
+	if len(ids) == 0 {
+		return map[int64]map[string][]string{}, nil
+	}
+	var rows *sql.Rows
+	var err error
+	if len(ids) > 400 {
+		rows, err = m.db.Query(`SELECT track_id, tag, value FROM track_tags`)
+	} else {
+		placeholders := make([]string, len(ids))
+		args := make([]any, len(ids))
+		for i, id := range ids {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		rows, err = m.db.Query(`SELECT track_id, tag, value FROM track_tags
+			WHERE track_id IN (`+strings.Join(placeholders, ",")+`)`, args...)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	idSet := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		idSet[id] = struct{}{}
+	}
+	result := map[int64]map[string][]string{}
+	for rows.Next() {
+		var id int64
+		var name, value string
+		if err := rows.Scan(&id, &name, &value); err != nil {
+			return nil, err
+		}
+		if _, ok := idSet[id]; !ok {
+			continue
+		}
+		t := result[id]
+		if t == nil {
+			t = map[string][]string{}
+			result[id] = t
+		}
+		t[name] = append(t[name], value)
+	}
+	return result, rows.Err()
+}
+
+// enrichWithTags attaches generic tags to track maps under the "tags" key.
+func (m *musicDB) enrichWithTags(tracks []map[string]any) {
+	if len(tracks) == 0 {
+		return
+	}
+	ids := make([]int64, 0, len(tracks))
+	for _, t := range tracks {
+		if id, err := strconv.ParseInt(stringify(t["id"]), 10, 64); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	tags, err := m.tagsForTracks(ids)
+	if err != nil {
+		return
+	}
+	for _, t := range tracks {
+		id, err := strconv.ParseInt(stringify(t["id"]), 10, 64)
+		if err != nil {
+			continue
+		}
+		if tt, ok := tags[id]; ok {
+			t["tags"] = tt
+		}
+	}
+}
+
+// listTagGroupOrder is the emission and sort order for structural group
+// columns on generic tag listings, matching the existing "list Album group
+// AlbumArtist group Date" output shape (AlbumArtist, Date, Album, main tag).
+var listTagGroupOrder = []string{"albumartist", "artist", "date", "album"}
+
+var listTagGroupCols = map[string]string{
+	"albumartist": "a.name",
+	"artist":      "t.artist",
+	"date":        "al.date",
+	"album":       "al.title",
+}
+
+// listTagValues returns rows for a generic tag listing. Each row holds the
+// tag value under "value" plus one entry per requested group column
+// (albumartist, artist, album, date), deduplicated per group combination —
+// e.g. list musicbrainz_releasegroupid group album group albumartist yields
+// one row per album. An albumartist/artist/album or generic-tag filter can
+// restrict the listing.
+func (m *musicDB) listTagValues(tagName, filterTag, filterVal string, groupTags []string) ([]map[string]string, error) {
+	sel := []string{"tt.value"}
+	var selNames, orderCols []string
+	for _, g := range listTagGroupOrder {
+		for _, want := range groupTags {
+			if want == g {
+				sel = append(sel, listTagGroupCols[g])
+				selNames = append(selNames, g)
+				orderCols = append(orderCols, listTagGroupCols[g]+" COLLATE NOCASE")
+				break
+			}
+		}
+	}
+	query := `SELECT DISTINCT ` + strings.Join(sel, ", ") + ` FROM track_tags tt
+		JOIN tracks t ON t.id = tt.track_id
+		JOIN albums al ON al.id = t.album_id
+		JOIN artists a ON a.id = al.artist_id
+		WHERE tt.tag = ?`
+	args := []any{tagName}
+	switch {
+	case filterTag == "artist":
+		query += ` AND (a.name = ? OR t.artist = ?)`
+		args = append(args, filterVal, filterVal)
+	case filterTag == "albumartist":
+		query += ` AND a.name = ?`
+		args = append(args, filterVal)
+	case filterTag == "album":
+		query += ` AND al.title = ?`
+		args = append(args, filterVal)
+	case filterTag != "":
+		query += ` AND EXISTS (SELECT 1 FROM track_tags f
+			WHERE f.track_id = tt.track_id AND f.tag = ? AND f.value = ?)`
+		args = append(args, filterTag, filterVal)
+	}
+	query += ` ORDER BY ` + strings.Join(append(orderCols, "tt.value COLLATE NOCASE"), ", ")
+	rows, err := m.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []map[string]string
+	for rows.Next() {
+		dest := make([]any, len(sel))
+		fields := make([]string, len(sel))
+		for i := range dest {
+			dest[i] = &fields[i]
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return nil, err
+		}
+		row := map[string]string{"value": fields[0]}
+		for i, name := range selNames {
+			row[name] = fields[i+1]
+		}
+		result = append(result, row)
+	}
+	return result, rows.Err()
+}
+
+// albumsByTag returns albums that contain at least one track carrying the
+// given generic tag value (e.g. list album genre "Rock").
+func (m *musicDB) albumsByTag(tagName, value string) ([]map[string]any, error) {
+	rows, err := m.db.Query(`SELECT DISTINCT al.id, al.title, al.date, a.name
+		FROM albums al
+		INNER JOIN artists a ON a.id = al.artist_id
+		INNER JOIN tracks t ON t.album_id = al.id
+		INNER JOIN track_tags tt ON tt.track_id = t.id
+		WHERE tt.tag = ? AND tt.value = ? COLLATE NOCASE
+		ORDER BY a.name COLLATE NOCASE, al.date, al.title COLLATE NOCASE`, tagName, value)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var albums []map[string]any
+	for rows.Next() {
+		var id int64
+		var title, date, artist string
+		if err := rows.Scan(&id, &title, &date, &artist); err != nil {
+			return nil, err
+		}
+		albums = append(albums, map[string]any{
+			"id":          strconv.FormatInt(id, 10),
+			"album_id":    strconv.FormatInt(id, 10),
+			"album":       title,
+			"date":        date,
+			"albumartist": artist,
+		})
+	}
+	return albums, rows.Err()
+}
+
+// tracksByConditions resolves generic tag conditions (plus optional
+// artist/albumartist/album/date equality filters) in a single query.
+func (m *musicDB) tracksByConditions(generic []filterCondition, artist, albumArtist, album, date string, caseInsensitive bool) ([]map[string]any, error) {
+	query := `SELECT t.id, t.album_id, t.artist, t.title,
+		t.track_number, t.disc_number, t.duration, t.path,
+		t.replay_gain_track, t.replay_gain_album, t.peak_track, t.peak_album,
+		t.rating, t.rating_hash, t.added, t.file_modified, a.name, al.title, al.date
+		FROM tracks t
+		INNER JOIN albums al ON al.id = t.album_id
+		INNER JOIN artists a ON a.id = al.artist_id
+		WHERE 1=1`
+	var args []any
+	eq := " = ?"
+	if caseInsensitive {
+		eq = " = ? COLLATE NOCASE"
+	}
+	for _, cond := range generic {
+		if cond.op == "contains" {
+			query += ` AND EXISTS (SELECT 1 FROM track_tags tt
+				WHERE tt.track_id = t.id AND tt.tag = ? AND tt.value LIKE '%' || ? || '%')`
+		} else {
+			query += ` AND EXISTS (SELECT 1 FROM track_tags tt
+				WHERE tt.track_id = t.id AND tt.tag = ? AND tt.value` + eq + `)`
+		}
+		args = append(args, cond.tag, cond.value)
+	}
+	if artist != "" {
+		query += ` AND (a.name` + eq + ` OR t.artist` + eq + `)`
+		args = append(args, artist, artist)
+	}
+	if albumArtist != "" {
+		query += ` AND a.name` + eq
+		args = append(args, albumArtist)
+	}
+	if album != "" {
+		query += ` AND al.title` + eq
+		args = append(args, album)
+	}
+	if date != "" {
+		query += ` AND al.date = ?`
+		args = append(args, date)
+	}
+	query += ` ORDER BY a.name COLLATE NOCASE, al.date, al.title COLLATE NOCASE, t.disc_number, t.track_number`
+	rows, err := m.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return m.scanTrackRows(rows)
 }
 
 func (m *musicDB) trackByID(id int64) (map[string]any, error) {
@@ -1155,6 +1423,7 @@ func (m *musicDB) removeTracksNotIn(paths map[string]struct{}) error {
 	}
 	for _, id := range toDelete {
 		m.db.Exec(`DELETE FROM tracks_fts WHERE rowid = ?`, id)
+		m.db.Exec(`DELETE FROM track_tags WHERE track_id = ?`, id)
 		if _, err := m.db.Exec(`DELETE FROM tracks WHERE id = ?`, id); err != nil {
 			return err
 		}
@@ -1195,6 +1464,7 @@ func (m *musicDB) removeTracksUnderPrefixNotIn(prefix string, keep map[string]st
 	}
 	for _, id := range toDelete {
 		m.db.Exec(`DELETE FROM tracks_fts WHERE rowid = ?`, id)
+		m.db.Exec(`DELETE FROM track_tags WHERE track_id = ?`, id)
 		if _, err := m.db.Exec(`DELETE FROM tracks WHERE id = ?`, id); err != nil {
 			return err
 		}
@@ -1216,6 +1486,7 @@ func (m *musicDB) deleteTrackByPath(path string) error {
 		return nil // not present — nothing to do
 	}
 	m.db.Exec(`DELETE FROM tracks_fts WHERE rowid = ?`, id)
+	m.db.Exec(`DELETE FROM track_tags WHERE track_id = ?`, id)
 	if _, err := m.db.Exec(`DELETE FROM tracks WHERE id = ?`, id); err != nil {
 		return err
 	}
@@ -1282,6 +1553,7 @@ func (m *musicDB) scanTrackRow(row *sql.Row) (map[string]any, error) {
 			t["rating"] = r
 		}
 	}
+	m.enrichWithTags([]map[string]any{t})
 	return t, nil
 }
 
@@ -1305,6 +1577,7 @@ func (m *musicDB) scanTrackRows(rows *sql.Rows) ([]map[string]any, error) {
 		tracks = []map[string]any{}
 	}
 	m.enrichWithRatings(tracks)
+	m.enrichWithTags(tracks)
 	return tracks, rows.Err()
 }
 

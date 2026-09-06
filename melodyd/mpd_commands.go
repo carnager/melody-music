@@ -1374,6 +1374,9 @@ func cmdList(c *mpdConn, args []string) *mpdError {
 		var err error
 		if filterTag == "artist" || filterTag == "albumartist" {
 			albums, err = a.db.albumsByArtist(filterVal)
+		} else if _, ok := mpdTagNames[filterTag]; ok {
+			// e.g. list Album Genre "Rock"
+			albums, err = a.db.albumsByTag(filterTag, filterVal)
 		} else {
 			albums, err = a.db.allAlbums(sortMode == "latest")
 		}
@@ -1416,7 +1419,31 @@ func cmdList(c *mpdConn, args []string) *mpdError {
 			}
 		}
 	default:
-		return mpdErr(errArg, "list", "unsupported tag type: "+tagType)
+		mpdName, ok := mpdTagNames[tagType]
+		if !ok {
+			return mpdErr(errArg, "list", "unsupported tag type: "+tagType)
+		}
+		for _, g := range groupTags {
+			if _, ok := listTagGroupCols[g]; !ok {
+				return mpdErr(errArg, "list", "unsupported group tag: "+g)
+			}
+		}
+		rows, err := a.db.listTagValues(tagType, filterTag, filterVal, groupTags)
+		if err != nil {
+			return mpdErr(errSystem, "list", err.Error())
+		}
+		groupNames := map[string]string{
+			"albumartist": "AlbumArtist", "artist": "Artist", "date": "Date", "album": "Album",
+		}
+		for _, row := range rows {
+			// Grouped tags before the main tag (MPD convention)
+			for _, g := range listTagGroupOrder {
+				if v, ok := row[g]; ok {
+					c.writeKV(groupNames[g], v)
+				}
+			}
+			c.writeKV(mpdName, row["value"])
+		}
 	}
 	return nil
 }
@@ -1711,6 +1738,40 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 			return nil // no match
 		}
 		return writeOrAddFilteredTracks(c, a, []map[string]any{track}, ratingFilter, nil, cmdName, addToQueue)
+	}
+
+	// Generic tag conditions (genre, composer, MusicBrainz IDs, ...) resolve
+	// against track_tags via SQL, optionally combined with artist/album/date.
+	hasGeneric := false
+	for _, cond := range conditions {
+		if _, ok := mpdTagNames[cond.tag]; ok {
+			hasGeneric = true
+			break
+		}
+	}
+	if hasGeneric {
+		var genericConds []filterCondition
+		supported := true
+		for _, cond := range conditions {
+			if _, ok := mpdTagNames[cond.tag]; ok {
+				genericConds = append(genericConds, cond)
+				continue
+			}
+			switch cond.tag {
+			case "artist", "albumartist", "album", "date":
+				// handled as equality filters below
+			default:
+				supported = false
+			}
+		}
+		if supported {
+			tracks, err := a.db.tracksByConditions(genericConds,
+				tags["artist"], tags["albumartist"], tags["album"], tags["date"], caseInsensitive)
+			if err != nil {
+				return mpdErr(errSystem, cmdName, err.Error())
+			}
+			return writeOrAddFilteredTracks(c, a, tracks, ratingFilter, albumRatingFilter, cmdName, addToQueue)
+		}
 	}
 
 	// If we have "any contains X" → do text search
@@ -2588,6 +2649,9 @@ func cmdTagTypes(c *mpdConn, args []string) *mpdError {
 	for _, t := range []string{"Artist", "AlbumArtist", "Album", "Title", "Track", "Date", "Disc"} {
 		c.writeKV("tagtype", t)
 	}
+	for _, name := range mpdTagOrder {
+		c.writeKV("tagtype", mpdTagNames[name])
+	}
 	return nil
 }
 
@@ -2628,6 +2692,14 @@ func (c *mpdConn) writeTrack(track map[string]any, pos int, mpdID int, prio ...i
 	}
 	if v := intFromAny(track["discnumber"], 0); v > 0 {
 		c.writeKV("Disc", v)
+	}
+	// Generic tags (genre, composer, MusicBrainz IDs, ...) in fixed order
+	if tags, ok := track["tags"].(map[string][]string); ok {
+		for _, name := range mpdTagOrder {
+			for _, v := range tags[name] {
+				c.writeKV(mpdTagNames[name], v)
+			}
+		}
 	}
 	dur := 0.0
 	if d, ok := track["duration"].(float64); ok {

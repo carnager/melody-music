@@ -210,9 +210,21 @@ func (s *scanner) fullScan() error {
 			tx.Rollback()
 			return fmt.Errorf("prepare track stmt: %w", err)
 		}
+		stmtDelTags, err := tx.Prepare(`DELETE FROM track_tags WHERE track_id = ?`)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("prepare tag delete stmt: %w", err)
+		}
+		stmtInsTag, err := tx.Prepare(`INSERT INTO track_tags(track_id, tag, value) VALUES(?, ?, ?)`)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("prepare tag insert stmt: %w", err)
+		}
 		defer stmtArtist.Close()
 		defer stmtAlbum.Close()
 		defer stmtTrack.Close()
+		defer stmtDelTags.Close()
+		defer stmtInsTag.Close()
 
 		for _, t := range toUpsert {
 			var artistID int64
@@ -244,6 +256,12 @@ func (s *scanner) fullScan() error {
 					s.logger.Printf("scanner: track upsert error for %s: %v", t.Path, err)
 				}
 			} else {
+				stmtDelTags.Exec(trackID)
+				for name, vals := range t.tags {
+					for _, v := range vals {
+						stmtInsTag.Exec(trackID, name, v)
+					}
+				}
 				scanned++
 			}
 		}
@@ -591,6 +609,7 @@ func (s *scanner) readFileMeta(path string, modTime int64) (*trackMeta, error) {
 		albumArtist:     albumArtist,
 		album:           album,
 		date:            date,
+		tags:            normalizeRawTags(metadata),
 	}, nil
 }
 
