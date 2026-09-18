@@ -81,7 +81,11 @@ func (m *musicDB) migrate() error {
 			rating TEXT NOT NULL DEFAULT '',
 			rating_hash TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
-			added INTEGER NOT NULL DEFAULT 0
+			added INTEGER NOT NULL DEFAULT 0,
+			codec TEXT NOT NULL DEFAULT '',
+			sample_rate INTEGER NOT NULL DEFAULT 0,
+			bits_per_sample INTEGER NOT NULL DEFAULT 0,
+			channels INTEGER NOT NULL DEFAULT 0
 		);
 		CREATE TABLE IF NOT EXISTS playlists (
 			id INTEGER PRIMARY KEY,
@@ -134,6 +138,13 @@ func (m *musicDB) migrate() error {
 	m.db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5(
 		artist, albumartist, title, album
 	)`)
+
+	// Migration: add stream technicals (docs/protocol.md). Zero/empty means
+	// the scanner has not probed the file yet; startup scans backfill lazily.
+	m.db.Exec(`ALTER TABLE tracks ADD COLUMN codec TEXT NOT NULL DEFAULT ''`)
+	m.db.Exec(`ALTER TABLE tracks ADD COLUMN sample_rate INTEGER NOT NULL DEFAULT 0`)
+	m.db.Exec(`ALTER TABLE tracks ADD COLUMN bits_per_sample INTEGER NOT NULL DEFAULT 0`)
+	m.db.Exec(`ALTER TABLE tracks ADD COLUMN channels INTEGER NOT NULL DEFAULT 0`)
 
 	// Migration: add rating_hash column if missing
 	m.db.Exec(`ALTER TABLE tracks ADD COLUMN rating_hash TEXT NOT NULL DEFAULT ''`)
@@ -536,6 +547,10 @@ type trackMeta struct {
 	ReplayGainAlbum float64
 	PeakTrack       float64
 	PeakAlbum       float64
+	Codec           string
+	SampleRate      int
+	BitsPerSample   int
+	Channels        int
 
 	// Resolved during scan, used by batch writer to look up artist/album IDs
 	albumArtist string
@@ -556,8 +571,9 @@ func (m *musicDB) upsertTrack(t *trackMeta) (int64, error) {
 	// "added" is set on first insert only; the conflict branch leaves it alone so
 	// the MPD 0.24 Added timestamp survives rescans of an existing file.
 	err := m.db.QueryRow(`INSERT INTO tracks(album_id, artist, title, track_number, disc_number,
-			duration, path, file_modified, replay_gain_track, replay_gain_album, peak_track, peak_album, rating_hash, added)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(strftime('%s','now') AS INTEGER))
+			duration, path, file_modified, replay_gain_track, replay_gain_album, peak_track, peak_album, rating_hash,
+			codec, sample_rate, bits_per_sample, channels, added)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(strftime('%s','now') AS INTEGER))
 		ON CONFLICT(path) DO UPDATE SET
 			album_id = excluded.album_id,
 			artist = excluded.artist,
@@ -570,10 +586,15 @@ func (m *musicDB) upsertTrack(t *trackMeta) (int64, error) {
 			replay_gain_album = excluded.replay_gain_album,
 			peak_track = excluded.peak_track,
 			peak_album = excluded.peak_album,
-			rating_hash = excluded.rating_hash
+			rating_hash = excluded.rating_hash,
+			codec = excluded.codec,
+			sample_rate = excluded.sample_rate,
+			bits_per_sample = excluded.bits_per_sample,
+			channels = excluded.channels
 		RETURNING id`,
 		t.AlbumID, t.Artist, t.Title, t.TrackNumber, t.DiscNumber,
-		t.Duration, t.Path, t.FileModified, t.ReplayGainTrack, t.ReplayGainAlbum, t.PeakTrack, t.PeakAlbum, rHash).Scan(&id)
+		t.Duration, t.Path, t.FileModified, t.ReplayGainTrack, t.ReplayGainAlbum, t.PeakTrack, t.PeakAlbum, rHash,
+		t.Codec, t.SampleRate, t.BitsPerSample, t.Channels).Scan(&id)
 	if err != nil {
 		return 0, err
 	}
@@ -784,7 +805,8 @@ func (m *musicDB) tracksByConditions(generic []filterCondition, artist, albumArt
 	query := `SELECT t.id, t.album_id, t.artist, t.title,
 		t.track_number, t.disc_number, t.duration, t.path,
 		t.replay_gain_track, t.replay_gain_album, t.peak_track, t.peak_album,
-		t.rating, t.rating_hash, t.added, t.file_modified, a.name, al.title, al.date
+		t.rating, t.rating_hash, t.added, t.file_modified, t.codec, t.sample_rate,
+		t.bits_per_sample, t.channels, a.name, al.title, al.date
 		FROM tracks t
 		INNER JOIN albums al ON al.id = t.album_id
 		INNER JOIN artists a ON a.id = al.artist_id
@@ -833,7 +855,8 @@ func (m *musicDB) trackByID(id int64) (map[string]any, error) {
 	return m.scanTrackRow(m.db.QueryRow(`SELECT t.id, t.album_id, t.artist, t.title,
 		t.track_number, t.disc_number, t.duration, t.path,
 		t.replay_gain_track, t.replay_gain_album, t.peak_track, t.peak_album,
-		t.rating, t.rating_hash, t.added, t.file_modified, a.name, al.title, al.date
+		t.rating, t.rating_hash, t.added, t.file_modified, t.codec, t.sample_rate,
+		t.bits_per_sample, t.channels, a.name, al.title, al.date
 		FROM tracks t
 		INNER JOIN albums al ON al.id = t.album_id
 		INNER JOIN artists a ON a.id = al.artist_id
@@ -896,7 +919,8 @@ func (m *musicDB) trackByPath(path string) (map[string]any, error) {
 	return m.scanTrackRow(m.db.QueryRow(`SELECT t.id, t.album_id, t.artist, t.title,
 		t.track_number, t.disc_number, t.duration, t.path,
 		t.replay_gain_track, t.replay_gain_album, t.peak_track, t.peak_album,
-		t.rating, t.rating_hash, t.added, t.file_modified, a.name, al.title, al.date
+		t.rating, t.rating_hash, t.added, t.file_modified, t.codec, t.sample_rate,
+		t.bits_per_sample, t.channels, a.name, al.title, al.date
 		FROM tracks t
 		INNER JOIN albums al ON al.id = t.album_id
 		INNER JOIN artists a ON a.id = al.artist_id
@@ -907,7 +931,8 @@ func (m *musicDB) tracksByPathPrefix(prefix string) ([]map[string]any, error) {
 	rows, err := m.db.Query(`SELECT t.id, t.album_id, t.artist, t.title,
 		t.track_number, t.disc_number, t.duration, t.path,
 		t.replay_gain_track, t.replay_gain_album, t.peak_track, t.peak_album,
-		t.rating, t.rating_hash, t.added, t.file_modified, a.name, al.title, al.date
+		t.rating, t.rating_hash, t.added, t.file_modified, t.codec, t.sample_rate,
+		t.bits_per_sample, t.channels, a.name, al.title, al.date
 		FROM tracks t
 		INNER JOIN albums al ON al.id = t.album_id
 		INNER JOIN artists a ON a.id = al.artist_id
@@ -924,7 +949,8 @@ func (m *musicDB) tracksByAlbum(albumID int64) ([]map[string]any, error) {
 	rows, err := m.db.Query(`SELECT t.id, t.album_id, t.artist, t.title,
 		t.track_number, t.disc_number, t.duration, t.path,
 		t.replay_gain_track, t.replay_gain_album, t.peak_track, t.peak_album,
-		t.rating, t.rating_hash, t.added, t.file_modified, a.name, al.title, al.date
+		t.rating, t.rating_hash, t.added, t.file_modified, t.codec, t.sample_rate,
+		t.bits_per_sample, t.channels, a.name, al.title, al.date
 		FROM tracks t
 		INNER JOIN albums al ON al.id = t.album_id
 		INNER JOIN artists a ON a.id = al.artist_id
@@ -959,7 +985,8 @@ func (m *musicDB) allTracks() ([]map[string]any, error) {
 	rows, err := m.db.Query(`SELECT t.id, t.album_id, t.artist, t.title,
 		t.track_number, t.disc_number, t.duration, t.path,
 		t.replay_gain_track, t.replay_gain_album, t.peak_track, t.peak_album,
-		t.rating, t.rating_hash, t.added, t.file_modified, a.name, al.title, al.date
+		t.rating, t.rating_hash, t.added, t.file_modified, t.codec, t.sample_rate,
+		t.bits_per_sample, t.channels, a.name, al.title, al.date
 		FROM tracks t
 		INNER JOIN albums al ON al.id = t.album_id
 		INNER JOIN artists a ON a.id = al.artist_id
@@ -1075,7 +1102,8 @@ func (m *musicDB) search(query string, maxResults int) (albums []map[string]any,
 	rows, err := m.db.Query(`SELECT t.id, t.album_id, t.artist, t.title,
 		t.track_number, t.disc_number, t.duration, t.path,
 		t.replay_gain_track, t.replay_gain_album, t.peak_track, t.peak_album,
-		t.rating, t.rating_hash, t.added, t.file_modified, a.name, al.title, al.date
+		t.rating, t.rating_hash, t.added, t.file_modified, t.codec, t.sample_rate,
+		t.bits_per_sample, t.channels, a.name, al.title, al.date
 		FROM tracks_fts fts
 		INNER JOIN tracks t ON t.id = fts.rowid
 		INNER JOIN albums al ON al.id = t.album_id
@@ -1267,7 +1295,8 @@ func (m *musicDB) tracksByRatingOp(op string, value int) ([]map[string]any, erro
 	rows, err := m.db.Query(`SELECT t.id, t.album_id, t.artist, t.title,
 		t.track_number, t.disc_number, t.duration, t.path,
 		t.replay_gain_track, t.replay_gain_album, t.peak_track, t.peak_album,
-		t.rating, t.rating_hash, t.added, t.file_modified, a.name, al.title, al.date
+		t.rating, t.rating_hash, t.added, t.file_modified, t.codec, t.sample_rate,
+		t.bits_per_sample, t.channels, a.name, al.title, al.date
 		FROM tracks t
 		INNER JOIN ratings r ON r.hash = t.rating_hash AND r.type = 'track' AND r.rating `+sqlOp+` ?
 		INNER JOIN albums al ON al.id = t.album_id
@@ -1344,7 +1373,8 @@ func (m *musicDB) playlistTracks(playlistID int64) ([]map[string]any, error) {
 	rows, err := m.db.Query(`SELECT t.id, t.album_id, t.artist, t.title,
 		t.track_number, t.disc_number, t.duration, t.path,
 		t.replay_gain_track, t.replay_gain_album, t.peak_track, t.peak_album,
-		t.rating, t.rating_hash, t.added, t.file_modified, a.name, al.title, al.date
+		t.rating, t.rating_hash, t.added, t.file_modified, t.codec, t.sample_rate,
+		t.bits_per_sample, t.channels, a.name, al.title, al.date
 		FROM playlist_tracks pt
 		INNER JOIN tracks t ON t.id = pt.track_id
 		INNER JOIN albums al ON al.id = t.album_id
@@ -1515,6 +1545,25 @@ func (m *musicDB) isFileUnchanged(path string, modTime int64) bool {
 }
 
 // allFileModTimes loads all (path → file_modified) pairs into a map for fast in-memory lookups.
+// pathsMissingTechnicals lists tracks the scanner has not probed for stream
+// properties yet, so an ordinary scan backfills them once after an upgrade.
+func (m *musicDB) pathsMissingTechnicals() (map[string]bool, error) {
+	rows, err := m.db.Query(`SELECT path FROM tracks WHERE codec = '' AND sample_rate = 0`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := map[string]bool{}
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, err
+		}
+		result[path] = true
+	}
+	return result, rows.Err()
+}
+
 func (m *musicDB) allFileModTimes() (map[string]int64, error) {
 	rows, err := m.db.Query(`SELECT path, file_modified FROM tracks`)
 	if err != nil {
@@ -1546,17 +1595,23 @@ func (m *musicDB) trackIDByPath(path string) (int64, error) {
 func (m *musicDB) scanTrackRow(row *sql.Row) (map[string]any, error) {
 	var id, albumID, added, fileModified int64
 	var artist, title, path, rating, ratingHash, albumArtist, albumTitle, albumDate string
-	var trackNum, discNum int
+	var codec string
+	var trackNum, discNum, sampleRate, bitsPerSample, channels int
 	var duration, rgTrack, rgAlbum, peakTrack, peakAlbum float64
 	err := row.Scan(&id, &albumID, &artist, &title, &trackNum, &discNum,
 		&duration, &path, &rgTrack, &rgAlbum, &peakTrack, &peakAlbum,
-		&rating, &ratingHash, &added, &fileModified, &albumArtist, &albumTitle, &albumDate)
+		&rating, &ratingHash, &added, &fileModified, &codec, &sampleRate,
+		&bitsPerSample, &channels, &albumArtist, &albumTitle, &albumDate)
 	if err != nil {
 		return nil, err
 	}
 	t := m.buildTrackMap(id, albumID, added, fileModified, artist, title, path, trackNum, discNum,
 		duration, rgTrack, rgAlbum, peakTrack, peakAlbum, rating, ratingHash,
 		albumArtist, albumTitle, albumDate)
+	t["codec"] = codec
+	t["samplerate"] = sampleRate
+	t["bitspersample"] = bitsPerSample
+	t["channels"] = channels
 	// Enrich single track with rating from ratings table
 	if ratingHash != "" {
 		if r, err := m.getRating(ratingHash); err == nil && r > 0 {
@@ -1572,16 +1627,23 @@ func (m *musicDB) scanTrackRows(rows *sql.Rows) ([]map[string]any, error) {
 	for rows.Next() {
 		var id, albumID, added, fileModified int64
 		var artist, title, path, rating, ratingHash, albumArtist, albumTitle, albumDate string
-		var trackNum, discNum int
+		var codec string
+		var trackNum, discNum, sampleRate, bitsPerSample, channels int
 		var duration, rgTrack, rgAlbum, peakTrack, peakAlbum float64
 		if err := rows.Scan(&id, &albumID, &artist, &title, &trackNum, &discNum,
 			&duration, &path, &rgTrack, &rgAlbum, &peakTrack, &peakAlbum,
-			&rating, &ratingHash, &added, &fileModified, &albumArtist, &albumTitle, &albumDate); err != nil {
+			&rating, &ratingHash, &added, &fileModified, &codec, &sampleRate,
+			&bitsPerSample, &channels, &albumArtist, &albumTitle, &albumDate); err != nil {
 			return nil, err
 		}
-		tracks = append(tracks, m.buildTrackMap(id, albumID, added, fileModified, artist, title, path, trackNum, discNum,
+		track := m.buildTrackMap(id, albumID, added, fileModified, artist, title, path, trackNum, discNum,
 			duration, rgTrack, rgAlbum, peakTrack, peakAlbum, rating, ratingHash,
-			albumArtist, albumTitle, albumDate))
+			albumArtist, albumTitle, albumDate)
+		track["codec"] = codec
+		track["samplerate"] = sampleRate
+		track["bitspersample"] = bitsPerSample
+		track["channels"] = channels
+		tracks = append(tracks, track)
 	}
 	if tracks == nil {
 		tracks = []map[string]any{}

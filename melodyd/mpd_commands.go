@@ -1632,6 +1632,12 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 				filteredConditions = append(filteredConditions, cond)
 			}
 		default:
+			// Stream technicals (docs/protocol.md) filter the result tracks
+			// when they are written, like window/sort.
+			if isTechnicalConditionTag(cond.tag) {
+				c.techConds = append(c.techConds, cond)
+				continue
+			}
 			filteredConditions = append(filteredConditions, cond)
 		}
 	}
@@ -1639,6 +1645,7 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 	defer func() {
 		c.addedSince = 0
 		c.modifiedSince = 0
+		c.techConds = nil
 	}()
 
 	// Build a map of tag → value for quick lookup
@@ -1893,6 +1900,7 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 // cmdTextSearch does a text-based search and returns or enqueues the results.
 // writeOrAddFilteredTracks writes or enqueues tracks, optionally filtering by rating.
 func writeOrAddFilteredTracks(c *mpdConn, a *app, tracks []map[string]any, ratingFilter, albumRatingFilter *ratingCond, cmdName string, addToQueue bool) *mpdError {
+	tracks = filterTracksByTechnicals(tracks, c.techConds)
 	// If album rating filter is active, batch-fetch album ratings and filter
 	var albumRatings map[string]int
 	if albumRatingFilter != nil {
@@ -2695,6 +2703,18 @@ func (c *mpdConn) writeTrack(track map[string]any, pos int, mpdID int, prio ...i
 	}
 	if v := intFromAny(track["discnumber"], 0); v > 0 {
 		c.writeKV("Disc", v)
+	}
+	// Stream technicals (docs/protocol.md): the standard Format line plus the
+	// codec name, which Format cannot carry. Lossy codecs report "f" bits.
+	if rate := intFromAny(track["samplerate"], 0); rate > 0 {
+		bits := "f"
+		if v := intFromAny(track["bitspersample"], 0); v > 0 {
+			bits = strconv.Itoa(v)
+		}
+		c.writeKV("Format", fmt.Sprintf("%d:%s:%d", rate, bits, intFromAny(track["channels"], 0)))
+	}
+	if v := stringify(track["codec"]); v != "" {
+		c.writeKV("X-Codec", v)
 	}
 	// Generic tags (genre, composer, MusicBrainz IDs, ...) in fixed order
 	if tags, ok := track["tags"].(map[string][]string); ok {

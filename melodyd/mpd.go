@@ -152,6 +152,10 @@ type mpdConn struct {
 	sortTag  string
 	sortDesc bool
 
+	// Technical filter conditions extracted from the running find/search
+	// (docs/protocol.md); applied when the result tracks are written.
+	techConds []filterCondition
+
 	// added-since / modified-since filters (unix seconds, 0 = inactive)
 	addedSince    int64
 	modifiedSince int64

@@ -119,6 +119,35 @@ to the scanner's `0000` placeholder, because standard listings omit
 `Date: 0000` and clients therefore address undated albums with an empty
 string. Both spellings name the same album identity.
 
+## Stream technicals
+
+The scanner stores each track's stream properties — codec name, sample
+rate, bits per sample (lossless only), and channel count — read from the
+same container headers the duration readers parse (FLAC STREAMINFO, Ogg
+Vorbis/Opus identification headers, MP3 frame headers, MP4 sample
+entries). Rows scanned by older releases backfill automatically on the
+next ordinary scan, unchanged files included.
+
+Song listings report them as the standard `Format: rate:bits:channels`
+line (`f` for codecs without a stored bit depth) plus `X-Codec: {name}`,
+which `Format` cannot carry.
+
+`find`/`search`/`findadd`/`searchadd` accept the matching filter
+conditions, named for tkq's pseudo-fields so clients can translate
+structured queries mechanically:
+
+| Condition | Operators | Meaning |
+| --- | --- | --- |
+| `(samplerate OP N)` | `==` `>` `>=` `<` `<=` | Sample rate in Hz. |
+| `(bitspersample OP N)` | numeric | Stored bit depth; lossy codecs never match. |
+| `(channels OP N)` | numeric | Channel count. |
+| `(length OP N)` | numeric | Duration in whole seconds. |
+| `(codec == "flac")` | `==`, `contains` | Codec name, case-insensitive. |
+
+Unprobed tracks (not yet rescanned after the upgrade) never match a
+technical condition. All five also work as track-level terms in
+`searchalbums`.
+
 ## Album-shaped search: `searchalbums`
 
 ```text

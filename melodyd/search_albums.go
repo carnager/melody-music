@@ -33,6 +33,7 @@ type albumSearchTerms struct {
 	addedSince   int64
 	trackLevel   []filterCondition
 	trackRating  *ratingCond
+	technical    []filterCondition
 	textWords    []string
 	unsupportedT string
 }
@@ -72,6 +73,10 @@ func splitAlbumSearchTerms(conditions []filterCondition) albumSearchTerms {
 		case "any":
 			terms.textWords = append(terms.textWords, cond.value)
 		default:
+			if isTechnicalConditionTag(cond.tag) {
+				terms.technical = append(terms.technical, cond)
+				continue
+			}
 			if _, ok := mpdTagNames[cond.tag]; ok {
 				terms.trackLevel = append(terms.trackLevel, cond)
 				continue
@@ -107,7 +112,7 @@ func matchAlbumText(cond *filterCondition, value string) bool {
 // track-level filtering applies at all.
 func trackLevelAlbumIDs(a *app, terms albumSearchTerms) (map[string]bool, bool, *mpdError) {
 	hasTrackTerms := len(terms.trackLevel) > 0 || terms.trackRating != nil ||
-		len(terms.textWords) > 0
+		len(terms.textWords) > 0 || len(terms.technical) > 0
 	if !hasTrackTerms {
 		return nil, false, nil
 	}
@@ -142,12 +147,16 @@ func trackLevelAlbumIDs(a *app, terms albumSearchTerms) (map[string]bool, bool, 
 			}
 			tracks = kept
 		}
-	default:
+	case terms.trackRating != nil:
 		tracks, err = a.db.tracksByRatingOp(terms.trackRating.op, terms.trackRating.value)
+	default:
+		// Technical-only track terms scan the library once.
+		tracks, err = a.db.allTracks()
 	}
 	if err != nil {
 		return nil, true, mpdErr(errSystem, "searchalbums", err.Error())
 	}
+	tracks = filterTracksByTechnicals(tracks, terms.technical)
 
 	ids := map[string]bool{}
 	for _, t := range tracks {

@@ -82,6 +82,11 @@ func (s *scanner) fullScan() error {
 		s.logger.Printf("scanner: warning: could not load mod times: %v", err)
 		modTimes = map[string]int64{}
 	}
+	techMissing, err := s.db.pathsMissingTechnicals()
+	if err != nil {
+		s.logger.Printf("scanner: warning: could not load technicals state: %v", err)
+		techMissing = map[string]bool{}
+	}
 
 	// Collect all audio files
 	var files []string
@@ -131,8 +136,10 @@ func (s *scanner) fullScan() error {
 			}
 			modTime := info.ModTime().UnixMilli()
 
-			// Fast skip: check in-memory mod time map instead of per-file DB query
-			if stored, ok := modTimes[p]; ok && stored == modTime {
+			// Fast skip: check in-memory mod time map instead of per-file DB
+			// query. Rows still missing their stream technicals re-read once
+			// even when unchanged, so upgrades backfill on an ordinary scan.
+			if stored, ok := modTimes[p]; ok && stored == modTime && !techMissing[p] {
 				results <- scanResult{path: p, skip: true}
 				return
 			}
@@ -190,8 +197,9 @@ func (s *scanner) fullScan() error {
 		// "added" (MPD 0.24 Added timestamp) is set on first insert only; the
 		// conflict branch leaves it alone so it survives rescans.
 		stmtTrack, err := tx.Prepare(`INSERT INTO tracks(album_id, artist, title, track_number, disc_number,
-			duration, path, file_modified, replay_gain_track, replay_gain_album, peak_track, peak_album, rating_hash, added)
-			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(strftime('%s','now') AS INTEGER))
+			duration, path, file_modified, replay_gain_track, replay_gain_album, peak_track, peak_album, rating_hash,
+			codec, sample_rate, bits_per_sample, channels, added)
+			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(strftime('%s','now') AS INTEGER))
 			ON CONFLICT(path) DO UPDATE SET
 				album_id = excluded.album_id,
 				artist = excluded.artist,
@@ -204,7 +212,11 @@ func (s *scanner) fullScan() error {
 				replay_gain_album = excluded.replay_gain_album,
 				peak_track = excluded.peak_track,
 				peak_album = excluded.peak_album,
-				rating_hash = excluded.rating_hash
+				rating_hash = excluded.rating_hash,
+				codec = excluded.codec,
+				sample_rate = excluded.sample_rate,
+				bits_per_sample = excluded.bits_per_sample,
+				channels = excluded.channels
 			RETURNING id`)
 		if err != nil {
 			tx.Rollback()
@@ -249,7 +261,8 @@ func (s *scanner) fullScan() error {
 			var trackID int64
 			err := stmtTrack.QueryRow(albumID, t.Artist, t.Title, t.TrackNumber, t.DiscNumber,
 				t.Duration, t.Path, t.FileModified,
-				t.ReplayGainTrack, t.ReplayGainAlbum, t.PeakTrack, t.PeakAlbum, rHash).Scan(&trackID)
+				t.ReplayGainTrack, t.ReplayGainAlbum, t.PeakTrack, t.PeakAlbum, rHash,
+				t.Codec, t.SampleRate, t.BitsPerSample, t.Channels).Scan(&trackID)
 			if err != nil {
 				scanErrors++
 				if scanErrors <= 10 {
@@ -594,6 +607,8 @@ func (s *scanner) readFileMeta(path string, modTime int64) (*trackMeta, error) {
 		duration = durationFromFile(path)
 	}
 
+	technicals := technicalsFromFile(path)
+
 	return &trackMeta{
 		Artist:          firstNonEmpty(artist, albumArtist),
 		Title:           title,
@@ -606,6 +621,10 @@ func (s *scanner) readFileMeta(path string, modTime int64) (*trackMeta, error) {
 		ReplayGainAlbum: rgAlbum,
 		PeakTrack:       peakTrack,
 		PeakAlbum:       peakAlbum,
+		Codec:           technicals.Codec,
+		SampleRate:      technicals.SampleRate,
+		BitsPerSample:   technicals.BitsPerSample,
+		Channels:        technicals.Channels,
 		albumArtist:     albumArtist,
 		album:           album,
 		date:            date,
@@ -617,15 +636,20 @@ func (s *scanner) readFileMetaMinimal(path string, modTime int64) *trackMeta {
 	title := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	dir := filepath.Base(filepath.Dir(path))
 
+	technicals := technicalsFromFile(path)
 	return &trackMeta{
-		Artist:       "Unknown Artist",
-		Title:        title,
-		Duration:     0,
-		Path:         path,
-		FileModified: modTime,
-		albumArtist:  "Unknown Artist",
-		album:        dir,
-		date:         "0000",
+		Artist:        "Unknown Artist",
+		Title:         title,
+		Duration:      0,
+		Path:          path,
+		FileModified:  modTime,
+		Codec:         technicals.Codec,
+		SampleRate:    technicals.SampleRate,
+		BitsPerSample: technicals.BitsPerSample,
+		Channels:      technicals.Channels,
+		albumArtist:   "Unknown Artist",
+		album:         dir,
+		date:          "0000",
 	}
 }
 

@@ -46,7 +46,11 @@ searchalbums {FILTER} [sort {[-]TAG}] [window {START:END}]
   `list Album` plumbing already cover most of the query surface; this is
   largely response shaping.
 
-## Phase 2 — technical filter conditions
+## Phase 2 — technical filter conditions (done)
+
+Implemented and specified in [protocol.md](protocol.md); the notes below are
+the original design draft. The scanner half landed as Go-side header parsing
+with a lazy backfill keyed on missing technicals.
 
 Trackbench's local queries filter on probe facts (`samplerate`,
 `bitspersample`, `channels`, `codec`, `length`). Melody's scanner currently
