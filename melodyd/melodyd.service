@@ -7,6 +7,9 @@ Type=simple
 ExecStart=/usr/bin/melodyd
 Restart=on-failure
 RestartSec=5
+# Exit 78 (EX_CONFIG) means "no usable configuration; run melodyd setup" —
+# restarting will not fix it, so show the message once instead of looping.
+RestartPreventExitStatus=78
 
 [Install]
 WantedBy=default.target

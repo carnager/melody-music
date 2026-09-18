@@ -15,18 +15,20 @@ remote computer, and `ffmpeg` on the server for transcoding.
 ./build
 ```
 
-Binaries are written to `bin/`. Create `~/.config/melody/melodyd.toml`
-(use `$XDG_CONFIG_HOME/melody/melodyd.toml` if set):
+Binaries are written to `bin/`. Start the server:
+
+```sh
+./bin/melodyd
+```
+
+The first start walks you through setup — music folder, ports, optional web
+password — and writes `~/.config/melody/melodyd.toml` for you. Re-run
+`./bin/melodyd setup` any time to change the answers, or edit the file by
+hand; the minimum it needs is:
 
 ```toml
 [library]
 music_dir = "/mnt/music"
-```
-
-Start the server:
-
-```sh
-./bin/melodyd
 ```
 
 Open <http://localhost:6701/web/> or run `./bin/melody-tui` in another terminal.
