@@ -54,7 +54,10 @@ playback settings, and running it as a service.
 - **melody-watcher** — watch files on a NAS and tell melodyd to rescan changes.
 
 [Client configuration](docs/clients.md) covers connection settings and remote
-playback. Melody also supports MPD clients and scrobblers through port `6600`.
+playback. Melody also supports MPD clients and scrobblers through port `6600`;
+[Protocol extensions](docs/protocol.md) documents the Melody-specific commands
+for client authors, and the [protocol roadmap](docs/protocol-roadmap.md) tracks
+planned additions.
 
 To build and install the Android app on a connected device:
 

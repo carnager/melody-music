@@ -1,5 +1,9 @@
 # TODO
 
+Protocol parity work (album-shaped search, technical filters, listening
+statistics) is planned in [docs/protocol-roadmap.md](docs/protocol-roadmap.md);
+the item below is also its Phase 3 conformance prerequisite.
+
 ## Preserve playback state when adding to an empty queue
 
 Melody currently starts playback when MPD `add`/`addid` populates an empty queue. These commands
