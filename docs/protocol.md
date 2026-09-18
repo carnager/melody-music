@@ -92,10 +92,42 @@ missing); date is the four-digit year or `0000`. These formulas are a
 compatibility contract — Trackbench stores its local ratings under the same
 hashes so the two stores can be synchronized by key.
 
-## Filter extensions in find/search
+## Filter grammar
 
-`find`, `search`, `findadd`, and `searchadd` accept MPD 0.21+ filter
-expressions. Beyond the standard tags, Melody accepts:
+`find`, `search`, `findadd`, `searchadd`, and `searchalbums` accept MPD
+0.21+ filter expressions in full, plus one Melody extension. The grammar,
+advertised by the `filtergrammar` command (`filtergrammar` →
+`grammar: 2`):
+
+```text
+EXPR  := '(' INNER ')'
+INNER := '!' EXPR                       (negation, stock MPD)
+       | EXPR ' AND ' EXPR [...]        (conjunction, stock MPD)
+       | EXPR ' OR ' EXPR [...]         (disjunction, MELODY EXTENSION)
+       | TAG OP VALUE
+       | 'base' VALUE | 'added-since' VALUE | 'modified-since' VALUE
+OP    := '==' | '!=' | 'contains' | '>' | '>=' | '<' | '<='
+```
+
+- Expressions nest arbitrarily. Mixing `AND` and `OR` at one nesting
+  level without parentheses is an error — `((a) AND (b) OR (c))` is
+  rejected, `(((a) AND (b)) OR (c))` is fine.
+- `(TAG == '')` matches songs where the tag is absent and `(TAG != '')`
+  matches songs where it is present, exactly like stock MPD. With a
+  non-empty value, `!=` means "the tag is present and no value equals it".
+- Numeric comparisons (`>` `>=` `<` `<=`) work on any tag: the leading
+  integer of a value is compared, so `(date > 1995)` matches by year.
+  Values without a leading integer never match.
+- Values quote with single or double quotes; backslash escapes the quote
+  character. Multiple expression arguments AND together, like stock MPD.
+- Malformed expressions are an `ACK`, never a silently empty result.
+- Stock MPD has no `OR`: a client emitting it must gate on the advertised
+  `filtergrammar` command if it also talks to real MPD servers. Servers
+  without `filtergrammar` are older Melody releases that accept flat
+  conjunctions of positive conditions only (no `OR`, `!`, `!=`,
+  empty-value forms, nesting, or numeric comparisons on ordinary tags).
+
+Beyond the standard tags, Melody accepts:
 
 | Condition | Operators | Meaning |
 | --- | --- | --- |

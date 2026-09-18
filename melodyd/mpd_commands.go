@@ -112,6 +112,9 @@ func init() {
 		// Album-shaped search (docs/protocol.md)
 		"searchalbums": cmdSearchAlbums,
 
+		// Filter grammar capability marker (docs/protocol.md)
+		"filtergrammar": cmdFilterGrammar,
+
 		// Web client
 		"web_register":   cmdWebRegister,
 		"web_unregister": cmdWebUnregister,
@@ -1319,7 +1322,7 @@ func cmdList(c *mpdConn, args []string) *mpdError {
 	i := 1
 	// Check for new-style filter expression
 	if i < len(args) && strings.HasPrefix(args[i], "(") {
-		conditions := parseFilterExpr(args[i])
+		conditions := parseFilterConditions(args[i])
 		if len(conditions) > 0 {
 			filterTag = conditions[0].tag
 			filterVal = conditions[0].value
@@ -1526,16 +1529,23 @@ func cmdSearchOrFindInner(c *mpdConn, args []string, cmdName string, caseInsensi
 	}
 
 	if allFilters {
-		// Collect conditions from all filter expression args
-		// Real MPD: find "(AlbumArtist == \"x\")" "(Album == \"y\")" = AND of all
-		var conditions []filterCondition
-		for _, a := range args {
-			conditions = append(conditions, parseFilterExpr(a)...)
+		// Multiple expression args AND together, like real MPD.
+		var trees []*filterNode
+		for _, arg := range args {
+			tree, err := parseFilterTree(arg)
+			if err != nil {
+				return mpdErr(errArg, cmdName, err.Error())
+			}
+			trees = append(trees, tree)
 		}
-		if len(conditions) > 0 {
+		tree := trees[0]
+		if len(trees) > 1 {
+			tree = &filterNode{kind: filterAnd, children: trees}
+		}
+		if conditions, ok := flattenConjunction(tree); ok {
 			return cmdFindByConditions(c, conditions, cmdName, caseInsensitive, addToQueue)
 		}
-		return nil
+		return cmdFindByTree(c, tree, cmdName, caseInsensitive, addToQueue)
 	}
 
 	// Old-style: tag value [tag value ...]
@@ -2809,114 +2819,6 @@ type filterCondition struct {
 	tag   string // e.g. "albumartist", "album", "any"
 	op    string // "==" or "contains"
 	value string
-}
-
-// parseFilterExpr parses MPD new-style filter expressions like:
-//
-//	"((AlbumArtist == \"foo\") AND (Album == \"bar\"))"
-//	"(any contains \"query\")"
-//	"(AlbumArtist == \"foo\")"
-//
-// Returns a slice of conditions ANDed together.
-func parseFilterExpr(expr string) []filterCondition {
-	// Strip outer parens layers
-	expr = strings.TrimSpace(expr)
-	var conditions []filterCondition
-
-	// Split on " AND " (case-insensitive would be nice but MPD uses uppercase)
-	// First strip the outermost parens if present
-	for strings.HasPrefix(expr, "(") && strings.HasSuffix(expr, ")") {
-		inner := expr[1 : len(expr)-1]
-		// Check if removing outer parens is balanced
-		depth := 0
-		balanced := true
-		for _, r := range inner {
-			if r == '(' {
-				depth++
-			} else if r == ')' {
-				depth--
-			}
-			if depth < 0 {
-				balanced = false
-				break
-			}
-		}
-		if balanced && depth == 0 {
-			expr = inner
-		} else {
-			break
-		}
-	}
-
-	// Split by AND
-	parts := splitFilterAND(expr)
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		// Strip parens from individual clause
-		for strings.HasPrefix(part, "(") && strings.HasSuffix(part, ")") {
-			part = part[1 : len(part)-1]
-		}
-		cond := parseOneCondition(part)
-		if cond.tag != "" {
-			conditions = append(conditions, cond)
-		}
-	}
-	return conditions
-}
-
-// splitFilterAND splits an expression on " AND " respecting parenthesis depth.
-func splitFilterAND(s string) []string {
-	var parts []string
-	depth := 0
-	start := 0
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
-		case '(':
-			depth++
-		case ')':
-			depth--
-		}
-		if depth == 0 && i+5 <= len(s) && s[i:i+5] == " AND " {
-			parts = append(parts, s[start:i])
-			start = i + 5
-			i += 4
-		}
-	}
-	parts = append(parts, s[start:])
-	return parts
-}
-
-// parseOneCondition parses "Tag == \"value\"" or "Tag contains \"value\"",
-// plus the operator-less prefix forms "base \"uri\"", "added-since \"ts\"" and
-// "modified-since \"ts\"".
-func parseOneCondition(s string) filterCondition {
-	s = strings.TrimSpace(s)
-	for _, op := range []string{" >= ", " <= ", " == ", " > ", " < ", " contains "} {
-		idx := strings.Index(s, op)
-		if idx < 0 {
-			continue
-		}
-		tag := strings.TrimSpace(s[:idx])
-		val := strings.TrimSpace(s[idx+len(op):])
-		// Strip quotes from value
-		val = stripQuotes(val)
-		return filterCondition{
-			tag:   strings.ToLower(tag),
-			op:    strings.TrimSpace(op),
-			value: val,
-		}
-	}
-	if idx := strings.Index(s, " "); idx > 0 {
-		tag := strings.ToLower(strings.TrimSpace(s[:idx]))
-		switch tag {
-		case "base", "added-since", "modified-since":
-			return filterCondition{
-				tag:   tag,
-				value: stripQuotes(strings.TrimSpace(s[idx+1:])),
-			}
-		}
-	}
-	return filterCondition{}
 }
 
 // sortableTags lists the tags find/search accept in "sort [-]TAG" (lowercased).

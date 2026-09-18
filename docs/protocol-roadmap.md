@@ -81,6 +81,21 @@ offer its structured Search dialog (including saved searches) against a
 untranslatable queries with a clear error, instead of Melody ever learning
 tkq or tkfmt itself.
 
+## Phase 2b — full filter grammar (done)
+
+Implemented and specified in [protocol.md](protocol.md). The flat AND-only
+filter parser was replaced with a recursive one covering stock MPD 0.21+
+in full — nesting, `!` negation, `!=`, and the empty-value
+present/missing forms — plus `OR` disjunction as a Melody extension and
+numeric leading-integer comparisons on ordinary tags. The `filtergrammar`
+command (`grammar: 2`) is the capability gate, so Trackknife's tkq
+translator can emit `OR`/`NOT`/`PRESENT`/`MISSING` and numeric tag
+comparisons against new servers while degrading to the flat subset (with
+a clear "not supported" error for the rest) against old ones. Flat
+conjunctions keep the indexed fast paths; structured trees evaluate per
+track and feed the shared sort/window pipeline. Malformed expressions are
+protocol errors, never silently empty results.
+
 ## Phase 3 — conformance and hygiene
 
 Small items that make the extension surface trustworthy:

@@ -220,29 +220,61 @@ func cmdSearchAlbums(c *mpdConn, args []string) *mpdError {
 		return mpdErr(errArg, "searchalbums", "need filter arguments")
 	}
 
-	var conditions []filterCondition
+	var trees []*filterNode
 	for _, arg := range filterArgs {
 		if !strings.HasPrefix(arg, "(") {
 			return mpdErr(errArg, "searchalbums", "need filter expressions")
 		}
-		conditions = append(conditions, parseFilterExpr(arg)...)
+		tree, err := parseFilterTree(arg)
+		if err != nil {
+			return mpdErr(errArg, "searchalbums", err.Error())
+		}
+		trees = append(trees, tree)
 	}
-	if len(conditions) == 0 {
-		return mpdErr(errArg, "searchalbums", "need filter expressions")
-	}
-	terms := splitAlbumSearchTerms(conditions)
-	if terms.unsupportedT != "" {
-		return mpdErr(errArg, "searchalbums", terms.unsupportedT)
+	tree := trees[0]
+	if len(trees) > 1 {
+		tree = &filterNode{kind: filterAnd, children: trees}
 	}
 
 	a := c.app
+	conditions, flat := flattenConjunction(tree)
+	var terms albumSearchTerms
+	if flat {
+		terms = splitAlbumSearchTerms(conditions)
+		if terms.unsupportedT != "" {
+			return mpdErr(errArg, "searchalbums", terms.unsupportedT)
+		}
+	}
+
 	albums, err := a.db.allAlbums(false)
 	if err != nil {
 		return mpdErr(errSystem, "searchalbums", err.Error())
 	}
-	trackAlbumIDs, trackFiltered, mpdErr2 := trackLevelAlbumIDs(a, terms)
-	if mpdErr2 != nil {
-		return mpdErr2
+	var trackAlbumIDs map[string]bool
+	var trackFiltered bool
+	if flat {
+		var mpdErr2 *mpdError
+		trackAlbumIDs, trackFiltered, mpdErr2 = trackLevelAlbumIDs(a, terms)
+		if mpdErr2 != nil {
+			return mpdErr2
+		}
+	} else {
+		// Structured expressions evaluate per track; an album matches when
+		// any of its tracks does. Album-level fields (albumartist, date,
+		// albumrating, ...) resolve fine per track, so this covers the
+		// whole grammar.
+		tracks, err := a.db.allTracks()
+		if err != nil {
+			return mpdErr(errSystem, "searchalbums", err.Error())
+		}
+		env := newFilterEnv(a, true)
+		trackAlbumIDs = map[string]bool{}
+		for _, t := range tracks {
+			if env.matches(tree, t) {
+				trackAlbumIDs[stringify(t["album_id"])] = true
+			}
+		}
+		trackFiltered = true
 	}
 
 	// Stored album ratings for filtering, sorting, and the response lines.
