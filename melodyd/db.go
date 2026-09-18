@@ -284,6 +284,7 @@ func (m *musicDB) allAlbums(sortLatest bool) ([]map[string]any, error) {
 			"album":       title,
 			"date":        date,
 			"album_id":    strconv.FormatInt(id, 10),
+			"added":       maxAdded,
 		})
 	}
 	if albums == nil {
@@ -1175,6 +1176,15 @@ func trackRatingHash(albumArtist, album, title string, trackNum int) string {
 	h.Write([]byte{0})
 	h.Write([]byte(strconv.Itoa(trackNum)))
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// normalizeAlbumDate maps the two client spellings of "no date" onto the
+// scanner's stored placeholder so both address the same album identity.
+func normalizeAlbumDate(date string) string {
+	if date == "" {
+		return "0000"
+	}
+	return date
 }
 
 func albumRatingHash(albumArtist, album, date string) string {

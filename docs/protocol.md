@@ -114,6 +114,46 @@ tags: `added`, `last-modified`, `artist`, `albumartist`, `album`, `title`,
 `track`, `disc`, `date`; an unsupported sort tag is an `ACK`, not a silent
 fallback.
 
+For `albumrate` and `getalbumrating`, an empty date argument is normalized
+to the scanner's `0000` placeholder, because standard listings omit
+`Date: 0000` and clients therefore address undated albums with an empty
+string. Both spellings name the same album identity.
+
+## Album-shaped search: `searchalbums`
+
+```text
+searchalbums {FILTER} [sort {[-]TAG}] [window {START:END}]
+```
+
+Because the protocol's song commands can only answer with track lists,
+album-scoped queries would otherwise return member tracks for the client to
+re-group. `searchalbums` evaluates the same filter expressions against
+albums and answers one record per album:
+
+```text
+AlbumArtist: ...
+Album: ...
+Date: ...                  (always present, including 0000)
+X-AlbumId: ...
+X-TrackCount: ...
+X-Duration: {whole seconds}
+X-Rating: {1-10}           (stored album rating; omitted when unrated)
+X-ComputedRating: {float}  (track-rating mean; omitted below the 70% threshold)
+X-ArtworkUri: {relative track path usable with albumart/readpicture}
+```
+
+Album-level terms — `albumartist`, `album`, `date` (`==` exact,
+`contains` substring, both case-insensitive), `albumrating` with the rating
+operators, and `added-since` — apply to the album record directly.
+Track-level terms — `rating`, `artist`, `title`, `any`, and every generic
+tag — match albums containing at least one matching track. Any other term
+is an `ACK` rather than a silent broadening.
+
+`sort [-]TAG` accepts `albumartist`, `album`, `date`, `added`, and
+`rating` (stored album rating; unrated sorts as 0); the default order is
+the library's album order (album artist, date, title). `window` applies
+after sorting. Advertised as the `searchalbums` command.
+
 ## Launcher list commands
 
 `melody_albums`, `melody_albums_latest`, and `melody_tracks` return

@@ -10,7 +10,10 @@ semantics never change.
 
 The phases are ordered by user-visible payoff. Each phase stands alone.
 
-## Phase 1 — album-shaped search: `searchalbums`
+## Phase 1 — album-shaped search: `searchalbums` (done)
+
+Implemented and specified in [protocol.md](protocol.md); the notes below are
+the original design draft.
 
 The MPD protocol can only answer searches with song lists, so
 "albums rated ≥ 4 stars" currently returns a pile of member tracks that the

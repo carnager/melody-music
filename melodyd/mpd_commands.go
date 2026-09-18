@@ -109,6 +109,9 @@ func init() {
 		"getrating":      cmdGetRating,
 		"getalbumrating": cmdGetAlbumRating,
 
+		// Album-shaped search (docs/protocol.md)
+		"searchalbums": cmdSearchAlbums,
+
 		// Web client
 		"web_register":   cmdWebRegister,
 		"web_unregister": cmdWebUnregister,
@@ -3006,7 +3009,9 @@ func cmdAlbumRate(c *mpdConn, args []string) *mpdError {
 	if err != nil || rating < 0 || rating > 10 {
 		return mpdErr(errArg, "albumrate", "rating must be 0-10")
 	}
-	hash := albumRatingHash(args[0], args[1], args[2])
+	// Standard listings omit "Date: 0000", so clients addressing an undated
+	// album send an empty date; normalize both spellings to one identity.
+	hash := albumRatingHash(args[0], args[1], normalizeAlbumDate(args[2]))
 	if err := c.app.db.setRating(hash, "album", rating); err != nil {
 		return mpdErr(errSystem, "albumrate", err.Error())
 	}
@@ -3034,7 +3039,7 @@ func cmdGetAlbumRating(c *mpdConn, args []string) *mpdError {
 	if len(args) < 3 {
 		return mpdErr(errArg, "getalbumrating", "need albumartist, album, date")
 	}
-	albumArtist, album, date := args[0], args[1], args[2]
+	albumArtist, album, date := args[0], args[1], normalizeAlbumDate(args[2])
 
 	// User-set album rating
 	hash := albumRatingHash(albumArtist, album, date)
