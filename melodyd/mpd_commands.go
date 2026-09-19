@@ -109,6 +109,12 @@ func init() {
 		"getrating":      cmdGetRating,
 		"getalbumrating": cmdGetAlbumRating,
 
+		// Album-shaped search (docs/protocol.md)
+		"searchalbums": cmdSearchAlbums,
+
+		// Filter grammar capability marker (docs/protocol.md)
+		"filtergrammar": cmdFilterGrammar,
+
 		// Web client
 		"web_register":   cmdWebRegister,
 		"web_unregister": cmdWebUnregister,
@@ -1316,7 +1322,7 @@ func cmdList(c *mpdConn, args []string) *mpdError {
 	i := 1
 	// Check for new-style filter expression
 	if i < len(args) && strings.HasPrefix(args[i], "(") {
-		conditions := parseFilterExpr(args[i])
+		conditions := parseFilterConditions(args[i])
 		if len(conditions) > 0 {
 			filterTag = conditions[0].tag
 			filterVal = conditions[0].value
@@ -1523,16 +1529,23 @@ func cmdSearchOrFindInner(c *mpdConn, args []string, cmdName string, caseInsensi
 	}
 
 	if allFilters {
-		// Collect conditions from all filter expression args
-		// Real MPD: find "(AlbumArtist == \"x\")" "(Album == \"y\")" = AND of all
-		var conditions []filterCondition
-		for _, a := range args {
-			conditions = append(conditions, parseFilterExpr(a)...)
+		// Multiple expression args AND together, like real MPD.
+		var trees []*filterNode
+		for _, arg := range args {
+			tree, err := parseFilterTree(arg)
+			if err != nil {
+				return mpdErr(errArg, cmdName, err.Error())
+			}
+			trees = append(trees, tree)
 		}
-		if len(conditions) > 0 {
+		tree := trees[0]
+		if len(trees) > 1 {
+			tree = &filterNode{kind: filterAnd, children: trees}
+		}
+		if conditions, ok := flattenConjunction(tree); ok {
 			return cmdFindByConditions(c, conditions, cmdName, caseInsensitive, addToQueue)
 		}
-		return nil
+		return cmdFindByTree(c, tree, cmdName, caseInsensitive, addToQueue)
 	}
 
 	// Old-style: tag value [tag value ...]
@@ -1629,6 +1642,12 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 				filteredConditions = append(filteredConditions, cond)
 			}
 		default:
+			// Stream technicals (docs/protocol.md) filter the result tracks
+			// when they are written, like window/sort.
+			if isTechnicalConditionTag(cond.tag) {
+				c.techConds = append(c.techConds, cond)
+				continue
+			}
 			filteredConditions = append(filteredConditions, cond)
 		}
 	}
@@ -1636,6 +1655,7 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 	defer func() {
 		c.addedSince = 0
 		c.modifiedSince = 0
+		c.techConds = nil
 	}()
 
 	// Build a map of tag → value for quick lookup
@@ -1890,6 +1910,7 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 // cmdTextSearch does a text-based search and returns or enqueues the results.
 // writeOrAddFilteredTracks writes or enqueues tracks, optionally filtering by rating.
 func writeOrAddFilteredTracks(c *mpdConn, a *app, tracks []map[string]any, ratingFilter, albumRatingFilter *ratingCond, cmdName string, addToQueue bool) *mpdError {
+	tracks = filterTracksByTechnicals(tracks, c.techConds)
 	// If album rating filter is active, batch-fetch album ratings and filter
 	var albumRatings map[string]int
 	if albumRatingFilter != nil {
@@ -2693,6 +2714,18 @@ func (c *mpdConn) writeTrack(track map[string]any, pos int, mpdID int, prio ...i
 	if v := intFromAny(track["discnumber"], 0); v > 0 {
 		c.writeKV("Disc", v)
 	}
+	// Stream technicals (docs/protocol.md): the standard Format line plus the
+	// codec name, which Format cannot carry. Lossy codecs report "f" bits.
+	if rate := intFromAny(track["samplerate"], 0); rate > 0 {
+		bits := "f"
+		if v := intFromAny(track["bitspersample"], 0); v > 0 {
+			bits = strconv.Itoa(v)
+		}
+		c.writeKV("Format", fmt.Sprintf("%d:%s:%d", rate, bits, intFromAny(track["channels"], 0)))
+	}
+	if v := stringify(track["codec"]); v != "" {
+		c.writeKV("X-Codec", v)
+	}
 	// Generic tags (genre, composer, MusicBrainz IDs, ...) in fixed order
 	if tags, ok := track["tags"].(map[string][]string); ok {
 		for _, name := range mpdTagOrder {
@@ -2786,114 +2819,6 @@ type filterCondition struct {
 	tag   string // e.g. "albumartist", "album", "any"
 	op    string // "==" or "contains"
 	value string
-}
-
-// parseFilterExpr parses MPD new-style filter expressions like:
-//
-//	"((AlbumArtist == \"foo\") AND (Album == \"bar\"))"
-//	"(any contains \"query\")"
-//	"(AlbumArtist == \"foo\")"
-//
-// Returns a slice of conditions ANDed together.
-func parseFilterExpr(expr string) []filterCondition {
-	// Strip outer parens layers
-	expr = strings.TrimSpace(expr)
-	var conditions []filterCondition
-
-	// Split on " AND " (case-insensitive would be nice but MPD uses uppercase)
-	// First strip the outermost parens if present
-	for strings.HasPrefix(expr, "(") && strings.HasSuffix(expr, ")") {
-		inner := expr[1 : len(expr)-1]
-		// Check if removing outer parens is balanced
-		depth := 0
-		balanced := true
-		for _, r := range inner {
-			if r == '(' {
-				depth++
-			} else if r == ')' {
-				depth--
-			}
-			if depth < 0 {
-				balanced = false
-				break
-			}
-		}
-		if balanced && depth == 0 {
-			expr = inner
-		} else {
-			break
-		}
-	}
-
-	// Split by AND
-	parts := splitFilterAND(expr)
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		// Strip parens from individual clause
-		for strings.HasPrefix(part, "(") && strings.HasSuffix(part, ")") {
-			part = part[1 : len(part)-1]
-		}
-		cond := parseOneCondition(part)
-		if cond.tag != "" {
-			conditions = append(conditions, cond)
-		}
-	}
-	return conditions
-}
-
-// splitFilterAND splits an expression on " AND " respecting parenthesis depth.
-func splitFilterAND(s string) []string {
-	var parts []string
-	depth := 0
-	start := 0
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
-		case '(':
-			depth++
-		case ')':
-			depth--
-		}
-		if depth == 0 && i+5 <= len(s) && s[i:i+5] == " AND " {
-			parts = append(parts, s[start:i])
-			start = i + 5
-			i += 4
-		}
-	}
-	parts = append(parts, s[start:])
-	return parts
-}
-
-// parseOneCondition parses "Tag == \"value\"" or "Tag contains \"value\"",
-// plus the operator-less prefix forms "base \"uri\"", "added-since \"ts\"" and
-// "modified-since \"ts\"".
-func parseOneCondition(s string) filterCondition {
-	s = strings.TrimSpace(s)
-	for _, op := range []string{" >= ", " <= ", " == ", " > ", " < ", " contains "} {
-		idx := strings.Index(s, op)
-		if idx < 0 {
-			continue
-		}
-		tag := strings.TrimSpace(s[:idx])
-		val := strings.TrimSpace(s[idx+len(op):])
-		// Strip quotes from value
-		val = stripQuotes(val)
-		return filterCondition{
-			tag:   strings.ToLower(tag),
-			op:    strings.TrimSpace(op),
-			value: val,
-		}
-	}
-	if idx := strings.Index(s, " "); idx > 0 {
-		tag := strings.ToLower(strings.TrimSpace(s[:idx]))
-		switch tag {
-		case "base", "added-since", "modified-since":
-			return filterCondition{
-				tag:   tag,
-				value: stripQuotes(strings.TrimSpace(s[idx+1:])),
-			}
-		}
-	}
-	return filterCondition{}
 }
 
 // sortableTags lists the tags find/search accept in "sort [-]TAG" (lowercased).
@@ -3006,7 +2931,9 @@ func cmdAlbumRate(c *mpdConn, args []string) *mpdError {
 	if err != nil || rating < 0 || rating > 10 {
 		return mpdErr(errArg, "albumrate", "rating must be 0-10")
 	}
-	hash := albumRatingHash(args[0], args[1], args[2])
+	// Standard listings omit "Date: 0000", so clients addressing an undated
+	// album send an empty date; normalize both spellings to one identity.
+	hash := albumRatingHash(args[0], args[1], normalizeAlbumDate(args[2]))
 	if err := c.app.db.setRating(hash, "album", rating); err != nil {
 		return mpdErr(errSystem, "albumrate", err.Error())
 	}
@@ -3034,7 +2961,7 @@ func cmdGetAlbumRating(c *mpdConn, args []string) *mpdError {
 	if len(args) < 3 {
 		return mpdErr(errArg, "getalbumrating", "need albumartist, album, date")
 	}
-	albumArtist, album, date := args[0], args[1], args[2]
+	albumArtist, album, date := args[0], args[1], normalizeAlbumDate(args[2])
 
 	// User-set album rating
 	hash := albumRatingHash(albumArtist, album, date)
