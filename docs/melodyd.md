@@ -8,7 +8,19 @@ the server address. Replace those two values with your own.
 Install `mpv` for playback on the server and `ffmpeg` for converting audio
 when a client requests another format.
 
-Create `~/.config/melody/melodyd.toml`:
+Run melodyd from your build directory:
+
+```sh
+./bin/melodyd
+```
+
+Started in a terminal without a configuration, it asks for your music
+folder, ports, and an optional web password, then writes
+`~/.config/melody/melodyd.toml` and starts. `./bin/melodyd setup` re-runs
+the questions later with your current settings as defaults (hand-added
+settings are kept; the previous file is saved as `melodyd.toml.bak`).
+
+You can also write the config yourself:
 
 ```toml
 [server]
@@ -18,14 +30,8 @@ base_url = "http://192.168.1.10:6701"
 music_dir = "/mnt/music"
 ```
 
-Use the full path to your music folder; `~` does not work inside the config.
+`~` at the start of `music_dir` is expanded to your home directory.
 If you set `XDG_CONFIG_HOME`, the config goes in its `melody` subdirectory instead.
-
-Start melodyd from your build directory:
-
-```sh
-./bin/melodyd
-```
 
 It scans your music folder and watches for changes. Open
 `http://192.168.1.10:6701/web/` in a browser, or connect an MPD client to
@@ -95,6 +101,10 @@ systemctl --user enable --now melodyd
 
 After changing the config, run `systemctl --user restart melodyd`.
 View logs with `journalctl --user -u melodyd -f`.
+
+If melodyd has no usable configuration yet, the service exits once with a
+log message telling you to run `melodyd setup` in a terminal, instead of
+restarting in a loop.
 
 ## Optional settings
 

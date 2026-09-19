@@ -256,7 +256,11 @@ func TestRequiredMountConfig(t *testing.T) {
 	if err := os.WriteFile(path, []byte("[library]\nmusic_dir = '/mnt/music/flac'\nrequired_mounts = ['/mnt/music']\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg, _, err := loadConfig()
+	pathCfg, err := resolvePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, _, err := readConfigFile(pathCfg.ConfigPath)
 	if err != nil {
 		t.Fatal(err)
 	}

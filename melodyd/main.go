@@ -192,13 +192,73 @@ type app struct {
 
 func main() {
 	logger := log.New(os.Stdout, "melodyd: ", log.LstdFlags)
-	cfg, pathCfg, err := loadConfig()
-	if err != nil {
-		logger.Fatalf("load config: %v", err)
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "version", "--version", "-v":
+			fmt.Println("melodyd " + melodyVersion)
+			return
+		case "help", "--help", "-h":
+			printUsage(os.Stdout)
+			return
+		case "setup":
+			if err := runSetupCommand(); err != nil {
+				logger.Fatalf("setup: %v", err)
+			}
+			return
+		default:
+			fmt.Fprintf(os.Stderr, "melodyd: unknown argument %q\n\n", os.Args[1])
+			printUsage(os.Stderr)
+			os.Exit(2)
+		}
 	}
 
-	if cfg.Library.MusicDir == "" {
-		logger.Fatalf("library.music_dir is required in config")
+	pathCfg, err := resolvePaths()
+	if err != nil {
+		logger.Fatalf("resolve paths: %v", err)
+	}
+	cfg, raw, exists, err := readConfigFile(pathCfg.ConfigPath)
+	if err != nil {
+		logger.Fatalf("config %s does not parse: %v — fix it, or run 'melodyd setup'",
+			pathCfg.ConfigPath, err)
+	}
+	if !exists || cfg.Library.MusicDir == "" {
+		if stdinIsTerminal() {
+			// First run on a terminal: walk through setup instead of dying.
+			logger.Printf("no usable configuration at %s — starting interactive setup",
+				pathCfg.ConfigPath)
+			fresh, wizardErr := runWizard(os.Stdin, os.Stdout, raw)
+			if wizardErr != nil {
+				logger.Fatalf("%v", wizardErr)
+			}
+			if writeErr := writeSetupConfig(pathCfg.ConfigPath, fresh); writeErr != nil {
+				logger.Fatalf("setup: %v", writeErr)
+			}
+			printSetupEpilogue(os.Stdout, pathCfg.ConfigPath, fresh)
+			if cfg, _, _, err = readConfigFile(pathCfg.ConfigPath); err != nil {
+				logger.Fatalf("re-read config: %v", err)
+			}
+		} else {
+			// Headless (systemd): leave a skeleton and clear instructions.
+			if !exists {
+				if writeErr := os.WriteFile(pathCfg.ConfigPath,
+					[]byte(defaultDaemonConfig()), 0o644); writeErr == nil {
+					logger.Printf("wrote a default config to %s", pathCfg.ConfigPath)
+				}
+			}
+			logger.Printf("library.music_dir is not set in %s — edit it, or run "+
+				"'melodyd setup' in a terminal", pathCfg.ConfigPath)
+			os.Exit(78) // EX_CONFIG; melodyd.service does not restart-loop on it
+		}
+	}
+	if _, statErr := os.Stat(cfg.Library.MusicDir); statErr != nil {
+		if len(cfg.Library.RequiredMounts) == 0 {
+			logger.Printf("library.music_dir %q is not accessible: %v — fix %s or run "+
+				"'melodyd setup'", cfg.Library.MusicDir, statErr, pathCfg.ConfigPath)
+			os.Exit(78)
+		}
+		// The offline-NAS design keeps the daemon up waiting for the mount.
+		logger.Printf("warning: music_dir %q is not accessible yet; waiting for "+
+			"required mounts", cfg.Library.MusicDir)
 	}
 
 	db, err := openMusicDB(pathCfg.DBFile)
@@ -302,10 +362,12 @@ func main() {
 // Config loading
 // ---------------------------------------------------------------------------
 
-func loadConfig() (config, paths, error) {
+// resolvePaths computes the XDG-derived file locations and ensures the
+// data and config directories exist. Shared by the daemon and `setup`.
+func resolvePaths() (paths, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return config{}, paths{}, err
+		return paths{}, err
 	}
 	xdgData := getenvDefault("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 	xdgConfig := getenvDefault("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
@@ -321,24 +383,31 @@ func loadConfig() (config, paths, error) {
 	}
 
 	if err := os.MkdirAll(pathCfg.DataDir, 0o755); err != nil {
-		return config{}, paths{}, err
+		return paths{}, err
 	}
 	if err := os.MkdirAll(pathCfg.TranscodeCacheDir, 0o755); err != nil {
-		return config{}, paths{}, err
+		return paths{}, err
 	}
 	if err := os.MkdirAll(filepath.Dir(pathCfg.ConfigPath), 0o755); err != nil {
-		return config{}, paths{}, err
+		return paths{}, err
 	}
+	return pathCfg, nil
+}
 
-	if _, err := os.Stat(pathCfg.ConfigPath); errors.Is(err, os.ErrNotExist) {
-		if err := os.WriteFile(pathCfg.ConfigPath, []byte(defaultDaemonConfig()), 0o644); err != nil {
-			return config{}, paths{}, err
-		}
-	}
-
+// readConfigFile parses the config at configPath. A missing file is not an
+// error: it reports exists=false and defaulted settings, so the caller
+// decides between wizard, skeleton, or fatal. The raw map (nil when
+// missing) is the wizard's merge base and preserves keys the daemon does
+// not know about.
+func readConfigFile(configPath string) (config, map[string]any, bool, error) {
+	exists := true
 	var raw map[string]any
-	if _, err := toml.DecodeFile(pathCfg.ConfigPath, &raw); err != nil {
-		return config{}, paths{}, err
+	if _, err := toml.DecodeFile(configPath, &raw); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return config{}, nil, false, err
+		}
+		exists = false
+		raw = nil
 	}
 	var cfg config
 	server, _ := raw["server"].(map[string]any)
@@ -362,8 +431,9 @@ func loadConfig() (config, paths, error) {
 	cfg.MPD.Port = intFromAny(mpdSection["port"], 6600)
 	transcodeSection, _ := raw["transcode"].(map[string]any)
 	cfg.Transcode.CacheMaxMB = intFromAny(transcodeSection["cache_max_mb"], 5120) // 5 GB default
+	cfg.Library.MusicDir = expandTilde(cfg.Library.MusicDir)
 	applyDefaults(&cfg)
-	return cfg, pathCfg, nil
+	return cfg, raw, exists, nil
 }
 
 func defaultDaemonConfig() string {
