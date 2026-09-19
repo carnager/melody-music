@@ -24,6 +24,8 @@
 
 ### Bug Fixes
 
+- melodyd: ReplayGain filter conditions now find their values. The scanner stores gains and peaks in dedicated track columns and never in the generic tag table, so tag-based conditions could not see them — `(replaygain_album_gain == '')` reported *every* track as missing album gain, and comparisons matched nothing. The four `replaygain_*` conditions (both the conventional and separator-free spellings) now resolve from the stored columns like `rating` and the technical pseudo-fields, with decimal comparisons and MPD's empty-value present/absent semantics. Documented in docs/protocol.md.
+
 - melodyd: album covers are now selected by picture role — only embedded front covers (or conventional cover/folder/front/album files as fallback) serve as album art; artist photos, back covers, and disc images embedded alongside them are no longer picked up by embedding order. Clients may need to reload cached artwork.
 
 - melodyd: `albumrate` and `getalbumrating` now treat an empty date as the scanner's `0000` placeholder. Standard listings omit `Date: 0000`, so clients addressing an undated album sent an empty string and silently created a second album identity that rating filters could never match.
