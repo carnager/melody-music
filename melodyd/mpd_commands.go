@@ -123,6 +123,7 @@ func init() {
 
 		// Playback contexts (docs/protocol.md)
 		"melody_context": cmdMelodyContext,
+		"melody_scratch": cmdMelodyScratch,
 
 		// Web client
 		"web_register":   cmdWebRegister,
@@ -2346,6 +2347,40 @@ func melodyContextQueueError(err error) *mpdError {
 	return mpdErr(errArg, "melody_context", err.Error())
 }
 
+// cmdMelodyScratch handles the scratch-list extension:
+//
+//	melody_scratch                    -> scratch: <name> per working list
+//	melody_scratch {NAME} {0|1}       mark or promote a playlist
+//
+// A scratch list is an ordinary stored playlist — same commands, same
+// contexts — flagged so clients can present it as a working tab instead of
+// listing it with curated playlists.
+func cmdMelodyScratch(c *mpdConn, args []string) *mpdError {
+	a := c.app
+	if len(args) == 0 {
+		names, err := a.db.scratchPlaylistNames()
+		if err != nil {
+			return mpdErr(errSystem, "melody_scratch", err.Error())
+		}
+		for _, name := range names {
+			c.writeKV("scratch", name)
+		}
+		return nil
+	}
+	if len(args) < 2 {
+		return mpdErr(errArg, "melody_scratch", "need a playlist name and 0 or 1")
+	}
+	id, err := a.db.playlistIDByName(args[0])
+	if err != nil {
+		return mpdErr(errNoExist, "melody_scratch", "playlist not found")
+	}
+	if err := a.db.setPlaylistScratch(id, args[1] != "0"); err != nil {
+		return mpdErr(errSystem, "melody_scratch", err.Error())
+	}
+	a.mpdHub.notify(SubStoredPlaylist)
+	return nil
+}
+
 // cmdMelodyContext handles the playback-context extension:
 //
 //	melody_context                      -> context: <name>   ("" = queue)
@@ -2360,9 +2395,6 @@ func cmdMelodyContext(c *mpdConn, args []string) *mpdError {
 		// switch back even when the active context is an unnamed track list.
 		if a.hasQueueStash() {
 			c.writeKV("stashed", 1)
-		}
-		if label := a.activeContextLabel(); label != "" {
-			c.writeKV("label", label)
 		}
 		return nil
 	}
@@ -2396,36 +2428,9 @@ func cmdMelodyContext(c *mpdConn, args []string) *mpdError {
 			return mpdErr(errArg, "melody_context", err.Error())
 		}
 		return nil
-	case "tracks":
-		// melody_context tracks {POS} {URI...} — play an ad-hoc list (a
-		// client's working tab) as a context, stashing the queue.
-		if len(args) < 2 {
-			return mpdErr(errArg, "melody_context", "need a position")
-		}
-		pos, err := strconv.Atoi(args[1])
-		if err != nil || pos < 0 {
-			return mpdErr(errArg, "melody_context", "bad position")
-		}
-		songIDs, songErr := c.contextListArgument(args[2:])
-		if songErr != nil {
-			return songErr
-		}
-		if err := a.switchToTrackListContext(songIDs, pos); err != nil {
-			return mpdErr(errArg, "melody_context", err.Error())
-		}
-		return nil
-	case "label":
-		// melody_context label [TEXT] — tag the active context with the
-		// client's own name for it; bare form clears the tag.
-		if len(args) < 2 {
-			a.setContextLabel("")
-			return nil
-		}
-		a.setContextLabel(args[1])
-		return nil
 	case "stage":
 		// melody_context stage [URI...] — accumulate a list across lines;
-		// bare "stage" clears what is staged. The next tracks/queueadd/
+		// bare "stage" clears what is staged. The next queueadd or
 		// queuereplace with no inline URIs consumes it.
 		if len(args) == 1 {
 			c.ctxStage = nil
@@ -2491,17 +2496,6 @@ func cmdMelodyContext(c *mpdConn, args []string) *mpdError {
 			return mpdErr(errArg, "melody_context", "bad position")
 		}
 		if err := a.queueStashMove(from, to); err != nil {
-			return melodyContextQueueError(err)
-		}
-		return nil
-	case "resync":
-		// melody_context resync [URI...] — the active ad-hoc list was edited
-		// client-side; re-materialize it without interrupting what plays.
-		songIDs, songErr := c.contextListArgument(args[1:])
-		if songErr != nil {
-			return songErr
-		}
-		if err := a.resyncTrackListContext(songIDs); err != nil {
 			return melodyContextQueueError(err)
 		}
 		return nil

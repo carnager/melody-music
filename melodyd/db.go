@@ -147,6 +147,11 @@ func (m *musicDB) migrate() error {
 	m.db.Exec(`ALTER TABLE tracks ADD COLUMN bits_per_sample INTEGER NOT NULL DEFAULT 0`)
 	m.db.Exec(`ALTER TABLE tracks ADD COLUMN channels INTEGER NOT NULL DEFAULT 0`)
 
+	// Migration: a playlist can be a client's scratch list — a working tab
+	// rather than a curated playlist. The list itself is an ordinary stored
+	// playlist; the flag only says whether clients should present it as one.
+	m.db.Exec(`ALTER TABLE playlists ADD COLUMN scratch INTEGER NOT NULL DEFAULT 0`)
+
 	// Migration: add rating_hash column if missing
 	m.db.Exec(`ALTER TABLE tracks ADD COLUMN rating_hash TEXT NOT NULL DEFAULT ''`)
 	m.db.Exec(`CREATE INDEX IF NOT EXISTS idx_tracks_rating_hash ON tracks(rating_hash)`)
@@ -1407,6 +1412,35 @@ func (m *musicDB) playlistTrackSongIDs(playlistID int64) ([]string, error) {
 		ids = append(ids, strconv.FormatInt(id, 10))
 	}
 	return ids, rows.Err()
+}
+
+// setPlaylistScratch marks a playlist as a client's working list, or clears
+// the mark to promote it to an ordinary playlist.
+func (m *musicDB) setPlaylistScratch(id int64, scratch bool) error {
+	value := 0
+	if scratch {
+		value = 1
+	}
+	_, err := m.db.Exec(`UPDATE playlists SET scratch = ? WHERE id = ?`, value, id)
+	return err
+}
+
+func (m *musicDB) scratchPlaylistNames() ([]string, error) {
+	rows, err := m.db.Query(`SELECT name FROM playlists WHERE scratch != 0
+		ORDER BY name COLLATE NOCASE`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
 }
 
 func (m *musicDB) createPlaylist(name string) (int64, error) {

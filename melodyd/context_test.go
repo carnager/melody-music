@@ -381,49 +381,6 @@ func TestContextResumePositionClampedAfterShrink(t *testing.T) {
 	}
 }
 
-func TestContextTrackListStashesTheQueue(t *testing.T) {
-	a, _ := newContextApp(t)
-	dispatchCapture(t, a, `add "one.flac"`)
-	dispatchCapture(t, a, `add "two.flac"`)
-
-	// A working tab plays as an unnamed context: the queue is stashed, not
-	// destroyed, so the client can switch back to it.
-	dispatchCapture(t, a,
-		`melody_context tracks 1 "alpha.flac" "beta.flac" "gamma.flac"`)
-	if got := strings.Join(queueTitles(t, a), ","); got != "alpha,beta,gamma" {
-		t.Fatalf("materialized track list = %q", got)
-	}
-	a.playQueueMu.Lock()
-	pos, stashed := a.curQueuePos, len(a.ctxStash.Songs)
-	a.playQueueMu.Unlock()
-	if pos != 1 {
-		t.Fatalf("started at %d, want the requested row 1", pos)
-	}
-	if stashed != 2 {
-		t.Fatalf("stash holds %d songs, want the 2 displaced queue tracks", stashed)
-	}
-	if !strings.Contains(dispatchCapture(t, a, "melody_context"), "stashed: 1") {
-		t.Fatalf("the read command must report a waiting queue")
-	}
-
-	// Playing a second working tab keeps the original queue stashed.
-	dispatchCapture(t, a, `melody_context tracks 0 "delta.flac"`)
-	a.playQueueMu.Lock()
-	stashed = len(a.ctxStash.Songs)
-	a.playQueueMu.Unlock()
-	if stashed != 2 {
-		t.Fatalf("second ad-hoc switch re-stashed: %d songs", stashed)
-	}
-
-	dispatchCapture(t, a, `melody_context queue`)
-	if got := strings.Join(queueTitles(t, a), ","); got != "one.flac,two.flac" {
-		t.Fatalf("restored queue = %q, want the original tracks", got)
-	}
-	if err := dispatchError(t, a, `melody_context tracks 0 "nope.flac"`); err == nil {
-		t.Fatalf("unknown track must ACK")
-	}
-}
-
 // stashTitles reports the displaced queue as track titles.
 func stashTitles(t *testing.T, a *app) []string {
 	t.Helper()
@@ -523,28 +480,6 @@ func dispatchOnOneConn(t *testing.T, a *app, lines ...string) *mpdError {
 	return nil
 }
 
-func TestContextStagedListPlaysAndIsConsumed(t *testing.T) {
-	a, _ := newContextApp(t)
-	dispatchCapture(t, a, `add "alpha.flac"`)
-
-	// A list too long for one protocol line arrives in chunks.
-	if err := dispatchOnOneConn(t, a, `melody_context stage "beta.flac"`,
-		`melody_context stage "gamma.flac" "delta.flac"`,
-		`melody_context tracks 1`); err != nil {
-		t.Fatalf("staged play: %s", err.Error())
-	}
-	if got := strings.Join(queueTitles(t, a), ","); got != "beta,gamma,delta" {
-		t.Fatalf("staged context = %q", got)
-	}
-	if !a.hasQueueStash() {
-		t.Fatalf("playing a staged list must stash the queue it displaces")
-	}
-	// The staging list is consumed, so the next command cannot reuse it.
-	if err := dispatchError(t, a, `melody_context tracks 0`); err == nil {
-		t.Fatalf("a consumed staging list must ACK")
-	}
-}
-
 func TestContextStageClearsAndFeedsQueueEdits(t *testing.T) {
 	a, _ := newContextApp(t)
 	dispatchCapture(t, a, `add "alpha.flac"`)
@@ -561,57 +496,34 @@ func TestContextStageClearsAndFeedsQueueEdits(t *testing.T) {
 	}
 }
 
-func TestContextLabelIdentifiesTheClientsList(t *testing.T) {
+func TestScratchPlaylistsAreFlaggedAndListed(t *testing.T) {
 	a, _ := newContextApp(t)
-	dispatchCapture(t, a, `add "alpha.flac"`)
-	if err := dispatchOnOneConn(t, a, `melody_context stage "beta.flac"`,
-		`melody_context tracks 0`, `melody_context label "tab:scratch"`); err != nil {
-		t.Fatalf("labeled context: %s", err.Error())
+	if err := dispatchError(t, a, `melody_scratch "Road" 1`); err != nil {
+		t.Fatalf("melody_scratch: %s", err.Error())
 	}
-	out := dispatchCapture(t, a, "melody_context")
-	if !strings.Contains(out, "label: tab:scratch") || !strings.Contains(out, "stashed: 1") {
-		t.Fatalf("context read = %q, want the client's label and the stash", out)
+	out := dispatchCapture(t, a, "melody_scratch")
+	if !strings.Contains(out, "scratch: Road") || strings.Contains(out, "scratch: Calm") {
+		t.Fatalf("scratch listing = %q, want only Road", out)
 	}
-	// Switching context drops the tag with the list it named.
-	dispatchCapture(t, a, `melody_context play "Road"`)
-	if got := a.activeContextLabel(); got != "" {
-		t.Fatalf("label survived a context switch: %q", got)
+	// A scratch list is a stored playlist like any other: still listed,
+	// still playable as a context.
+	if !strings.Contains(dispatchCapture(t, a, "listplaylists"), "playlist: Road") {
+		t.Fatalf("a scratch list must stay an ordinary stored playlist")
 	}
-}
-
-func TestContextResyncKeepsTheTrackPlaying(t *testing.T) {
-	a, _ := newContextApp(t)
-	dispatchCapture(t, a, `add "alpha.flac"`)
-	if err := dispatchOnOneConn(t, a, `melody_context stage "beta.flac" "gamma.flac"`,
-		`melody_context tracks 1`); err != nil {
-		t.Fatalf("play list: %s", err.Error())
+	if err := dispatchError(t, a, `melody_context play "Road"`); err != nil {
+		t.Fatalf("play scratch context: %s", err.Error())
 	}
-	if got := strings.Join(queueTitles(t, a), ","); got != "beta,gamma" {
-		t.Fatalf("materialized = %q", got)
+	if got := contextName(t, a); got != "Road" {
+		t.Fatalf("context = %q, want Road", got)
 	}
-	a.playQueueMu.Lock()
-	playingBefore := a.curQueuePos
-	a.playQueueMu.Unlock()
-	if playingBefore != 1 {
-		t.Fatalf("playing row = %d, want 1", playingBefore)
+	// Promotion clears the flag.
+	if err := dispatchError(t, a, `melody_scratch "Road" 0`); err != nil {
+		t.Fatalf("promote: %s", err.Error())
 	}
-
-	// The client inserts a track ahead of the playing one and resyncs.
-	if err := dispatchOnOneConn(t, a, `melody_context stage "delta.flac" "beta.flac" "gamma.flac"`,
-		`melody_context resync`); err != nil {
-		t.Fatalf("resync: %s", err.Error())
+	if strings.Contains(dispatchCapture(t, a, "melody_scratch"), "Road") {
+		t.Fatalf("promoted list must no longer be scratch")
 	}
-	if got := strings.Join(queueTitles(t, a), ","); got != "delta,beta,gamma" {
-		t.Fatalf("after resync = %q", got)
-	}
-	a.playQueueMu.Lock()
-	playingAfter := a.curQueuePos
-	a.playQueueMu.Unlock()
-	if playingAfter != 2 {
-		t.Fatalf("playing row = %d, want the same track at its new row 2", playingAfter)
-	}
-	// The displaced queue is untouched by an edit to the list on top of it.
-	if got := strings.Join(stashTitles(t, a), ","); got != "alpha" {
-		t.Fatalf("stash = %q", got)
+	if err := dispatchError(t, a, `melody_scratch "Nope" 1`); err == nil {
+		t.Fatalf("flagging a missing playlist must ACK")
 	}
 }

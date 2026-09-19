@@ -1703,7 +1703,6 @@ type savedQueue struct {
 	Priorities       []int                  `json:"priorities,omitempty"`
 	Version          int                    `json:"version,omitempty"`
 	ActiveContext    string                 `json:"active_context,omitempty"`
-	ContextLabel     string                 `json:"context_label,omitempty"`
 	Stash            *savedStash            `json:"stash,omitempty"`
 	ContextPositions map[string]savedCtxPos `json:"context_positions,omitempty"`
 }
@@ -1723,7 +1722,7 @@ type savedCtxPos struct {
 // savePlayQueue persists the current play queue to disk (caller must hold playQueueMu or be safe).
 func (a *app) savePlayQueue() {
 	sq := savedQueue{Songs: a.playQueue, Priorities: a.queuePriority, Version: a.queueVersion,
-		ActiveContext: a.activeContext, ContextLabel: a.ctxLabel}
+		ActiveContext: a.activeContext}
 	if a.ctxStash != nil {
 		sq.Stash = &savedStash{
 			Songs:      a.ctxStash.Songs,
@@ -1756,7 +1755,6 @@ func (a *app) restorePlayQueue() {
 		a.queuePriority = sq.Priorities
 		a.queueVersion = sq.Version
 		a.activeContext = sq.ActiveContext
-		a.ctxLabel = sq.ContextLabel
 		if sq.Stash != nil {
 			a.ctxStash = &queueStash{
 				Songs:      sq.Stash.Songs,
