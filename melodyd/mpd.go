@@ -160,6 +160,11 @@ type mpdConn struct {
 	// (docs/protocol.md); applied when the result tracks are written.
 	techConds []filterCondition
 
+	// Song ids staged by "melody_context stage" for the next context
+	// command. A client list can be longer than one protocol line holds, so
+	// it arrives in chunks on this connection and is consumed once.
+	ctxStage []string
+
 	// added-since / modified-since filters (unix seconds, 0 = inactive)
 	addedSince    int64
 	modifiedSince int64

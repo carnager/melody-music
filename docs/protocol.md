@@ -202,7 +202,8 @@ melody_context                     -> context: {NAME}   ("" = the queue)
 melody_context play {NAME} [POS]   -> OK
 melody_context queue [POS]         -> OK
 melody_context queueinfo           -> song list (listplaylistinfo shape)
-melody_context tracks {POS} {URI...}        -> OK   (ad-hoc list as context)
+melody_context stage [URI...]               -> OK   (bare form clears)
+melody_context tracks {POS} [URI...]        -> OK   (ad-hoc list as context)
 melody_context queueadd {POS} {URI...}      -> OK   (POS -1 appends)
 melody_context queuedelete {POS...}         -> OK
 melody_context queuemove {FROM} {TO}        -> OK
@@ -219,6 +220,12 @@ current pause state because a switch back is not a play command;
 `melody_context queue POS` instead starts the restored queue at that row.
 `queueinfo` lists the stashed queue (or the live one when nothing is
 stashed) so clients can show the queue while a playlist plays.
+
+A protocol line holds far less than a client list does, so every
+list-carrying subcommand also reads its list from `stage`: send the tracks
+across as many `melody_context stage` lines as needed, then the command with
+no URIs of its own consumes them. Staging is per connection and one-shot; a
+bare `stage` discards whatever a failed command left behind.
 
 The `queue*` edits address the same list `queueinfo` reports — the queue
 *context*, which is the stash while another list is the active queue.

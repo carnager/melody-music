@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"io"
 	"log"
@@ -500,5 +502,61 @@ func TestContextQueueEditWithoutStashIsRejected(t *testing.T) {
 	dispatchCapture(t, a, `add "alpha.flac"`)
 	if err := dispatchError(t, a, `melody_context queueadd -1 "beta.flac"`); err == nil {
 		t.Fatalf("editing the queue context without a stash must ACK: plain add applies")
+	}
+}
+
+// dispatchOnOneConn runs several commands over a single connection, the way a
+// real client stages a list across lines before consuming it.
+func dispatchOnOneConn(t *testing.T, a *app, lines ...string) *mpdError {
+	t.Helper()
+	c := &mpdConn{
+		writer: bufio.NewWriter(&bytes.Buffer{}),
+		app:    a,
+		logger: log.New(os.Stderr, "", 0),
+	}
+	for _, line := range lines {
+		cmd, args := parseCommand(line)
+		if err := c.dispatch(cmd, args); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func TestContextStagedListPlaysAndIsConsumed(t *testing.T) {
+	a, _ := newContextApp(t)
+	dispatchCapture(t, a, `add "alpha.flac"`)
+
+	// A list too long for one protocol line arrives in chunks.
+	if err := dispatchOnOneConn(t, a, `melody_context stage "beta.flac"`,
+		`melody_context stage "gamma.flac" "delta.flac"`,
+		`melody_context tracks 1`); err != nil {
+		t.Fatalf("staged play: %s", err.Error())
+	}
+	if got := strings.Join(queueTitles(t, a), ","); got != "beta,gamma,delta" {
+		t.Fatalf("staged context = %q", got)
+	}
+	if !a.hasQueueStash() {
+		t.Fatalf("playing a staged list must stash the queue it displaces")
+	}
+	// The staging list is consumed, so the next command cannot reuse it.
+	if err := dispatchError(t, a, `melody_context tracks 0`); err == nil {
+		t.Fatalf("a consumed staging list must ACK")
+	}
+}
+
+func TestContextStageClearsAndFeedsQueueEdits(t *testing.T) {
+	a, _ := newContextApp(t)
+	dispatchCapture(t, a, `add "alpha.flac"`)
+	dispatchCapture(t, a, `melody_context play "Calm"`)
+
+	if err := dispatchOnOneConn(t, a, `melody_context stage "beta.flac"`,
+		`melody_context stage`, // bare stage discards
+		`melody_context stage "gamma.flac"`,
+		`melody_context queueadd -1`); err != nil {
+		t.Fatalf("queueadd from staging: %s", err.Error())
+	}
+	if got := strings.Join(stashTitles(t, a), ","); got != "alpha,gamma" {
+		t.Fatalf("staged queue edit = %q", got)
 	}
 }

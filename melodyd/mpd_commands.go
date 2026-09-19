@@ -2321,6 +2321,21 @@ func (a *app) contextSongIDs(c *mpdConn, uris []string) ([]string, *mpdError) {
 	return songIDs, nil
 }
 
+// contextListArgument resolves the track list a context command operates on:
+// the URIs on its own line, or — when it carries none — the list staged
+// across earlier lines, which it consumes.
+func (c *mpdConn) contextListArgument(uris []string) ([]string, *mpdError) {
+	if len(uris) > 0 {
+		return c.app.contextSongIDs(c, uris)
+	}
+	staged := c.ctxStage
+	c.ctxStage = nil
+	if len(staged) == 0 {
+		return nil, mpdErr(errArg, "melody_context", "no tracks staged")
+	}
+	return staged, nil
+}
+
 // melodyContextQueueError maps a queue-context edit failure to a protocol
 // error. Editing with nothing displaced is a client mistake: the plain queue
 // commands address the queue context then.
@@ -2381,14 +2396,14 @@ func cmdMelodyContext(c *mpdConn, args []string) *mpdError {
 	case "tracks":
 		// melody_context tracks {POS} {URI...} — play an ad-hoc list (a
 		// client's working tab) as a context, stashing the queue.
-		if len(args) < 3 {
-			return mpdErr(errArg, "melody_context", "need a position and at least one URI")
+		if len(args) < 2 {
+			return mpdErr(errArg, "melody_context", "need a position")
 		}
 		pos, err := strconv.Atoi(args[1])
 		if err != nil || pos < 0 {
 			return mpdErr(errArg, "melody_context", "bad position")
 		}
-		songIDs, songErr := a.contextSongIDs(c, args[2:])
+		songIDs, songErr := c.contextListArgument(args[2:])
 		if songErr != nil {
 			return songErr
 		}
@@ -2396,19 +2411,33 @@ func cmdMelodyContext(c *mpdConn, args []string) *mpdError {
 			return mpdErr(errArg, "melody_context", err.Error())
 		}
 		return nil
+	case "stage":
+		// melody_context stage [URI...] — accumulate a list across lines;
+		// bare "stage" clears what is staged. The next tracks/queueadd/
+		// queuereplace with no inline URIs consumes it.
+		if len(args) == 1 {
+			c.ctxStage = nil
+			return nil
+		}
+		songIDs, songErr := a.contextSongIDs(c, args[1:])
+		if songErr != nil {
+			return songErr
+		}
+		c.ctxStage = append(c.ctxStage, songIDs...)
+		return nil
 	case "queueadd", "queuereplace":
 		// melody_context queueadd {POS} {URI...}     insert (POS -1 appends)
 		// melody_context queuereplace {POS} {URI...} replace and play
 		// Both edit the queue context, which is the stash while another list
 		// is the active queue — where the client's Queue tab is looking.
-		if len(args) < 3 {
-			return mpdErr(errArg, "melody_context", "need a position and at least one URI")
+		if len(args) < 2 {
+			return mpdErr(errArg, "melody_context", "need a position")
 		}
 		pos, err := strconv.Atoi(args[1])
 		if err != nil {
 			return mpdErr(errArg, "melody_context", "bad position")
 		}
-		songIDs, songErr := a.contextSongIDs(c, args[2:])
+		songIDs, songErr := c.contextListArgument(args[2:])
 		if songErr != nil {
 			return songErr
 		}
