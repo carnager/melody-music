@@ -554,3 +554,31 @@ func TestMelodyPlaylistAddAppendsStagedBatch(t *testing.T) {
 		t.Fatalf("an empty staging list must ACK")
 	}
 }
+
+func TestDeletedPlaylistLeavesNoTracksBehind(t *testing.T) {
+	a, _ := newContextApp(t)
+	if err := dispatchOnOneConn(t, a, `melody_context stage "alpha.flac" "beta.flac"`,
+		`melody_playlistadd "Temporary"`); err != nil {
+		t.Fatalf("seed: %s", err.Error())
+	}
+	if err := dispatchError(t, a, `rm "Temporary"`); err != nil {
+		t.Fatalf("rm: %s", err.Error())
+	}
+	var orphans int
+	if err := a.db.db.QueryRow(`SELECT COUNT(*) FROM playlist_tracks
+		WHERE playlist_id NOT IN (SELECT id FROM playlists)`).Scan(&orphans); err != nil {
+		t.Fatalf("orphan count: %v", err)
+	}
+	if orphans != 0 {
+		t.Fatalf("%d playlist entries outlived their playlist", orphans)
+	}
+	// A new playlist starts empty even if it reuses the freed row id.
+	if err := dispatchOnOneConn(t, a, `melody_context stage "gamma.flac"`,
+		`melody_playlistadd "Fresh"`); err != nil {
+		t.Fatalf("fresh list: %s", err.Error())
+	}
+	out := dispatchCapture(t, a, `listplaylist "Fresh"`)
+	if strings.Count(out, "file: ") != 1 || !strings.Contains(out, "gamma") {
+		t.Fatalf("new playlist inherited tracks: %q", out)
+	}
+}

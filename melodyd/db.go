@@ -27,7 +27,11 @@ type musicDB struct {
 }
 
 func openMusicDB(path string) (*musicDB, error) {
-	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000")
+	// foreign_keys must be on for the ON DELETE CASCADE the schema declares;
+	// without it a deleted playlist leaves its tracks behind, and the next
+	// playlist to reuse that row id inherits them.
+	db, err := sql.Open("sqlite",
+		path+"?_journal_mode=WAL&_busy_timeout=5000&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, err
 	}
@@ -146,6 +150,11 @@ func (m *musicDB) migrate() error {
 	m.db.Exec(`ALTER TABLE tracks ADD COLUMN sample_rate INTEGER NOT NULL DEFAULT 0`)
 	m.db.Exec(`ALTER TABLE tracks ADD COLUMN bits_per_sample INTEGER NOT NULL DEFAULT 0`)
 	m.db.Exec(`ALTER TABLE tracks ADD COLUMN channels INTEGER NOT NULL DEFAULT 0`)
+
+	// Migration: drop playlist entries whose playlist is gone. Cascades did
+	// not fire while foreign keys were off, so these orphans surface as a
+	// brand-new playlist arriving pre-filled with someone else's tracks.
+	m.db.Exec(`DELETE FROM playlist_tracks WHERE playlist_id NOT IN (SELECT id FROM playlists)`)
 
 	// Migration: a playlist can be a client's scratch list — a working tab
 	// rather than a curated playlist. The list itself is an ordinary stored
@@ -1461,6 +1470,11 @@ func (m *musicDB) findOrCreatePlaylist(name string) (int64, error) {
 }
 
 func (m *musicDB) deletePlaylist(id int64) error {
+	// Explicit rather than relying on the cascade alone: databases written
+	// before foreign keys were enforced hold orphans this would leave.
+	if _, err := m.db.Exec(`DELETE FROM playlist_tracks WHERE playlist_id = ?`, id); err != nil {
+		return err
+	}
 	_, err := m.db.Exec(`DELETE FROM playlists WHERE id = ?`, id)
 	return err
 }
