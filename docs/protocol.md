@@ -209,6 +209,15 @@ flag promotes the list; deleting the playlist removes it. Lists live on the
 server, so a stock client adding to the queue adds to whichever list is
 active, and every client sees the same contents.
 
+## find and search semantics
+
+`find` matches a tag exactly and case-sensitively; `search` matches a
+substring, case-insensitively. Both match only the tag they name — `find
+date 1992` returns the 1992 releases, not everything with 1992 in its title.
+An empty value is MPD's absent-tag form in either spelling. Queries the
+indexed paths cannot answer are evaluated per track, so an unusual tag
+combination costs a library pass rather than a wrong answer.
+
 ## Batched playlist writes
 
 ```text

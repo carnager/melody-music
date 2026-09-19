@@ -190,3 +190,36 @@ func TestLegacyFindMatchesTheNamedTagOnly(t *testing.T) {
 		t.Fatalf("search title = %q", out)
 	}
 }
+
+// The indexed narrowing must not change which tracks match — including the
+// absent-tag form, which no value index can answer.
+func TestLegacyFindMissingTagStillScans(t *testing.T) {
+	a, _ := newContextApp(t)
+	out := dispatchCapture(t, a, `find genre ""`)
+	// Every fixture track is genreless, so all of them match.
+	if strings.Count(out, "file: ") == 0 {
+		t.Fatalf("absent-tag find returned nothing: %q", out)
+	}
+	if strings.Count(dispatchCapture(t, a, `find genre "Doom"`), "file: ") != 0 {
+		t.Fatalf("a genre no track carries must match nothing")
+	}
+}
+
+// Exact matching has to work for text, not only for values that happen to
+// parse as numbers.
+func TestLegacyFindMatchesTextExactly(t *testing.T) {
+	a, _ := newContextApp(t)
+	out := dispatchCapture(t, a, `find title "alpha"`)
+	if strings.Count(out, "file: ") != 1 || !strings.Contains(out, "alpha.flac") {
+		t.Fatalf("find title alpha = %q", out)
+	}
+	if strings.Count(dispatchCapture(t, a, `find title "alph"`), "file: ") != 0 {
+		t.Fatalf("find is exact: a prefix must not match")
+	}
+	if strings.Count(dispatchCapture(t, a, `search title "alph"`), "file: ") != 1 {
+		t.Fatalf("search is a substring match")
+	}
+	if strings.Count(dispatchCapture(t, a, `find album "Context Album"`), "file: ") != 4 {
+		t.Fatalf("find album must return the album's tracks")
+	}
+}

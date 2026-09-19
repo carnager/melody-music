@@ -1564,7 +1564,9 @@ func cmdSearchOrFindInner(c *mpdConn, args []string, cmdName string, caseInsensi
 		return mpdErr(errArg, cmdName, "need filter arguments")
 	}
 
-	conditions := oldStyleToConditions(args)
+	// find is exact, search is a case-insensitive substring — the same
+	// distinction the filter grammar spells as == versus contains.
+	conditions := oldStyleToConditions(args, caseInsensitive)
 	if len(conditions) > 0 {
 		return cmdFindByConditions(c, conditions, cmdName, caseInsensitive, addToQueue)
 	}
@@ -1780,6 +1782,13 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 		var genericConds []filterCondition
 		supported := true
 		for _, cond := range conditions {
+			// An empty value asks for tracks *without* the tag, which a
+			// match on the tag table cannot express: a missing tag has no
+			// row to match. Those fall through to the per-track pass.
+			if cond.value == "" {
+				supported = false
+				continue
+			}
 			if _, ok := mpdTagNames[cond.tag]; ok {
 				genericConds = append(genericConds, cond)
 				continue
@@ -1909,9 +1918,32 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 	// the tags it actually names. Combining the values into one text search
 	// was wrong twice over: "find date 1992" matched any field containing
 	// 1992, and multiple conditions became a single fuzzy string.
-	tracks, err := a.db.allTracks()
-	if err != nil {
-		return mpdErr(errSystem, cmdName, err.Error())
+	// Narrow with an indexed lookup on one exact condition where possible;
+	// a full-library scan is the last resort, not the normal path.
+	var tracks []map[string]any
+	narrowed := false
+	for _, cond := range conditions {
+		// An empty value is MPD's absent-tag form, which an index on the
+		// value cannot answer.
+		if (cond.op != "" && cond.op != "==") || cond.value == "" {
+			continue
+		}
+		candidates, ok, queryErr := a.db.tracksMatching(cond.tag, cond.value, caseInsensitive)
+		if queryErr != nil {
+			return mpdErr(errSystem, cmdName, queryErr.Error())
+		}
+		if ok {
+			tracks = candidates
+			narrowed = true
+			break
+		}
+	}
+	if !narrowed {
+		scanned, err := a.db.allTracks()
+		if err != nil {
+			return mpdErr(errSystem, cmdName, err.Error())
+		}
+		tracks = scanned
 	}
 	env := newFilterEnv(a, caseInsensitive)
 	matched := make([]map[string]any, 0, 64)
@@ -2027,17 +2059,29 @@ func cmdTextSearch(c *mpdConn, query string, ratingFilter, albumRatingFilter *ra
 	return writeOrAddFilteredTracks(c, a, tracks, ratingFilter, albumRatingFilter, cmdName, addToQueue)
 }
 
-// oldStyleToConditions converts old-style "tag value tag value" args to conditions.
-func oldStyleToConditions(args []string) []filterCondition {
+// oldStyleToConditions converts old-style "tag value tag value" args to
+// conditions. `contains` marks the search form, which matches substrings;
+// find matches the whole value.
+func oldStyleToConditions(args []string, contains bool) []filterCondition {
 	if len(args) < 2 || len(args)%2 != 0 {
 		return nil
 	}
+	op := "=="
+	if contains {
+		op = "contains"
+	}
 	var conditions []filterCondition
 	for i := 0; i < len(args); i += 2 {
+		value := args[i+1]
+		// An empty value is the absent-tag form in both spellings.
+		conditionOp := op
+		if value == "" {
+			conditionOp = "=="
+		}
 		conditions = append(conditions, filterCondition{
 			tag:   strings.ToLower(args[i]),
-			op:    "==",
-			value: args[i+1],
+			op:    conditionOp,
+			value: value,
 		})
 	}
 	return conditions

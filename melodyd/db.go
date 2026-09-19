@@ -1013,6 +1013,57 @@ func (m *musicDB) allTracks() ([]map[string]any, error) {
 	return m.scanTrackRows(rows)
 }
 
+// tracksMatching narrows by one indexed condition instead of scanning the
+// library: a date or title lives in a column, any other tag in track_tags.
+// The caller still evaluates the full condition set, so a near-miss here
+// only costs a few extra comparisons.
+func (m *musicDB) tracksMatching(tag, value string, caseInsensitive bool) ([]map[string]any,
+	bool, error) {
+	const columns = `SELECT t.id, t.album_id, t.artist, t.title,
+		t.track_number, t.disc_number, t.duration, t.path,
+		t.replay_gain_track, t.replay_gain_album, t.peak_track, t.peak_album,
+		t.rating, t.rating_hash, t.added, t.file_modified, t.codec, t.sample_rate,
+		t.bits_per_sample, t.channels, a.name, al.title, al.date
+		FROM tracks t
+		INNER JOIN albums al ON al.id = t.album_id
+		INNER JOIN artists a ON a.id = al.artist_id `
+	const ordering = ` ORDER BY a.name COLLATE NOCASE, al.date, al.title COLLATE NOCASE,
+		t.disc_number, t.track_number`
+	// COLLATE NOCASE keeps the index usable for the case-insensitive form;
+	// exact matching only, since a substring search cannot use one anyway.
+	comparison := " = ?"
+	if caseInsensitive {
+		comparison = " = ? COLLATE NOCASE"
+	}
+	var query string
+	switch tag {
+	case "date":
+		query = columns + "WHERE al.date" + comparison + ordering
+	case "title":
+		query = columns + "WHERE t.title" + comparison + ordering
+	case "album":
+		query = columns + "WHERE al.title" + comparison + ordering
+	case "":
+		return nil, false, nil
+	default:
+		query = columns + `WHERE t.id IN (SELECT track_id FROM track_tags
+			WHERE tag = ? AND value` + comparison + ")" + ordering
+	}
+	var rows *sql.Rows
+	var err error
+	if strings.Contains(query, "track_tags") {
+		rows, err = m.db.Query(query, tag, value)
+	} else {
+		rows, err = m.db.Query(query, value)
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	tracks, err := m.scanTrackRows(rows)
+	return tracks, true, err
+}
+
 func (m *musicDB) randomAlbumID() (int64, error) {
 	var id int64
 	err := m.db.QueryRow(`SELECT id FROM albums ORDER BY RANDOM() LIMIT 1`).Scan(&id)
