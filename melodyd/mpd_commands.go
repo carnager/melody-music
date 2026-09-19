@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/rand"
@@ -81,7 +82,12 @@ func init() {
 		"load":             cmdLoad,
 		"save":             cmdSave,
 		"rm":               cmdRm,
+		"rename":           cmdRenamePlaylist,
+		"listplaylist":     cmdListPlaylist,
 		"playlistadd":      cmdPlaylistAdd,
+		"playlistdelete":   cmdPlaylistDelete,
+		"playlistmove":     cmdPlaylistMove,
+		"playlistclear":    cmdPlaylistClear,
 
 		// Outputs (devices)
 		"outputs":       cmdOutputs,
@@ -2204,8 +2210,13 @@ func cmdSave(c *mpdConn, args []string) *mpdError {
 	a := c.app
 	name := args[0]
 
-	id, err := a.db.createPlaylist(name)
+	// Saving over an existing name replaces its content; the old behavior
+	// accumulated duplicate playlist rows under one name.
+	id, err := a.db.findOrCreatePlaylist(name)
 	if err != nil {
+		return mpdErr(errSystem, "save", err.Error())
+	}
+	if err := a.db.clearPlaylist(id); err != nil {
 		return mpdErr(errSystem, "save", err.Error())
 	}
 
@@ -2246,7 +2257,9 @@ func cmdRm(c *mpdConn, args []string) *mpdError {
 	return mpdErr(errNoExist, "rm", "playlist not found")
 }
 
-// cmdPlaylistAdd handles "playlistadd <name> <uri>" — adds a track to a stored playlist (creating it if needed).
+// cmdPlaylistAdd handles "playlistadd <name> <uri> [position]" — appends a
+// track to a stored playlist (creating it if needed), or inserts at the
+// 0-based position when one is given (MPD 0.23.3).
 func cmdPlaylistAdd(c *mpdConn, args []string) *mpdError {
 	if len(args) < 2 {
 		return mpdErr(errArg, "playlistadd", "need playlist name and URI")
@@ -2268,6 +2281,129 @@ func cmdPlaylistAdd(c *mpdConn, args []string) *mpdError {
 
 	if err := a.db.addTrackToPlaylist(playlistID, trackID); err != nil {
 		return mpdErr(errSystem, "playlistadd", err.Error())
+	}
+	if len(args) >= 3 {
+		position, parseErr := strconv.Atoi(args[2])
+		if parseErr != nil || position < 0 {
+			return mpdErr(errArg, "playlistadd", "bad position")
+		}
+		entries, listErr := a.db.playlistEntryIDs(playlistID)
+		if listErr != nil {
+			return mpdErr(errSystem, "playlistadd", listErr.Error())
+		}
+		if position < len(entries)-1 {
+			if moveErr := a.db.movePlaylistTrack(playlistID, len(entries)-1,
+				position); moveErr != nil {
+				return mpdErr(errSystem, "playlistadd", moveErr.Error())
+			}
+		}
+	}
+	a.mpdHub.notify(SubStoredPlaylist)
+	return nil
+}
+
+// cmdListPlaylist handles "listplaylist <name>" — the URI-only listing.
+func cmdListPlaylist(c *mpdConn, args []string) *mpdError {
+	if len(args) < 1 {
+		return mpdErr(errArg, "listplaylist", "need playlist name")
+	}
+	a := c.app
+	id, err := a.db.playlistIDByName(args[0])
+	if err != nil {
+		return mpdErr(errNoExist, "listplaylist", "playlist not found")
+	}
+	tracks, err := a.db.playlistTracks(id)
+	if err != nil {
+		return mpdErr(errSystem, "listplaylist", err.Error())
+	}
+	for _, track := range tracks {
+		c.writeKV("file", c.pathToURI(stringify(track["path"])))
+	}
+	return nil
+}
+
+// cmdRenamePlaylist handles "rename <name> <newname>".
+func cmdRenamePlaylist(c *mpdConn, args []string) *mpdError {
+	if len(args) < 2 {
+		return mpdErr(errArg, "rename", "need playlist name and new name")
+	}
+	a := c.app
+	id, err := a.db.playlistIDByName(args[0])
+	if err != nil {
+		return mpdErr(errNoExist, "rename", "playlist not found")
+	}
+	if _, err := a.db.playlistIDByName(args[1]); err == nil {
+		return mpdErr(errArg, "rename", "a playlist with that name already exists")
+	}
+	if err := a.db.renamePlaylist(id, args[1]); err != nil {
+		return mpdErr(errSystem, "rename", err.Error())
+	}
+	a.mpdHub.notify(SubStoredPlaylist)
+	return nil
+}
+
+// cmdPlaylistDelete handles "playlistdelete <name> <songpos>" (0-based).
+func cmdPlaylistDelete(c *mpdConn, args []string) *mpdError {
+	if len(args) < 2 {
+		return mpdErr(errArg, "playlistdelete", "need playlist name and position")
+	}
+	a := c.app
+	id, err := a.db.playlistIDByName(args[0])
+	if err != nil {
+		return mpdErr(errNoExist, "playlistdelete", "playlist not found")
+	}
+	position, err := strconv.Atoi(args[1])
+	if err != nil {
+		return mpdErr(errArg, "playlistdelete", "bad position")
+	}
+	if err := a.db.deletePlaylistTrackAt(id, position); err != nil {
+		if errors.Is(err, errPlaylistPosition) {
+			return mpdErr(errArg, "playlistdelete", "position out of range")
+		}
+		return mpdErr(errSystem, "playlistdelete", err.Error())
+	}
+	a.mpdHub.notify(SubStoredPlaylist)
+	return nil
+}
+
+// cmdPlaylistMove handles "playlistmove <name> <from> <to>" (0-based).
+func cmdPlaylistMove(c *mpdConn, args []string) *mpdError {
+	if len(args) < 3 {
+		return mpdErr(errArg, "playlistmove", "need playlist name, from, and to")
+	}
+	a := c.app
+	id, err := a.db.playlistIDByName(args[0])
+	if err != nil {
+		return mpdErr(errNoExist, "playlistmove", "playlist not found")
+	}
+	from, fromErr := strconv.Atoi(args[1])
+	to, toErr := strconv.Atoi(args[2])
+	if fromErr != nil || toErr != nil {
+		return mpdErr(errArg, "playlistmove", "bad position")
+	}
+	if err := a.db.movePlaylistTrack(id, from, to); err != nil {
+		if errors.Is(err, errPlaylistPosition) {
+			return mpdErr(errArg, "playlistmove", "position out of range")
+		}
+		return mpdErr(errSystem, "playlistmove", err.Error())
+	}
+	a.mpdHub.notify(SubStoredPlaylist)
+	return nil
+}
+
+// cmdPlaylistClear handles "playlistclear <name>" — empties the playlist but
+// keeps it listed.
+func cmdPlaylistClear(c *mpdConn, args []string) *mpdError {
+	if len(args) < 1 {
+		return mpdErr(errArg, "playlistclear", "need playlist name")
+	}
+	a := c.app
+	id, err := a.db.playlistIDByName(args[0])
+	if err != nil {
+		return mpdErr(errNoExist, "playlistclear", "playlist not found")
+	}
+	if err := a.db.clearPlaylist(id); err != nil {
+		return mpdErr(errSystem, "playlistclear", err.Error())
 	}
 	a.mpdHub.notify(SubStoredPlaylist)
 	return nil

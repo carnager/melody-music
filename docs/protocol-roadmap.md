@@ -132,6 +132,32 @@ path changes.
   identity keying, which keeps a future local↔server statistics sync — like
   ratings today — a pure key join.
 
+## Phase 5 — ordered "Up next" sub-queue (future)
+
+A client-visible ordered sub-queue layered on the main queue: "play these
+next, in this order, then resume where I was" as one server-side concept
+instead of every client re-deriving it from priorities and insert
+positions. Stock `prio`/`prioid` clients must keep working unchanged.
+
+Half the substrate exists: per-position priorities (`queuePriority`,
+persisted with the queue), the scheduler override in `nextQueuePos`, the
+`prioReturnPos` resume cursor, and the `prioPlayedIDs` once-played
+suppression. The gaps a real sub-queue must close:
+
+- No ordering among equal priorities beyond queue index — an "Up next"
+  list needs insertion order, so either monotonically decreasing
+  priorities per add or a separate order vector.
+- `prioPlayedIDs` keys on MPD songids, which are not stable across daemon
+  restarts, so sub-queue progress does not survive a restart today.
+- Batch adds apply one uniform priority to the whole batch, losing
+  intra-batch order.
+
+Design sketch, per the compatibility ground rules (one advertised command,
+stock semantics untouched): either a `melody_upnext` command family with an
+`X-`-line projection over `playlistinfo`, or pure priority encoding with
+documented client-side reconstruction. Not scheduled; recorded so the
+priority machinery is not evolved in a direction that forecloses it.
+
 ## Explicitly out of scope
 
 - Running tkq or tkfmt server-side: two implementations of a versioned

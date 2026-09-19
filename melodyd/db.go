@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"errors"
 	_ "modernc.org/sqlite"
 )
 
@@ -1435,6 +1436,99 @@ func (m *musicDB) addTrackToPlaylist(playlistID, trackID int64) error {
 		VALUES(?, ?, (SELECT COALESCE(MAX(position), 0) + 1 FROM playlist_tracks WHERE playlist_id = ?))`,
 		playlistID, trackID, playlistID)
 	return err
+}
+
+func (m *musicDB) playlistIDByName(name string) (int64, error) {
+	var id int64
+	err := m.db.QueryRow(`SELECT id FROM playlists WHERE name = ?`, name).Scan(&id)
+	return id, err
+}
+
+func (m *musicDB) renamePlaylist(id int64, newName string) error {
+	_, err := m.db.Exec(`UPDATE playlists SET name = ? WHERE id = ?`, newName, id)
+	return err
+}
+
+func (m *musicDB) clearPlaylist(id int64) error {
+	_, err := m.db.Exec(`DELETE FROM playlist_tracks WHERE playlist_id = ?`, id)
+	return err
+}
+
+// playlistEntryIDs returns the playlist_tracks row ids in position order —
+// the addressing unit for positional edits, because the same track may
+// appear at several positions.
+func (m *musicDB) playlistEntryIDs(playlistID int64) ([]int64, error) {
+	rows, err := m.db.Query(`SELECT id FROM playlist_tracks WHERE playlist_id = ?
+		ORDER BY position`, playlistID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+var errPlaylistPosition = errors.New("playlist position out of range")
+
+// deletePlaylistTrackAt removes the entry at the 0-based position and
+// renumbers the remainder contiguously.
+func (m *musicDB) deletePlaylistTrackAt(playlistID int64, pos int) error {
+	entries, err := m.playlistEntryIDs(playlistID)
+	if err != nil {
+		return err
+	}
+	if pos < 0 || pos >= len(entries) {
+		return errPlaylistPosition
+	}
+	tx, err := m.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM playlist_tracks WHERE id = ?`, entries[pos]); err != nil {
+		return err
+	}
+	remaining := append(append([]int64{}, entries[:pos]...), entries[pos+1:]...)
+	for index, entry := range remaining {
+		if _, err := tx.Exec(`UPDATE playlist_tracks SET position = ? WHERE id = ?`,
+			index+1, entry); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// movePlaylistTrack moves the entry at 0-based from to 0-based to.
+func (m *musicDB) movePlaylistTrack(playlistID int64, from, to int) error {
+	entries, err := m.playlistEntryIDs(playlistID)
+	if err != nil {
+		return err
+	}
+	if from < 0 || from >= len(entries) || to < 0 || to >= len(entries) {
+		return errPlaylistPosition
+	}
+	moved := entries[from]
+	entries = append(entries[:from], entries[from+1:]...)
+	entries = append(entries[:to], append([]int64{moved}, entries[to:]...)...)
+	tx, err := m.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for index, entry := range entries {
+		if _, err := tx.Exec(`UPDATE playlist_tracks SET position = ? WHERE id = ?`,
+			index+1, entry); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // ---------------------------------------------------------------------------
