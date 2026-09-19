@@ -176,6 +176,21 @@ structured queries mechanically:
 | `(length OP N)` | numeric | Duration in whole seconds. |
 | `(codec == "flac")` | `==`, `contains` | Codec name, case-insensitive. |
 
+ReplayGain values live in the same dedicated columns and answer the same
+way, so filters can find scanned and unscanned files:
+
+| Condition | Operators | Meaning |
+| --- | --- | --- |
+| `(replaygain_track_gain OP N)` | `==` `!=` `>` `>=` `<` `<=` | Track gain in dB (decimal). |
+| `(replaygain_album_gain OP N)` | decimal | Album gain in dB. |
+| `(replaygain_track_peak OP N)` | decimal | Track peak as a linear amplitude. |
+| `(replaygain_album_peak OP N)` | decimal | Album peak. |
+
+The separator-free spellings (`replaygainalbumgain`) address the same
+values, and the empty-value forms carry their usual meaning:
+`(replaygain_album_gain == '')` selects files the scanner found no album
+gain in, `!= ''` selects the ones that have it.
+
 Unprobed tracks (not yet rescanned after the upgrade) never match a
 technical condition. All five also work as track-level terms in
 `searchalbums`.

@@ -189,13 +189,89 @@ func mp4Technicals(f *os.File) audioTechnicals {
 }
 
 // isTechnicalConditionTag reports whether a filter condition addresses the
-// stored stream technicals rather than a tag.
+// stored stream technicals or ReplayGain values rather than a generic tag.
+// Both live in dedicated `tracks` columns, never in track_tags, so they must
+// bypass the tag-table lookup — otherwise every track looks like it lacks
+// them.
 func isTechnicalConditionTag(tag string) bool {
 	switch tag {
 	case "codec", "samplerate", "bitspersample", "channels", "length":
 		return true
 	}
-	return false
+	return replayGainConditionField(tag) != ""
+}
+
+// replayGainConditionField maps a filter tag to its replay_gain map key,
+// accepting both the canonical separator-free spelling clients send
+// (replaygainalbumgain) and the conventional tag spelling
+// (replaygain_album_gain). Returns "" when the tag is not a ReplayGain
+// condition.
+func replayGainConditionField(tag string) string {
+	switch strings.ReplaceAll(strings.ToLower(tag), "_", "") {
+	case "replaygaintrackgain":
+		return "track_gain"
+	case "replaygainalbumgain":
+		return "album_gain"
+	case "replaygaintrackpeak":
+		return "track_peak"
+	case "replaygainalbumpeak":
+		return "album_peak"
+	}
+	return ""
+}
+
+// replayGainValue reports the stored value and whether the track carries it.
+// buildTrackMap omits the replay_gain map entirely when a file has no gain
+// data, and stores 0 for individual values the scanner did not find.
+func replayGainValue(track map[string]any, field string) (float64, bool) {
+	values, ok := track["replay_gain"].(map[string]any)
+	if !ok {
+		return 0, false
+	}
+	value, present := values[field]
+	if !present {
+		return 0, false
+	}
+	number := floatFromAny(value, 0)
+	return number, number != 0
+}
+
+// matchReplayGainCondition evaluates one ReplayGain condition. The
+// empty-value forms carry MPD's present/absent semantics; comparisons are
+// decimal (gains are dB, peaks are linear amplitudes), so they compare as
+// floats rather than through the integer rating comparator.
+func matchReplayGainCondition(track map[string]any, cond filterCondition, field string) bool {
+	value, present := replayGainValue(track, field)
+	if cond.value == "" {
+		switch cond.op {
+		case "==":
+			return !present
+		case "!=":
+			return present
+		}
+		return false
+	}
+	if !present {
+		return false
+	}
+	operand, err := strconv.ParseFloat(strings.TrimSuffix(strings.TrimSpace(cond.value), "dB"), 64)
+	if err != nil {
+		return false
+	}
+	switch cond.op {
+	case ">":
+		return value > operand
+	case ">=":
+		return value >= operand
+	case "<":
+		return value < operand
+	case "<=":
+		return value <= operand
+	case "!=":
+		return value != operand
+	default:
+		return value == operand
+	}
 }
 
 // matchTechnicalCondition evaluates one technical condition against a track
@@ -203,6 +279,9 @@ func isTechnicalConditionTag(tag string) bool {
 // the codec has no stored bit depth) never match, mirroring tkq's
 // pseudo-field semantics.
 func matchTechnicalCondition(track map[string]any, cond filterCondition) bool {
+	if field := replayGainConditionField(cond.tag); field != "" {
+		return matchReplayGainCondition(track, cond, field)
+	}
 	if cond.tag == "codec" {
 		codec := stringify(track["codec"])
 		if codec == "" {
