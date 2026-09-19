@@ -202,6 +202,11 @@ melody_context                     -> context: {NAME}   ("" = the queue)
 melody_context play {NAME} [POS]   -> OK
 melody_context queue [POS]         -> OK
 melody_context queueinfo           -> song list (listplaylistinfo shape)
+melody_context tracks {POS} {URI...}        -> OK   (ad-hoc list as context)
+melody_context queueadd {POS} {URI...}      -> OK   (POS -1 appends)
+melody_context queuedelete {POS...}         -> OK
+melody_context queuemove {FROM} {TO}        -> OK
+melody_context queuereplace {POS} {URI...}  -> OK   (replace and play)
 ```
 
 A *context* is a stored playlist materialized into the one MPD queue.
@@ -214,6 +219,17 @@ current pause state because a switch back is not a play command;
 `melody_context queue POS` instead starts the restored queue at that row.
 `queueinfo` lists the stashed queue (or the live one when nothing is
 stashed) so clients can show the queue while a playlist plays.
+
+The `queue*` edits address the same list `queueinfo` reports — the queue
+*context*, which is the stash while another list is the active queue.
+Without them a client showing the stashed queue would have nowhere to put
+a dropped track: a plain `add` reaches the materialized list instead, which
+nothing is displaying. They ACK when nothing is stashed, because then the
+queue context is the live queue and the ordinary queue commands already
+address it. `queuereplace` also switches back and plays, since replacing
+the queue means the queue is this list now. Edits keep the stash's resume
+point on the same track, and notify `context` only: the live queue and
+everything stock clients observe is untouched.
 
 Stock clients are unaffected: every switch is an ordinary whole-queue
 replacement with a version bump, `status`/`currentsong`/`playlistinfo`

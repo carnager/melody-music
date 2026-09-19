@@ -8,6 +8,7 @@ package main
 // replacement plus a player event.
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 )
@@ -208,6 +209,120 @@ func (a *app) contextQueueTracks() ([]map[string]any, error) {
 		tracks = append(tracks, track)
 	}
 	return tracks, nil
+}
+
+// errNoQueueStash reports that nothing is displaced, so the queue context is
+// the live queue and ordinary queue commands already address it.
+var errNoQueueStash = errors.New("no stashed queue")
+
+// editQueueStash applies an edit to the displaced queue. While another list
+// is the active queue, the queue context lives in the stash — that is the
+// list the client still shows in its Queue tab, so edits aimed at the queue
+// have to reach it. Without the stash they would land in the materialized
+// list nobody is looking at.
+func (a *app) editQueueStash(mutate func(stash *queueStash) error) error {
+	a.playQueueMu.Lock()
+	defer a.playQueueMu.Unlock()
+	if a.ctxStash == nil {
+		return errNoQueueStash
+	}
+	if err := mutate(a.ctxStash); err != nil {
+		return err
+	}
+	if len(a.ctxStash.Priorities) != len(a.ctxStash.Songs) {
+		a.ctxStash.Priorities = make([]int, len(a.ctxStash.Songs))
+	}
+	if a.ctxStash.Pos >= len(a.ctxStash.Songs) {
+		a.ctxStash.Pos = 0
+		a.ctxStash.Elapsed = 0
+	}
+	a.savePlayQueue()
+	a.mpdHub.notify(SubContext)
+	return nil
+}
+
+// queueStashAdd inserts songs at pos, appending when pos is negative or past
+// the end. The resume point follows the track it was on.
+func (a *app) queueStashAdd(songIDs []string, pos int) error {
+	return a.editQueueStash(func(stash *queueStash) error {
+		if pos < 0 || pos > len(stash.Songs) {
+			stash.Songs = append(stash.Songs, songIDs...)
+			return nil
+		}
+		tail := append([]string{}, stash.Songs[pos:]...)
+		stash.Songs = append(append(stash.Songs[:pos:pos], songIDs...), tail...)
+		if stash.Pos >= pos {
+			stash.Pos += len(songIDs)
+		}
+		return nil
+	})
+}
+
+// queueStashDelete removes the given rows.
+func (a *app) queueStashDelete(positions []int) error {
+	return a.editQueueStash(func(stash *queueStash) error {
+		drop := map[int]bool{}
+		for _, position := range positions {
+			drop[position] = true
+		}
+		kept := make([]string, 0, len(stash.Songs))
+		for index, songID := range stash.Songs {
+			if drop[index] {
+				if index < stash.Pos {
+					stash.Pos--
+				}
+				continue
+			}
+			kept = append(kept, songID)
+		}
+		stash.Songs = kept
+		if stash.Pos < 0 {
+			stash.Pos = 0
+		}
+		return nil
+	})
+}
+
+// queueStashMove moves one row to another index, the granular step clients
+// already compose multi-row reorders from.
+func (a *app) queueStashMove(from, to int) error {
+	return a.editQueueStash(func(stash *queueStash) error {
+		if from < 0 || from >= len(stash.Songs) || to < 0 || to >= len(stash.Songs) {
+			return fmt.Errorf("position out of range")
+		}
+		songID := stash.Songs[from]
+		stash.Songs = append(stash.Songs[:from], stash.Songs[from+1:]...)
+		tail := append([]string{}, stash.Songs[to:]...)
+		stash.Songs = append(append(stash.Songs[:to:to], songID), tail...)
+		switch {
+		case stash.Pos == from:
+			stash.Pos = to
+		case from < stash.Pos && to >= stash.Pos:
+			stash.Pos--
+		case from > stash.Pos && to <= stash.Pos:
+			stash.Pos++
+		}
+		return nil
+	})
+}
+
+// queueStashReplace makes the given songs the queue context and switches back
+// to it playing at pos: "replace the queue and play" means the queue is this
+// list now, so it also stops being the displaced one.
+func (a *app) queueStashReplace(songIDs []string, pos int) error {
+	if len(songIDs) == 0 {
+		return fmt.Errorf("no tracks")
+	}
+	if err := a.editQueueStash(func(stash *queueStash) error {
+		stash.Songs = append([]string{}, songIDs...)
+		stash.Priorities = nil
+		stash.Pos = pos
+		stash.Elapsed = 0
+		return nil
+	}); err != nil {
+		return err
+	}
+	return a.switchToQueueContext(pos, true)
 }
 
 // renameActiveContext follows a playlist rename, and dropActiveContext

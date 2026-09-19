@@ -2307,6 +2307,30 @@ func cmdPlaylistAdd(c *mpdConn, args []string) *mpdError {
 	return nil
 }
 
+// contextSongIDs resolves context URIs to song ids, the one lookup every
+// list-carrying subcommand shares.
+func (a *app) contextSongIDs(c *mpdConn, uris []string) ([]string, *mpdError) {
+	songIDs := make([]string, 0, len(uris))
+	for _, uri := range uris {
+		trackID, err := a.db.trackIDByPath(filepath.Join(a.cfg.Library.MusicDir, uri))
+		if err != nil {
+			return nil, mpdErr(errNoExist, "melody_context", "track not found: "+uri)
+		}
+		songIDs = append(songIDs, strconv.FormatInt(trackID, 10))
+	}
+	return songIDs, nil
+}
+
+// melodyContextQueueError maps a queue-context edit failure to a protocol
+// error. Editing with nothing displaced is a client mistake: the plain queue
+// commands address the queue context then.
+func melodyContextQueueError(err error) *mpdError {
+	if errors.Is(err, errNoQueueStash) {
+		return mpdErr(errArg, "melody_context", "the queue is the active context")
+	}
+	return mpdErr(errArg, "melody_context", err.Error())
+}
+
 // cmdMelodyContext handles the playback-context extension:
 //
 //	melody_context                      -> context: <name>   ("" = queue)
@@ -2364,16 +2388,69 @@ func cmdMelodyContext(c *mpdConn, args []string) *mpdError {
 		if err != nil || pos < 0 {
 			return mpdErr(errArg, "melody_context", "bad position")
 		}
-		songIDs := make([]string, 0, len(args)-2)
-		for _, uri := range args[2:] {
-			trackID, lookupErr := a.db.trackIDByPath(filepath.Join(a.cfg.Library.MusicDir, uri))
-			if lookupErr != nil {
-				return mpdErr(errNoExist, "melody_context", "track not found: "+uri)
-			}
-			songIDs = append(songIDs, strconv.FormatInt(trackID, 10))
+		songIDs, songErr := a.contextSongIDs(c, args[2:])
+		if songErr != nil {
+			return songErr
 		}
 		if err := a.switchToTrackListContext(songIDs, pos); err != nil {
 			return mpdErr(errArg, "melody_context", err.Error())
+		}
+		return nil
+	case "queueadd", "queuereplace":
+		// melody_context queueadd {POS} {URI...}     insert (POS -1 appends)
+		// melody_context queuereplace {POS} {URI...} replace and play
+		// Both edit the queue context, which is the stash while another list
+		// is the active queue — where the client's Queue tab is looking.
+		if len(args) < 3 {
+			return mpdErr(errArg, "melody_context", "need a position and at least one URI")
+		}
+		pos, err := strconv.Atoi(args[1])
+		if err != nil {
+			return mpdErr(errArg, "melody_context", "bad position")
+		}
+		songIDs, songErr := a.contextSongIDs(c, args[2:])
+		if songErr != nil {
+			return songErr
+		}
+		if strings.ToLower(args[0]) == "queuereplace" {
+			if err := a.queueStashReplace(songIDs, max(pos, 0)); err != nil {
+				return melodyContextQueueError(err)
+			}
+			return nil
+		}
+		if err := a.queueStashAdd(songIDs, pos); err != nil {
+			return melodyContextQueueError(err)
+		}
+		return nil
+	case "queuedelete":
+		// melody_context queuedelete {POS...}
+		if len(args) < 2 {
+			return mpdErr(errArg, "melody_context", "need at least one position")
+		}
+		positions := make([]int, 0, len(args)-1)
+		for _, raw := range args[1:] {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || parsed < 0 {
+				return mpdErr(errArg, "melody_context", "bad position")
+			}
+			positions = append(positions, parsed)
+		}
+		if err := a.queueStashDelete(positions); err != nil {
+			return melodyContextQueueError(err)
+		}
+		return nil
+	case "queuemove":
+		// melody_context queuemove {FROM} {TO}
+		if len(args) < 3 {
+			return mpdErr(errArg, "melody_context", "need a source and target position")
+		}
+		from, fromErr := strconv.Atoi(args[1])
+		to, toErr := strconv.Atoi(args[2])
+		if fromErr != nil || toErr != nil {
+			return mpdErr(errArg, "melody_context", "bad position")
+		}
+		if err := a.queueStashMove(from, to); err != nil {
+			return melodyContextQueueError(err)
 		}
 		return nil
 	case "queueinfo":

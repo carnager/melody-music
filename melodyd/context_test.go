@@ -421,3 +421,84 @@ func TestContextTrackListStashesTheQueue(t *testing.T) {
 		t.Fatalf("unknown track must ACK")
 	}
 }
+
+// stashTitles reports the displaced queue as track titles.
+func stashTitles(t *testing.T, a *app) []string {
+	t.Helper()
+	a.playQueueMu.Lock()
+	defer a.playQueueMu.Unlock()
+	if a.ctxStash == nil {
+		return nil
+	}
+	var titles []string
+	for _, songID := range a.ctxStash.Songs {
+		id, err := strconv.ParseInt(songID, 10, 64)
+		if err != nil {
+			t.Fatalf("bad song id %q", songID)
+		}
+		track, err := a.db.trackByID(id)
+		if err != nil {
+			t.Fatalf("trackByID: %v", err)
+		}
+		titles = append(titles, stringify(track["title"]))
+	}
+	return titles
+}
+
+func TestContextQueueEditsReachTheStash(t *testing.T) {
+	a, _ := newContextApp(t)
+	dispatchCapture(t, a, `add "alpha.flac"`)
+	dispatchCapture(t, a, `add "beta.flac"`)
+	dispatchCapture(t, a, `melody_context play "Calm"`)
+
+	if err := dispatchError(t, a, `melody_context queueadd -1 "gamma.flac"`); err != nil {
+		t.Fatalf("queueadd: %s", err.Error())
+	}
+	if got := strings.Join(stashTitles(t, a), ","); got != "alpha,beta,gamma" {
+		t.Fatalf("after queueadd stash = %q", got)
+	}
+	// The list that is actually playing stays exactly as it was.
+	if got := strings.Join(queueTitles(t, a), ","); got != "gamma,delta" {
+		t.Fatalf("queue edit leaked into the active context: %q", got)
+	}
+
+	if err := dispatchError(t, a, `melody_context queuemove 2 0`); err != nil {
+		t.Fatalf("queuemove: %s", err.Error())
+	}
+	if got := strings.Join(stashTitles(t, a), ","); got != "gamma,alpha,beta" {
+		t.Fatalf("after queuemove stash = %q", got)
+	}
+	if err := dispatchError(t, a, `melody_context queuedelete 0 2`); err != nil {
+		t.Fatalf("queuedelete: %s", err.Error())
+	}
+	if got := strings.Join(stashTitles(t, a), ","); got != "alpha" {
+		t.Fatalf("after queuedelete stash = %q", got)
+	}
+}
+
+func TestContextQueueReplaceSwitchesBackAndPlays(t *testing.T) {
+	a, _ := newContextApp(t)
+	dispatchCapture(t, a, `add "alpha.flac"`)
+	dispatchCapture(t, a, `melody_context play "Calm"`)
+
+	if err := dispatchError(t, a, `melody_context queuereplace 0 "beta.flac" "gamma.flac"`); err != nil {
+		t.Fatalf("queuereplace: %s", err.Error())
+	}
+	if got := contextName(t, a); got != "" {
+		t.Fatalf("after queuereplace context = %q, want the queue context", got)
+	}
+	if got := strings.Join(queueTitles(t, a), ","); got != "beta,gamma" {
+		t.Fatalf("after queuereplace queue = %q", got)
+	}
+	if a.hasQueueStash() {
+		t.Fatalf("replacing the queue must leave nothing displaced")
+	}
+}
+
+func TestContextQueueEditWithoutStashIsRejected(t *testing.T) {
+	a, _ := newContextApp(t)
+	dispatchCapture(t, a, `add "alpha.flac"`)
+	if err := dispatchError(t, a, `melody_context queueadd -1 "beta.flac"`); err == nil {
+		t.Fatalf("editing the queue context without a stash must ACK: plain add applies")
+	}
+}
