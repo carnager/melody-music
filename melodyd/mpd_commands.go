@@ -3077,7 +3077,7 @@ func cmdGetAlbumRating(c *mpdConn, args []string) *mpdError {
 const defaultBinaryLimit = 65536 // 64KB default chunk size
 
 // cmdAlbumArt handles "albumart <uri> <offset>" — returns cover art for the
-// directory containing the given URI. Tries embedded art first, then folder art.
+// directory containing the given URI. Tries embedded front cover first, then folder art.
 func cmdAlbumArt(c *mpdConn, args []string) *mpdError {
 	if len(args) < 2 {
 		return mpdErr(errArg, "albumart", "need URI and offset arguments")
@@ -3098,7 +3098,8 @@ func cmdAlbumArt(c *mpdConn, args []string) *mpdError {
 }
 
 // cmdReadPicture handles "readpicture <uri> <offset>" — same as albumart but
-// per the MPD spec it reads embedded art from the specific file.
+// per the MPD spec it reads embedded art from the specific file. Only front covers
+// are returned; artist/back/other pictures are not album artwork.
 func cmdReadPicture(c *mpdConn, args []string) *mpdError {
 	if len(args) < 2 {
 		return mpdErr(errArg, "readpicture", "need URI and offset arguments")
@@ -3171,7 +3172,7 @@ func cmdReadLyrics(c *mpdConn, args []string) *mpdError {
 	return nil
 }
 
-// getCoverArt returns cover art for a track path: tries embedded first, then folder.
+// getCoverArt returns the embedded front cover, falling back to conventional folder art.
 func getCoverArt(trackPath string) ([]byte, string) {
 	data, mimeType := extractCoverArt(trackPath)
 	if data != nil {

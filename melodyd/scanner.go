@@ -1249,23 +1249,6 @@ func parseTagFloat(v any) float64 {
 // Cover art extraction
 // ---------------------------------------------------------------------------
 
-func extractCoverArt(path string) (data []byte, mimeType string) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, ""
-	}
-	defer f.Close()
-
-	m, err := tag.ReadFrom(f)
-	if err != nil {
-		return nil, ""
-	}
-	if pic := m.Picture(); pic != nil {
-		return pic.Data, pic.MIMEType
-	}
-	return nil, ""
-}
-
 // findFolderArt looks for cover art images in the directory.
 func findFolderArt(dir string) string {
 	candidates := []string{

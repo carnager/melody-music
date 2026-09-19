@@ -33,6 +33,20 @@ It scans your music folder and watches for changes. Open
 
 Restart melodyd after editing the config.
 
+## Album covers
+
+Melody serves embedded **front covers** to MPD clients and its HTTP artwork API.
+Artist photos, back covers, disc images, and unclassified pictures are not used
+as album covers. FLAC, MP3, Ogg/Vorbis, and Opus pictures are selected by their
+picture role, regardless of embedding order. M4A/MP4 uses its dedicated cover
+art atom.
+
+When no embedded front cover exists, album artwork falls back to conventional
+`cover`, `folder`, `front`, or `album` PNG/JPEG files in the track's directory.
+The MPD `readpicture` command remains embedded-only and returns no picture when
+there is no front cover. No tags or images are rewritten. Clients may need to
+reload cached artwork after updating and restarting melodyd.
+
 ## Music on a network share
 
 If `/mnt/music` is an NFS or other mount on Linux, add this line under

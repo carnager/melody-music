@@ -122,6 +122,15 @@ func TestAgentPlaySendsPausedFlag(t *testing.T) {
 	}
 }
 
+func TestAgentVolumeUsesCompactProtocolNumber(t *testing.T) {
+	got := captureAgentCommand(t, func(at *agentTarget) error {
+		return at.setProperty("volume", float64(73))
+	})
+	if got != "volume 73" {
+		t.Fatalf("setProperty(volume) sent %q, want volume 73", got)
+	}
+}
+
 func TestTranscodeSpecForSupportedFormats(t *testing.T) {
 	tests := []struct {
 		format      string

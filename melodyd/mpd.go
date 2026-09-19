@@ -1161,7 +1161,10 @@ func (at *agentTarget) setProperty(name string, value any) error {
 		}
 	case "volume":
 		if f, ok := numericFloat(value); ok {
-			_, err := at.sendCommand(fmt.Sprintf("volume %f", f))
+			// Keep integral MPD mixer values integral on the agent wire. The
+			// protocol permits fractions, but gratuitous trailing decimals break
+			// otherwise compatible agents with strict integer volume parsers.
+			_, err := at.sendCommand(fmt.Sprintf("volume %g", f))
 			if err == nil {
 				at.stateMu.Lock()
 				at.agVolume = f
