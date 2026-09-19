@@ -1671,12 +1671,8 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 
 	// Build a map of tag → value for quick lookup
 	tags := map[string]string{}
-	hasContains := false
 	for _, cond := range conditions {
 		tags[cond.tag] = cond.value
-		if cond.op == "contains" {
-			hasContains = true
-		}
 	}
 
 	// "filename"/"file" with empty value = list all tracks
@@ -1806,7 +1802,9 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 	}
 
 	// If we have "any contains X" → do text search
-	if _, ok := tags["any"]; ok || hasContains {
+	// Only an "any" condition is a free-text search; a named tag with a
+	// contains operator still has to match that tag alone.
+	if _, ok := tags["any"]; ok {
 		query := ""
 		for _, cond := range conditions {
 			if query != "" {
@@ -1907,15 +1905,30 @@ func cmdFindByConditions(c *mpdConn, conditions []filterCondition, cmdName strin
 		return writeOrAddFilteredTracks(c, a, allTracks, ratingFilter, nil, cmdName, addToQueue)
 	}
 
-	// Fallback to text search with all filter values combined
-	query := ""
-	for _, cond := range conditions {
-		if query != "" {
-			query += " "
-		}
-		query += cond.value
+	// Anything the fast paths did not cover is evaluated per track against
+	// the tags it actually names. Combining the values into one text search
+	// was wrong twice over: "find date 1992" matched any field containing
+	// 1992, and multiple conditions became a single fuzzy string.
+	tracks, err := a.db.allTracks()
+	if err != nil {
+		return mpdErr(errSystem, cmdName, err.Error())
 	}
-	return cmdTextSearch(c, query, ratingFilter, albumRatingFilter, cmdName, addToQueue)
+	env := newFilterEnv(a, caseInsensitive)
+	matched := make([]map[string]any, 0, 64)
+	for _, track := range tracks {
+		keep := true
+		for _, cond := range conditions {
+			if !env.leafMatches(cond, track) {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			matched = append(matched, track)
+		}
+	}
+	return writeOrAddFilteredTracks(c, a, matched, ratingFilter, albumRatingFilter, cmdName,
+		addToQueue)
 }
 
 // cmdTextSearch does a text-based search and returns or enqueues the results.

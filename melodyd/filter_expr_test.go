@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -140,5 +141,52 @@ func TestFilterGrammarCapability(t *testing.T) {
 	}
 	if !strings.Contains(dispatchCapture(t, a, `commands`), "command: filtergrammar") {
 		t.Fatalf("filtergrammar must be advertised in commands")
+	}
+}
+
+// find/search name a tag, and must match that tag — not any field that
+// happens to contain the value. "find date 1992" used to return every track
+// with 1992 in its title or path.
+func TestLegacyFindMatchesTheNamedTagOnly(t *testing.T) {
+	a, _ := newContextApp(t)
+	artistID, err := a.db.upsertArtist("Year Artist")
+	if err != nil {
+		t.Fatalf("upsertArtist: %v", err)
+	}
+	albumID, err := a.db.upsertAlbum(artistID, "Year Album", "1992")
+	if err != nil {
+		t.Fatalf("upsertAlbum: %v", err)
+	}
+	if _, err := a.db.upsertTrack(&trackMeta{
+		AlbumID: albumID, Artist: "Year Artist", Title: "Dated Track", TrackNumber: 1,
+		Duration: 100, Path: filepath.Join(a.cfg.Library.MusicDir, "dated.flac"),
+		albumArtist: "Year Artist", album: "Year Album", date: "1992",
+	}); err != nil {
+		t.Fatalf("upsertTrack: %v", err)
+	}
+	// A decoy whose title mentions the year but whose date is something else.
+	decoyAlbum, err := a.db.upsertAlbum(artistID, "Other Album", "2001")
+	if err != nil {
+		t.Fatalf("upsertAlbum: %v", err)
+	}
+	if _, err := a.db.upsertTrack(&trackMeta{
+		AlbumID: decoyAlbum, Artist: "Year Artist", Title: "Live 1992", TrackNumber: 1,
+		Duration: 100, Path: filepath.Join(a.cfg.Library.MusicDir, "live-1992.flac"),
+		albumArtist: "Year Artist", album: "Other Album", date: "2001",
+	}); err != nil {
+		t.Fatalf("upsertTrack: %v", err)
+	}
+
+	out := dispatchCapture(t, a, `find date 1992`)
+	if !strings.Contains(out, "dated.flac") {
+		t.Fatalf("find date 1992 missed the 1992 release: %q", out)
+	}
+	if strings.Contains(out, "live-1992.flac") {
+		t.Fatalf("find date 1992 matched a title, not the date tag: %q", out)
+	}
+	// A named tag with search semantics still matches only that tag.
+	out = dispatchCapture(t, a, `search title "live 1992"`)
+	if !strings.Contains(out, "live-1992.flac") || strings.Contains(out, "dated.flac") {
+		t.Fatalf("search title = %q", out)
 	}
 }
