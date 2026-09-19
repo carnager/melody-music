@@ -2317,6 +2317,11 @@ func cmdMelodyContext(c *mpdConn, args []string) *mpdError {
 	a := c.app
 	if len(args) == 0 {
 		c.writeKV("context", a.activeContextName())
+		// Tells clients a displaced queue is waiting, so they can offer to
+		// switch back even when the active context is an unnamed track list.
+		if a.hasQueueStash() {
+			c.writeKV("stashed", 1)
+		}
 		return nil
 	}
 	switch strings.ToLower(args[0]) {
@@ -2346,6 +2351,28 @@ func cmdMelodyContext(c *mpdConn, args []string) *mpdError {
 			pos, hasPos = parsed, true
 		}
 		if err := a.switchToQueueContext(pos, hasPos); err != nil {
+			return mpdErr(errArg, "melody_context", err.Error())
+		}
+		return nil
+	case "tracks":
+		// melody_context tracks {POS} {URI...} — play an ad-hoc list (a
+		// client's working tab) as a context, stashing the queue.
+		if len(args) < 3 {
+			return mpdErr(errArg, "melody_context", "need a position and at least one URI")
+		}
+		pos, err := strconv.Atoi(args[1])
+		if err != nil || pos < 0 {
+			return mpdErr(errArg, "melody_context", "bad position")
+		}
+		songIDs := make([]string, 0, len(args)-2)
+		for _, uri := range args[2:] {
+			trackID, lookupErr := a.db.trackIDByPath(filepath.Join(a.cfg.Library.MusicDir, uri))
+			if lookupErr != nil {
+				return mpdErr(errNoExist, "melody_context", "track not found: "+uri)
+			}
+			songIDs = append(songIDs, strconv.FormatInt(trackID, 10))
+		}
+		if err := a.switchToTrackListContext(songIDs, pos); err != nil {
 			return mpdErr(errArg, "melody_context", err.Error())
 		}
 		return nil

@@ -378,3 +378,46 @@ func TestContextResumePositionClampedAfterShrink(t *testing.T) {
 		t.Fatalf("resume after shrink: pos %d of %d, want clamped to 0 of 1", pos, length)
 	}
 }
+
+func TestContextTrackListStashesTheQueue(t *testing.T) {
+	a, _ := newContextApp(t)
+	dispatchCapture(t, a, `add "one.flac"`)
+	dispatchCapture(t, a, `add "two.flac"`)
+
+	// A working tab plays as an unnamed context: the queue is stashed, not
+	// destroyed, so the client can switch back to it.
+	dispatchCapture(t, a,
+		`melody_context tracks 1 "alpha.flac" "beta.flac" "gamma.flac"`)
+	if got := strings.Join(queueTitles(t, a), ","); got != "alpha,beta,gamma" {
+		t.Fatalf("materialized track list = %q", got)
+	}
+	a.playQueueMu.Lock()
+	pos, stashed := a.curQueuePos, len(a.ctxStash.Songs)
+	a.playQueueMu.Unlock()
+	if pos != 1 {
+		t.Fatalf("started at %d, want the requested row 1", pos)
+	}
+	if stashed != 2 {
+		t.Fatalf("stash holds %d songs, want the 2 displaced queue tracks", stashed)
+	}
+	if !strings.Contains(dispatchCapture(t, a, "melody_context"), "stashed: 1") {
+		t.Fatalf("the read command must report a waiting queue")
+	}
+
+	// Playing a second working tab keeps the original queue stashed.
+	dispatchCapture(t, a, `melody_context tracks 0 "delta.flac"`)
+	a.playQueueMu.Lock()
+	stashed = len(a.ctxStash.Songs)
+	a.playQueueMu.Unlock()
+	if stashed != 2 {
+		t.Fatalf("second ad-hoc switch re-stashed: %d songs", stashed)
+	}
+
+	dispatchCapture(t, a, `melody_context queue`)
+	if got := strings.Join(queueTitles(t, a), ","); got != "one.flac,two.flac" {
+		t.Fatalf("restored queue = %q, want the original tracks", got)
+	}
+	if err := dispatchError(t, a, `melody_context tracks 0 "nope.flac"`); err == nil {
+		t.Fatalf("unknown track must ACK")
+	}
+}

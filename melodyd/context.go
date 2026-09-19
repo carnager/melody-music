@@ -94,6 +94,48 @@ func (a *app) switchToPlaylistContext(name string, pos int, hasPos bool) error {
 	return nil
 }
 
+// switchToTrackListContext materializes an arbitrary list of tracks — a
+// client's working tab — as the active context. It stashes the queue the
+// same way a playlist switch does, so an ad-hoc list plays without
+// destroying what was queued. The context carries no name: the client owns
+// the list, the server only holds the stash to come back to.
+func (a *app) switchToTrackListContext(songIDs []string, pos int) error {
+	if len(songIDs) == 0 {
+		return fmt.Errorf("no tracks to play")
+	}
+	elapsed, _ := a.captureTransport()
+
+	a.playQueueMu.Lock()
+	if a.activeContext != "" {
+		a.rememberContextPositionLocked(elapsed)
+	} else if a.ctxStash == nil {
+		a.ctxStash = &queueStash{
+			Songs:      append([]string{}, a.playQueue...),
+			Priorities: append([]int{}, a.queuePriority...),
+			Pos:        a.curQueuePos,
+			Elapsed:    elapsed,
+		}
+	}
+	if pos < 0 || pos >= len(songIDs) {
+		pos = 0
+	}
+	a.replaceQueueLocked(songIDs, make([]int, len(songIDs)), pos)
+	a.activeContext = ""
+	a.savePlayQueue()
+	a.playQueueMu.Unlock()
+
+	a.startEnabledOutputsAt(0, false)
+	a.mpdHub.notify(SubPlaylist, SubPlayer, SubContext)
+	return nil
+}
+
+// hasQueueStash reports whether a displaced queue is waiting to be restored.
+func (a *app) hasQueueStash() bool {
+	a.playQueueMu.Lock()
+	defer a.playQueueMu.Unlock()
+	return a.ctxStash != nil
+}
+
 // switchToQueueContext restores the stashed queue. Without a position it
 // resumes where the queue was left and preserves the current pause state —
 // this is a switch back, not a play command.
