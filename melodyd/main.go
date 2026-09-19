@@ -163,6 +163,14 @@ type app struct {
 	// shuffle state for random mode
 	shuffleOrder []int // permutation of queue indices, walked sequentially
 	shufflePos   int   // current position within shuffleOrder
+
+	// Playback contexts (docs/protocol.md): activeContext names the stored
+	// playlist currently materialized into the queue ("" = the queue
+	// itself). ctxStash holds the queue that was displaced, ctxPositions
+	// the per-playlist resume points. All guarded by playQueueMu.
+	activeContext string
+	ctxStash      *queueStash
+	ctxPositions  map[string]contextPos
 	// playback modes
 	modeRepeat  bool // loop the queue
 	modeRandom  bool // random track order
@@ -1514,6 +1522,35 @@ func (a *app) addSongsToPlaylist(songIDs []string, mode string) error {
 	return a.addSongsWithPriority(songIDs, mode, 0)
 }
 
+// replaceQueueLocked swaps the whole queue for songIDs and points the
+// cursor at startPos. Callers hold playQueueMu and own the sync plan
+// afterwards. Priority bookkeeping is reset here: the preloaded next slot,
+// the priority return cursor, and the played-through-priority memory all
+// describe positions in the queue being discarded.
+func (a *app) replaceQueueLocked(songIDs []string, prios []int, startPos int) {
+	a.playQueue = nil
+	a.queueIDs = nil
+	a.queuePriority = nil
+	a.playQueue = append(a.playQueue, songIDs...)
+	a.queuePriority = append(a.queuePriority, prios...)
+	for range songIDs {
+		a.queueIDCounter++
+		a.queueIDs = append(a.queueIDs, a.queueIDCounter)
+	}
+	a.bumpQueueVersionLocked()
+	if startPos < 0 || startPos >= len(a.playQueue) {
+		startPos = 0
+	}
+	a.curQueuePos = startPos
+	a.pendingNextPos = -1
+	a.prioReturnPos = -1
+	a.prioPlayedIDs = nil
+	if a.modeRandom {
+		a.generateShuffle()
+	}
+	a.savePlayQueue()
+}
+
 func (a *app) addSongsWithPriority(songIDs []string, mode string, priority int) error {
 	if len(songIDs) == 0 {
 		return nil
@@ -1529,21 +1566,7 @@ func (a *app) addSongsWithPriority(songIDs []string, mode string, priority int) 
 
 	switch mode {
 	case "replace":
-		a.playQueue = nil
-		a.queueIDs = nil
-		a.queuePriority = nil
-		a.playQueue = append(a.playQueue, songIDs...)
-		a.queuePriority = append(a.queuePriority, prios...)
-		for range songIDs {
-			a.queueIDCounter++
-			a.queueIDs = append(a.queueIDs, a.queueIDCounter)
-		}
-		a.bumpQueueVersionLocked()
-		a.curQueuePos = 0
-		if a.modeRandom {
-			a.generateShuffle()
-		}
-		a.savePlayQueue()
+		a.replaceQueueLocked(songIDs, prios, 0)
 		plan := a.planSyncTarget()
 		a.playQueueMu.Unlock()
 		a.execSyncPlan(plan)
@@ -1653,16 +1676,63 @@ func (a *app) queuePosByMPDID(mpdID int) int {
 	return -1
 }
 
-// savedQueue is the on-disk format for the play queue.
+// queueStash is the displaced queue a playlist context replaced, kept so
+// the client can switch back to exactly where it was.
+type queueStash struct {
+	Songs      []string
+	Priorities []int
+	Pos        int
+	Elapsed    float64
+}
+
+// contextPos is a playlist context's resume point.
+type contextPos struct {
+	Pos     int
+	Elapsed float64
+}
+
+// savedQueue is the on-disk format for the play queue. The context fields
+// are additive and omitted when unused, so older daemons ignore them and
+// files written by older daemons restore as "no contexts".
 type savedQueue struct {
+	Songs            []string               `json:"songs"`
+	Priorities       []int                  `json:"priorities,omitempty"`
+	Version          int                    `json:"version,omitempty"`
+	ActiveContext    string                 `json:"active_context,omitempty"`
+	Stash            *savedStash            `json:"stash,omitempty"`
+	ContextPositions map[string]savedCtxPos `json:"context_positions,omitempty"`
+}
+
+type savedStash struct {
 	Songs      []string `json:"songs"`
 	Priorities []int    `json:"priorities,omitempty"`
-	Version    int      `json:"version,omitempty"`
+	Pos        int      `json:"pos,omitempty"`
+	Elapsed    float64  `json:"elapsed,omitempty"`
+}
+
+type savedCtxPos struct {
+	Pos     int     `json:"pos,omitempty"`
+	Elapsed float64 `json:"elapsed,omitempty"`
 }
 
 // savePlayQueue persists the current play queue to disk (caller must hold playQueueMu or be safe).
 func (a *app) savePlayQueue() {
-	sq := savedQueue{Songs: a.playQueue, Priorities: a.queuePriority, Version: a.queueVersion}
+	sq := savedQueue{Songs: a.playQueue, Priorities: a.queuePriority, Version: a.queueVersion,
+		ActiveContext: a.activeContext}
+	if a.ctxStash != nil {
+		sq.Stash = &savedStash{
+			Songs:      a.ctxStash.Songs,
+			Priorities: a.ctxStash.Priorities,
+			Pos:        a.ctxStash.Pos,
+			Elapsed:    a.ctxStash.Elapsed,
+		}
+	}
+	if len(a.ctxPositions) > 0 {
+		sq.ContextPositions = make(map[string]savedCtxPos, len(a.ctxPositions))
+		for name, position := range a.ctxPositions {
+			sq.ContextPositions[name] = savedCtxPos{Pos: position.Pos, Elapsed: position.Elapsed}
+		}
+	}
 	data, _ := json.Marshal(sq)
 	_ = os.WriteFile(a.paths.PlayQueueFile, data, 0o644)
 }
@@ -1680,6 +1750,21 @@ func (a *app) restorePlayQueue() {
 		a.playQueue = sq.Songs
 		a.queuePriority = sq.Priorities
 		a.queueVersion = sq.Version
+		a.activeContext = sq.ActiveContext
+		if sq.Stash != nil {
+			a.ctxStash = &queueStash{
+				Songs:      sq.Stash.Songs,
+				Priorities: sq.Stash.Priorities,
+				Pos:        sq.Stash.Pos,
+				Elapsed:    sq.Stash.Elapsed,
+			}
+		}
+		if len(sq.ContextPositions) > 0 {
+			a.ctxPositions = make(map[string]contextPos, len(sq.ContextPositions))
+			for name, position := range sq.ContextPositions {
+				a.ctxPositions[name] = contextPos{Pos: position.Pos, Elapsed: position.Elapsed}
+			}
+		}
 		if len(a.queuePriority) < len(a.playQueue) {
 			a.queuePriority = append(a.queuePriority, make([]int, len(a.playQueue)-len(a.queuePriority))...)
 		}
@@ -2257,17 +2342,18 @@ func (a *app) startOutputAt(ti targetInfo, timePos float64, paused bool, volume 
 	}
 
 	a.execSyncPlanOn(ti, plan)
-	// Wait for track to load before seeking
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if v, err := ti.t.getProperty("duration"); err == nil {
-			if d, ok := v.(float64); ok && d > 0 {
-				break
-			}
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	// Only a seek needs the track loaded; starting at the beginning must
+	// not stall behind a five-second duration poll.
 	if timePos > 0 {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if v, err := ti.t.getProperty("duration"); err == nil {
+				if d, ok := v.(float64); ok && d > 0 {
+					break
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
 		_ = ti.t.setProperty("time-pos", timePos)
 	}
 	if !paused {

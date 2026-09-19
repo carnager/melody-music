@@ -132,6 +132,16 @@ path changes.
   identity keying, which keeps a future local↔server statistics sync — like
   ratings today — a pure key join.
 
+## Phase 4b — playback contexts (done)
+
+Implemented and specified in [protocol.md](protocol.md). Stored playlists
+are independently playable: `melody_context play` materializes one into
+the queue while the displaced queue is stashed and each playlist keeps
+its own resume point, so clients can offer several lists that play like
+local ones without the queue juggling being visible. Editing the active
+playlist re-materializes it live. Everything rides on the single MPD
+queue, so stock clients see ordinary queue replacements.
+
 ## Phase 5 — ordered "Up next" sub-queue (future)
 
 A client-visible ordered sub-queue layered on the main queue: "play these

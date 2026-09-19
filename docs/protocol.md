@@ -195,6 +195,51 @@ Unprobed tracks (not yet rescanned after the upgrade) never match a
 technical condition. All five also work as track-level terms in
 `searchalbums`.
 
+## Playback contexts
+
+```text
+melody_context                     -> context: {NAME}   ("" = the queue)
+melody_context play {NAME} [POS]   -> OK
+melody_context queue [POS]         -> OK
+melody_context queueinfo           -> song list (listplaylistinfo shape)
+```
+
+A *context* is a stored playlist materialized into the one MPD queue.
+`play` replaces the queue with the playlist's tracks and starts it: with
+`POS` at that row from the beginning, without one at the row and offset
+where that playlist was last left (0/0 the first time). Switching away
+from the live queue stashes it — songs, priorities, position, and
+elapsed — so `melody_context queue` restores it exactly, preserving the
+current pause state because a switch back is not a play command;
+`melody_context queue POS` instead starts the restored queue at that row.
+`queueinfo` lists the stashed queue (or the live one when nothing is
+stashed) so clients can show the queue while a playlist plays.
+
+Stock clients are unaffected: every switch is an ordinary whole-queue
+replacement with a version bump, `status`/`currentsong`/`playlistinfo`
+stay consistent, and no standard response gains fields. Switches notify
+`playlist` and `player` (which stock clients already observe) plus the
+Melody-only `context` subsystem.
+
+Rules worth knowing:
+
+- Queue edits while a playlist context is active apply to the
+  materialization only. They are never written back to the playlist and
+  are lost on the next switch — the same contract as MPD's `load`.
+- Editing the **active** playlist with `playlistadd`, `playlistdelete`,
+  or `playlistmove` re-materializes it immediately, keeping the playing
+  track playing where it moved to, so the queue mirrors the list you are
+  editing. Other playlists never touch the queue.
+- `rename` carries the active context (and its resume point) to the new
+  name. `rm` and `playlistclear` release the name — the materialized
+  content keeps playing and the stashed queue stays restorable.
+- Resume positions are clamped when a playlist shrank. The elapsed seek
+  is best effort, the same accuracy class as the periodic play-state
+  snapshot.
+- Context state (active name, stash, per-playlist positions) persists
+  with the queue and survives daemon restarts. Files written before this
+  extension load as "no contexts".
+
 ## Album-shaped search: `searchalbums`
 
 ```text

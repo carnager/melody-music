@@ -23,6 +23,10 @@ const (
 	SubOptions        = "options"
 	SubMixer          = "mixer"
 	SubRating         = "rating"
+	// SubContext fires when the materialized playback context changes.
+	// Switches also raise playlist and player, so stock clients stay
+	// correct without knowing this name.
+	SubContext = "context"
 )
 
 // ---------------------------------------------------------------------------

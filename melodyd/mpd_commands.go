@@ -121,6 +121,9 @@ func init() {
 		// Filter grammar capability marker (docs/protocol.md)
 		"filtergrammar": cmdFilterGrammar,
 
+		// Playback contexts (docs/protocol.md)
+		"melody_context": cmdMelodyContext,
+
 		// Web client
 		"web_register":   cmdWebRegister,
 		"web_unregister": cmdWebUnregister,
@@ -2250,6 +2253,7 @@ func cmdRm(c *mpdConn, args []string) *mpdError {
 			if err := a.db.deletePlaylist(id); err != nil {
 				return mpdErr(errSystem, "rm", err.Error())
 			}
+			a.dropActiveContext(name)
 			a.mpdHub.notify(SubStoredPlaylist)
 			return nil
 		}
@@ -2298,8 +2302,64 @@ func cmdPlaylistAdd(c *mpdConn, args []string) *mpdError {
 			}
 		}
 	}
+	a.resyncActiveContext(name)
 	a.mpdHub.notify(SubStoredPlaylist)
 	return nil
+}
+
+// cmdMelodyContext handles the playback-context extension:
+//
+//	melody_context                      -> context: <name>   ("" = queue)
+//	melody_context play <name> [pos]    materialize and play a playlist
+//	melody_context queue [pos]          switch back to the stashed queue
+//	melody_context queueinfo            list the queue context's contents
+func cmdMelodyContext(c *mpdConn, args []string) *mpdError {
+	a := c.app
+	if len(args) == 0 {
+		c.writeKV("context", a.activeContextName())
+		return nil
+	}
+	switch strings.ToLower(args[0]) {
+	case "play":
+		if len(args) < 2 {
+			return mpdErr(errArg, "melody_context", "need a playlist name")
+		}
+		pos, hasPos := 0, false
+		if len(args) >= 3 {
+			parsed, err := strconv.Atoi(args[2])
+			if err != nil || parsed < 0 {
+				return mpdErr(errArg, "melody_context", "bad position")
+			}
+			pos, hasPos = parsed, true
+		}
+		if err := a.switchToPlaylistContext(args[1], pos, hasPos); err != nil {
+			return mpdErr(errNoExist, "melody_context", err.Error())
+		}
+		return nil
+	case "queue":
+		pos, hasPos := 0, false
+		if len(args) >= 2 {
+			parsed, err := strconv.Atoi(args[1])
+			if err != nil || parsed < 0 {
+				return mpdErr(errArg, "melody_context", "bad position")
+			}
+			pos, hasPos = parsed, true
+		}
+		if err := a.switchToQueueContext(pos, hasPos); err != nil {
+			return mpdErr(errArg, "melody_context", err.Error())
+		}
+		return nil
+	case "queueinfo":
+		tracks, err := a.contextQueueTracks()
+		if err != nil {
+			return mpdErr(errSystem, "melody_context", err.Error())
+		}
+		for _, track := range tracks {
+			c.writeTrack(track, -1, 0)
+		}
+		return nil
+	}
+	return mpdErr(errArg, "melody_context", "unknown subcommand")
 }
 
 // cmdListPlaylist handles "listplaylist <name>" — the URI-only listing.
@@ -2338,6 +2398,7 @@ func cmdRenamePlaylist(c *mpdConn, args []string) *mpdError {
 	if err := a.db.renamePlaylist(id, args[1]); err != nil {
 		return mpdErr(errSystem, "rename", err.Error())
 	}
+	a.renameActiveContext(args[0], args[1])
 	a.mpdHub.notify(SubStoredPlaylist)
 	return nil
 }
@@ -2362,6 +2423,7 @@ func cmdPlaylistDelete(c *mpdConn, args []string) *mpdError {
 		}
 		return mpdErr(errSystem, "playlistdelete", err.Error())
 	}
+	a.resyncActiveContext(args[0])
 	a.mpdHub.notify(SubStoredPlaylist)
 	return nil
 }
@@ -2387,6 +2449,7 @@ func cmdPlaylistMove(c *mpdConn, args []string) *mpdError {
 		}
 		return mpdErr(errSystem, "playlistmove", err.Error())
 	}
+	a.resyncActiveContext(args[0])
 	a.mpdHub.notify(SubStoredPlaylist)
 	return nil
 }
@@ -2405,6 +2468,7 @@ func cmdPlaylistClear(c *mpdConn, args []string) *mpdError {
 	if err := a.db.clearPlaylist(id); err != nil {
 		return mpdErr(errSystem, "playlistclear", err.Error())
 	}
+	a.dropActiveContext(args[0])
 	a.mpdHub.notify(SubStoredPlaylist)
 	return nil
 }

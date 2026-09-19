@@ -4,11 +4,11 @@ import (
 	"bufio"
 	"fmt"
 	"log"
-	"sync"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
