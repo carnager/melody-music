@@ -1472,6 +1472,38 @@ func (m *musicDB) addTrackToPlaylist(playlistID, trackID int64) error {
 	return err
 }
 
+// addTracksToPlaylist appends many tracks in one transaction. One statement
+// per track costs a commit each, which is what makes adding a search result
+// track-by-track slow; here the whole batch is one commit.
+func (m *musicDB) addTracksToPlaylist(playlistID int64, trackIDs []int64) error {
+	if len(trackIDs) == 0 {
+		return nil
+	}
+	tx, err := m.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var position int
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(position), 0) FROM playlist_tracks
+		WHERE playlist_id = ?`, playlistID).Scan(&position); err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(`INSERT INTO playlist_tracks(playlist_id, track_id, position)
+		VALUES(?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, trackID := range trackIDs {
+		position++
+		if _, err := stmt.Exec(playlistID, trackID, position); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (m *musicDB) playlistIDByName(name string) (int64, error) {
 	var id int64
 	err := m.db.QueryRow(`SELECT id FROM playlists WHERE name = ?`, name).Scan(&id)

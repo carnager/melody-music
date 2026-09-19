@@ -527,3 +527,30 @@ func TestScratchPlaylistsAreFlaggedAndListed(t *testing.T) {
 		t.Fatalf("flagging a missing playlist must ACK")
 	}
 }
+
+func TestMelodyPlaylistAddAppendsStagedBatch(t *testing.T) {
+	a, _ := newContextApp(t)
+	if err := dispatchOnOneConn(t, a, `melody_context stage "alpha.flac" "beta.flac"`,
+		`melody_playlistadd "Batch"`); err != nil {
+		t.Fatalf("melody_playlistadd: %s", err.Error())
+	}
+	out := dispatchCapture(t, a, `listplaylist "Batch"`)
+	if strings.Count(out, "file: ") != 2 || !strings.Contains(out, "alpha") {
+		t.Fatalf("batch playlist = %q", out)
+	}
+	// Appending again keeps the existing entries and their order.
+	if err := dispatchOnOneConn(t, a, `melody_context stage "gamma.flac"`,
+		`melody_playlistadd "Batch"`); err != nil {
+		t.Fatalf("second batch: %s", err.Error())
+	}
+	out = dispatchCapture(t, a, `listplaylist "Batch"`)
+	if strings.Count(out, "file: ") != 3 {
+		t.Fatalf("after second batch = %q", out)
+	}
+	if strings.Index(out, "gamma") < strings.Index(out, "beta") {
+		t.Fatalf("appended batch landed out of order: %q", out)
+	}
+	if err := dispatchError(t, a, `melody_playlistadd "Batch"`); err == nil {
+		t.Fatalf("an empty staging list must ACK")
+	}
+}

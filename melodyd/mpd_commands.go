@@ -122,8 +122,9 @@ func init() {
 		"filtergrammar": cmdFilterGrammar,
 
 		// Playback contexts (docs/protocol.md)
-		"melody_context": cmdMelodyContext,
-		"melody_scratch": cmdMelodyScratch,
+		"melody_context":     cmdMelodyContext,
+		"melody_scratch":     cmdMelodyScratch,
+		"melody_playlistadd": cmdMelodyPlaylistAdd,
 
 		// Web client
 		"web_register":   cmdWebRegister,
@@ -2345,6 +2346,41 @@ func melodyContextQueueError(err error) *mpdError {
 		return mpdErr(errArg, "melody_context", "the queue is the active context")
 	}
 	return mpdErr(errArg, "melody_context", err.Error())
+}
+
+// cmdMelodyPlaylistAdd handles "melody_playlistadd {NAME}" — append the
+// staged track list to a playlist in one transaction. playlistadd takes one
+// URI per command, so adding a search result means a commit per track; this
+// is the same work as one write.
+func cmdMelodyPlaylistAdd(c *mpdConn, args []string) *mpdError {
+	if len(args) < 1 {
+		return mpdErr(errArg, "melody_playlistadd", "need a playlist name")
+	}
+	a := c.app
+	name := args[0]
+	songIDs, songErr := c.contextListArgument(args[1:])
+	if songErr != nil {
+		return songErr
+	}
+	playlistID, err := a.db.findOrCreatePlaylist(name)
+	if err != nil {
+		return mpdErr(errSystem, "melody_playlistadd", err.Error())
+	}
+	trackIDs := make([]int64, 0, len(songIDs))
+	for _, songID := range songIDs {
+		parsed, parseErr := strconv.ParseInt(songID, 10, 64)
+		if parseErr != nil {
+			return mpdErr(errArg, "melody_playlistadd", "bad track id")
+		}
+		trackIDs = append(trackIDs, parsed)
+	}
+	if err := a.db.addTracksToPlaylist(playlistID, trackIDs); err != nil {
+		return mpdErr(errSystem, "melody_playlistadd", err.Error())
+	}
+	// One resync and one notification for the batch, not one per track.
+	a.resyncActiveContext(name)
+	a.mpdHub.notify(SubStoredPlaylist)
+	return nil
 }
 
 // cmdMelodyScratch handles the scratch-list extension:

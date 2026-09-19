@@ -209,6 +209,19 @@ flag promotes the list; deleting the playlist removes it. Lists live on the
 server, so a stock client adding to the queue adds to whichever list is
 active, and every client sees the same contents.
 
+## Batched playlist writes
+
+```text
+melody_playlistadd {NAME}          -> OK   (appends the staged list)
+```
+
+`playlistadd` takes one URI per command, so adding a search result costs a
+database commit per track — seconds for a few thousand hits. This appends a
+list staged with `melody_context stage` as a single write, with one stored
+playlist notification and one context resync for the batch. Everything else
+about the playlist is unchanged; a client without this command keeps using
+`playlistadd` in a command list.
+
 ## Playback contexts
 
 ```text
