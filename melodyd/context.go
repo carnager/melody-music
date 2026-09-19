@@ -85,6 +85,7 @@ func (a *app) switchToPlaylistContext(name string, pos int, hasPos bool) error {
 	}
 	a.replaceQueueLocked(songIDs, make([]int, len(songIDs)), startPos)
 	a.activeContext = name
+	a.ctxLabel = ""
 	a.savePlayQueue()
 	a.playQueueMu.Unlock()
 
@@ -122,6 +123,7 @@ func (a *app) switchToTrackListContext(songIDs []string, pos int) error {
 	}
 	a.replaceQueueLocked(songIDs, make([]int, len(songIDs)), pos)
 	a.activeContext = ""
+	a.ctxLabel = ""
 	a.savePlayQueue()
 	a.playQueueMu.Unlock()
 
@@ -176,6 +178,7 @@ func (a *app) switchToQueueContext(pos int, hasPos bool) error {
 	}
 	a.replaceQueueLocked(stash.Songs, priorities, startPos)
 	a.activeContext = ""
+	a.ctxLabel = ""
 	a.ctxStash = nil
 	a.savePlayQueue()
 	a.playQueueMu.Unlock()
@@ -325,6 +328,53 @@ func (a *app) queueStashReplace(songIDs []string, pos int) error {
 	return a.switchToQueueContext(pos, true)
 }
 
+// resyncTrackListContext re-materializes a client's ad-hoc list after it was
+// edited, keeping the playing track playing — the working-tab counterpart of
+// resyncActiveContext. Editing the list you are listening to is a live edit,
+// not a restart.
+func (a *app) resyncTrackListContext(songIDs []string) error {
+	if a.activeContextName() != "" {
+		return fmt.Errorf("a playlist context is active")
+	}
+	if !a.hasQueueStash() {
+		return errNoQueueStash
+	}
+	elapsed, paused := a.captureTransport()
+
+	a.playQueueMu.Lock()
+	playing := ""
+	if a.curQueuePos >= 0 && a.curQueuePos < len(a.playQueue) {
+		playing = a.playQueue[a.curQueuePos]
+	}
+	startPos := a.curQueuePos
+	moved := false
+	if playing != "" {
+		for index, songID := range songIDs {
+			if songID == playing {
+				startPos = index
+				moved = true
+				break
+			}
+		}
+	}
+	if !moved {
+		elapsed = 0
+	}
+	if startPos < 0 || startPos >= len(songIDs) {
+		startPos = 0
+		elapsed = 0
+	}
+	a.replaceQueueLocked(songIDs, make([]int, len(songIDs)), startPos)
+	a.savePlayQueue()
+	a.playQueueMu.Unlock()
+
+	if len(songIDs) > 0 {
+		a.startEnabledOutputsAt(elapsed, paused)
+	}
+	a.mpdHub.notify(SubPlaylist, SubPlayer, SubContext)
+	return nil
+}
+
 // renameActiveContext follows a playlist rename, and dropActiveContext
 // releases the name when the playlist stops existing (rm/clear) while its
 // materialized content keeps playing. The stash stays restorable either way.
@@ -352,6 +402,22 @@ func (a *app) dropActiveContext(name string) {
 		a.activeContext = ""
 		a.savePlayQueue()
 	}
+}
+
+// setContextLabel tags the active context with the client's own name for the
+// list it materialized, so the client can tell its list is the live queue —
+// and show the queue's contents there, including what other clients add.
+func (a *app) setContextLabel(label string) {
+	a.playQueueMu.Lock()
+	defer a.playQueueMu.Unlock()
+	a.ctxLabel = label
+	a.savePlayQueue()
+}
+
+func (a *app) activeContextLabel() string {
+	a.playQueueMu.Lock()
+	defer a.playQueueMu.Unlock()
+	return a.ctxLabel
 }
 
 // activeContextName reports the materialized playlist ("" = queue context).

@@ -560,3 +560,58 @@ func TestContextStageClearsAndFeedsQueueEdits(t *testing.T) {
 		t.Fatalf("staged queue edit = %q", got)
 	}
 }
+
+func TestContextLabelIdentifiesTheClientsList(t *testing.T) {
+	a, _ := newContextApp(t)
+	dispatchCapture(t, a, `add "alpha.flac"`)
+	if err := dispatchOnOneConn(t, a, `melody_context stage "beta.flac"`,
+		`melody_context tracks 0`, `melody_context label "tab:scratch"`); err != nil {
+		t.Fatalf("labeled context: %s", err.Error())
+	}
+	out := dispatchCapture(t, a, "melody_context")
+	if !strings.Contains(out, "label: tab:scratch") || !strings.Contains(out, "stashed: 1") {
+		t.Fatalf("context read = %q, want the client's label and the stash", out)
+	}
+	// Switching context drops the tag with the list it named.
+	dispatchCapture(t, a, `melody_context play "Road"`)
+	if got := a.activeContextLabel(); got != "" {
+		t.Fatalf("label survived a context switch: %q", got)
+	}
+}
+
+func TestContextResyncKeepsTheTrackPlaying(t *testing.T) {
+	a, _ := newContextApp(t)
+	dispatchCapture(t, a, `add "alpha.flac"`)
+	if err := dispatchOnOneConn(t, a, `melody_context stage "beta.flac" "gamma.flac"`,
+		`melody_context tracks 1`); err != nil {
+		t.Fatalf("play list: %s", err.Error())
+	}
+	if got := strings.Join(queueTitles(t, a), ","); got != "beta,gamma" {
+		t.Fatalf("materialized = %q", got)
+	}
+	a.playQueueMu.Lock()
+	playingBefore := a.curQueuePos
+	a.playQueueMu.Unlock()
+	if playingBefore != 1 {
+		t.Fatalf("playing row = %d, want 1", playingBefore)
+	}
+
+	// The client inserts a track ahead of the playing one and resyncs.
+	if err := dispatchOnOneConn(t, a, `melody_context stage "delta.flac" "beta.flac" "gamma.flac"`,
+		`melody_context resync`); err != nil {
+		t.Fatalf("resync: %s", err.Error())
+	}
+	if got := strings.Join(queueTitles(t, a), ","); got != "delta,beta,gamma" {
+		t.Fatalf("after resync = %q", got)
+	}
+	a.playQueueMu.Lock()
+	playingAfter := a.curQueuePos
+	a.playQueueMu.Unlock()
+	if playingAfter != 2 {
+		t.Fatalf("playing row = %d, want the same track at its new row 2", playingAfter)
+	}
+	// The displaced queue is untouched by an edit to the list on top of it.
+	if got := strings.Join(stashTitles(t, a), ","); got != "alpha" {
+		t.Fatalf("stash = %q", got)
+	}
+}

@@ -169,8 +169,12 @@ type app struct {
 	// itself). ctxStash holds the queue that was displaced, ctxPositions
 	// the per-playlist resume points. All guarded by playQueueMu.
 	activeContext string
-	ctxStash      *queueStash
-	ctxPositions  map[string]contextPos
+	// ctxLabel is an opaque client tag for the active context — which of its
+	// own lists it materialized. The server never interprets it; it only
+	// hands it back so a client can recognize its list in the live queue.
+	ctxLabel     string
+	ctxStash     *queueStash
+	ctxPositions map[string]contextPos
 	// playback modes
 	modeRepeat  bool // loop the queue
 	modeRandom  bool // random track order
@@ -1699,6 +1703,7 @@ type savedQueue struct {
 	Priorities       []int                  `json:"priorities,omitempty"`
 	Version          int                    `json:"version,omitempty"`
 	ActiveContext    string                 `json:"active_context,omitempty"`
+	ContextLabel     string                 `json:"context_label,omitempty"`
 	Stash            *savedStash            `json:"stash,omitempty"`
 	ContextPositions map[string]savedCtxPos `json:"context_positions,omitempty"`
 }
@@ -1718,7 +1723,7 @@ type savedCtxPos struct {
 // savePlayQueue persists the current play queue to disk (caller must hold playQueueMu or be safe).
 func (a *app) savePlayQueue() {
 	sq := savedQueue{Songs: a.playQueue, Priorities: a.queuePriority, Version: a.queueVersion,
-		ActiveContext: a.activeContext}
+		ActiveContext: a.activeContext, ContextLabel: a.ctxLabel}
 	if a.ctxStash != nil {
 		sq.Stash = &savedStash{
 			Songs:      a.ctxStash.Songs,
@@ -1751,6 +1756,7 @@ func (a *app) restorePlayQueue() {
 		a.queuePriority = sq.Priorities
 		a.queueVersion = sq.Version
 		a.activeContext = sq.ActiveContext
+		a.ctxLabel = sq.ContextLabel
 		if sq.Stash != nil {
 			a.ctxStash = &queueStash{
 				Songs:      sq.Stash.Songs,

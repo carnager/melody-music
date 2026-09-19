@@ -203,6 +203,8 @@ melody_context play {NAME} [POS]   -> OK
 melody_context queue [POS]         -> OK
 melody_context queueinfo           -> song list (listplaylistinfo shape)
 melody_context stage [URI...]               -> OK   (bare form clears)
+melody_context label [TEXT]                 -> OK   (client tag for its list)
+melody_context resync [URI...]              -> OK   (live edit of an ad-hoc list)
 melody_context tracks {POS} [URI...]        -> OK   (ad-hoc list as context)
 melody_context queueadd {POS} {URI...}      -> OK   (POS -1 appends)
 melody_context queuedelete {POS...}         -> OK
@@ -226,6 +228,15 @@ list-carrying subcommand also reads its list from `stage`: send the tracks
 across as many `melody_context stage` lines as needed, then the command with
 no URIs of its own consumes them. Staging is per connection and one-shot; a
 bare `stage` discards whatever a failed command left behind.
+
+`label` tags the active context with the client's own name for the list it
+materialized; the server hands it back in the bare read and never interprets
+it. It is how a client recognizes its own list *as* the live queue, and so
+can show what other clients add to it — a stock client's `add` goes to the
+queue, which is the active list, exactly as it always did. `resync` replaces
+an ad-hoc context with an edited version of itself, keeping the playing track
+playing: editing the list you are listening to is a live edit, not a restart.
+Both the label and the tag are dropped whenever the context changes.
 
 The `queue*` edits address the same list `queueinfo` reports — the queue
 *context*, which is the stash while another list is the active queue.

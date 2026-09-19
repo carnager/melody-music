@@ -2361,6 +2361,9 @@ func cmdMelodyContext(c *mpdConn, args []string) *mpdError {
 		if a.hasQueueStash() {
 			c.writeKV("stashed", 1)
 		}
+		if label := a.activeContextLabel(); label != "" {
+			c.writeKV("label", label)
+		}
 		return nil
 	}
 	switch strings.ToLower(args[0]) {
@@ -2410,6 +2413,15 @@ func cmdMelodyContext(c *mpdConn, args []string) *mpdError {
 		if err := a.switchToTrackListContext(songIDs, pos); err != nil {
 			return mpdErr(errArg, "melody_context", err.Error())
 		}
+		return nil
+	case "label":
+		// melody_context label [TEXT] — tag the active context with the
+		// client's own name for it; bare form clears the tag.
+		if len(args) < 2 {
+			a.setContextLabel("")
+			return nil
+		}
+		a.setContextLabel(args[1])
 		return nil
 	case "stage":
 		// melody_context stage [URI...] — accumulate a list across lines;
@@ -2479,6 +2491,17 @@ func cmdMelodyContext(c *mpdConn, args []string) *mpdError {
 			return mpdErr(errArg, "melody_context", "bad position")
 		}
 		if err := a.queueStashMove(from, to); err != nil {
+			return melodyContextQueueError(err)
+		}
+		return nil
+	case "resync":
+		// melody_context resync [URI...] — the active ad-hoc list was edited
+		// client-side; re-materialize it without interrupting what plays.
+		songIDs, songErr := c.contextListArgument(args[1:])
+		if songErr != nil {
+			return songErr
+		}
+		if err := a.resyncTrackListContext(songIDs); err != nil {
 			return melodyContextQueueError(err)
 		}
 		return nil
