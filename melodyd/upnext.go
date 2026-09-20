@@ -240,6 +240,12 @@ func (a *app) abandonRequests() {
 	a.upNext = requestQueue{}
 }
 
+// cmdMelodyUpNextEdit atomically retains/reorders pending occurrence IDs.
+// Its separately advertised capability lets clients detect batch-edit support.
+func cmdMelodyUpNextEdit(c *mpdConn, args []string) *mpdError {
+	return cmdMelodyUpNext(c, append([]string{"retain"}, args...))
+}
+
 func cmdMelodyUpNext(c *mpdConn, args []string) *mpdError {
 	a := c.app
 	if len(args) == 0 {
@@ -316,6 +322,28 @@ func cmdMelodyUpNext(c *mpdConn, args []string) *mpdError {
 	}
 	previous := a.rememberRequestEdit()
 	switch args[0] {
+	case "retain":
+		if len(args)-2 > 500 {
+			a.playQueueMu.Unlock()
+			return mpdErr(errArg, "melody_upnext_edit", "at most 500 pending IDs")
+		}
+		ids := make([]int, 0, len(args)-2)
+		seen := make(map[int]bool)
+		for _, raw := range args[2:] {
+			id, err := strconv.Atoi(raw)
+			if err != nil || seen[id] || !slices.Contains(a.upNext.Pending, id) {
+				a.playQueueMu.Unlock()
+				return mpdErr(errArg, "melody_upnext_edit", "IDs must name distinct pending requests")
+			}
+			seen[id] = true
+			ids = append(ids, id)
+		}
+		for _, id := range a.upNext.Pending {
+			if !seen[id] {
+				a.eraseRequest(id)
+			}
+		}
+		a.upNext.Pending = ids
 	case "undo":
 		if a.requestUndo == nil || a.requestUndo.Revision != a.queueVersion {
 			a.playQueueMu.Unlock()

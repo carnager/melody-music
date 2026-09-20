@@ -2,6 +2,9 @@ package player
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -329,5 +332,40 @@ func expectNoCall(t *testing.T, calls <-chan struct{}) {
 	case <-calls:
 		t.Fatal("unexpected OnTrackEnd call")
 	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+// Exercise real mpv startup: ordinary user filters and preamps must not leak
+// into the embedded player, even when MPV_HOME explicitly points to them.
+func TestEmbeddedMPVIgnoresPersonalAudioConfiguration(t *testing.T) {
+	binary, err := exec.LookPath("mpv")
+	if err != nil {
+		t.Skip("mpv not installed")
+	}
+	root := t.TempDir()
+	t.Setenv("MPV_HOME", root)
+	if err := os.WriteFile(filepath.Join(root, "mpv.conf"), []byte("af=acompressor\nreplaygain-preamp=12\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := NewWithConfig(binary, filepath.Join(root, "ipc.sock"))
+	if p != nil {
+		defer p.Close()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	filters, err := p.commandLocked("get_property", "af")
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, ok := filters.Data.([]any)
+	if !ok || len(list) != 0 {
+		t.Fatalf("personal filters loaded: %#v", filters.Data)
+	}
+	preamp, err := p.getFloatPropertyLocked("replaygain-preamp")
+	if err != nil || preamp != 0 {
+		t.Fatalf("preamp = %v, error = %v", preamp, err)
 	}
 }

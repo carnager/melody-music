@@ -151,6 +151,8 @@ func (p *Player) startLocked() error {
 	_ = os.Remove(p.socketPath)
 
 	cmd := exec.Command(p.mpvPath,
+		"--no-config",
+		"--load-scripts=no",
 		"--idle=yes",
 		"--no-video",
 		"--no-terminal",

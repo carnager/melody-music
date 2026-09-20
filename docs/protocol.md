@@ -459,3 +459,13 @@ both credentials and outbox. Restart loses partial listening progress and does
 not retroactively credit a restored seek position. No database migration is
 needed; to reset/remove this integration, stop the daemon and remove its private
 state file. Older daemons ignore the additive file.
+
+### Atomic Up Next selection edits
+
+Servers advertising `melody_upnext_edit` accept
+`melody_upnext_edit REVISION [REQUEST_ID ...]`. The IDs must be distinct existing
+pending occurrences. They become the complete pending order; omitted pending
+requests are removed. An empty list clears pending requests. The active request
+and base list are unaffected. Validation and the revision check precede mutation;
+one revision and one Undo step cover the complete batch. Clients without this
+capability continue using the single-request `melody_upnext` operations.

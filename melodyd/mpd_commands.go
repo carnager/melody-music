@@ -125,6 +125,7 @@ func init() {
 		"melody_context":     cmdMelodyContext,
 		"melody_lastfm":      cmdMelodyLastFM,
 		"melody_upnext":      cmdMelodyUpNext,
+		"melody_upnext_edit": cmdMelodyUpNextEdit,
 		"melody_scratch":     cmdMelodyScratch,
 		"melody_playlistadd": cmdMelodyPlaylistAdd,
 

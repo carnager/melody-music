@@ -26,7 +26,9 @@ mpv_socket = ""
 - `music_dir` is the local library root. Its relative folder layout must match the server.
 - Empty `music_dir` streams audio from the daemon.
 - `format` selects the stream format (`mp3`, `opus`, `ogg`, `aac`, or `flac`). Empty uses the original file. `max_bitrate` is in kbit/s; `0` leaves it unrestricted.
-- Go agents require `mpv`.
+- Go agents require `mpv`. Melody starts it without personal mpv configuration
+  or auto-loaded scripts; standalone mpv filters and preamps do not affect
+  Melody playback. Use Melody settings for volume and ReplayGain.
 
 Start `melody-agent`, then select its output in the TUI (`D`), web UI, or
 Android app. From a source build, run `./bin/melody-agent`.

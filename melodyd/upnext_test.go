@@ -230,3 +230,46 @@ func TestStockQueueEditsDoNotPersistRequests(t *testing.T) {
 		t.Fatalf("requests leaked into stored list or ordinary edit lost: %s", stored)
 	}
 }
+
+func TestRequestQueueBatchRetainIsAtomicAndUndoable(t *testing.T) {
+	a, _ := newContextApp(t)
+	dispatchCapture(t, a, `melody_context play "Road" 0`)
+	base := slices.Clone(a.queueIDs)
+	dispatchCapture(t, a, fmt.Sprintf(`melody_upnext append %d gamma.flac delta.flac gamma.flac`, a.queueVersion))
+	ids := slices.Clone(a.upNext.Pending)
+	rev := a.queueVersion
+	for _, args := range []string{
+		fmt.Sprintf("%d %d %d", rev, ids[0], ids[0]),
+		fmt.Sprintf("%d %d 999999", rev, ids[1]),
+		fmt.Sprintf("%d %d", rev-1, ids[1]),
+	} {
+		if dispatchError(t, a, "melody_upnext_edit "+args) == nil {
+			t.Fatal("invalid batch accepted", args)
+		}
+		if !slices.Equal(a.upNext.Pending, ids) || a.queueVersion != rev {
+			t.Fatal("invalid batch partially applied")
+		}
+	}
+	dispatchCapture(t, a, fmt.Sprintf("melody_upnext_edit %d %d %d", rev, ids[2], ids[0]))
+	if !slices.Equal(a.upNext.Pending, []int{ids[2], ids[0]}) {
+		t.Fatal(a.upNext.Pending)
+	}
+	if a.requestPosition(ids[1]) >= 0 {
+		t.Fatal("removed occurrence still in queue")
+	}
+	dispatchCapture(t, a, fmt.Sprintf("melody_upnext undo %d", a.queueVersion))
+	if !slices.Equal(a.upNext.Pending, ids) {
+		t.Fatal("undo did not restore whole selection")
+	}
+	a.advanceRequest(a.requestPosition(ids[0]))
+	active := a.upNext.Active
+	dispatchCapture(t, a, fmt.Sprintf("melody_upnext_edit %d", a.queueVersion))
+	if len(a.upNext.Pending) != 0 || a.upNext.Active != active {
+		t.Fatal("batch clear affected active request")
+	}
+	for _, id := range base {
+		if !slices.Contains(a.queueIDs, id) {
+			t.Fatal("base list changed")
+		}
+	}
+}
