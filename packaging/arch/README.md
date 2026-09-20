@@ -1,13 +1,23 @@
 # Arch Linux development package
 
-`melody-git` builds GitHub HEAD and includes the daemon and Linux command-line
-clients. The repository-root `PKGBUILD` remains the tagged split-package recipe.
+The `melody-git` package base builds GitHub HEAD into separate packages:
+
+- `melodyd-git`: daemon, user service, and setup messages
+- `melody-agent-git`: remote playback agent
+- `melody-tui-git`, `melody-cli-git`: terminal clients
+- `melody-musiclist-git`, `melody-lrcmatch-git`: export and lyrics tools
+- `melody-watcher-git`, `melody-rofi-git`: filesystem watcher and menu client
+
+Clients do not depend on the daemon. The optional `melody-git` metapackage
+installs all components and preserves the previous bundled package's upgrade
+path. Each component conflicts only with its corresponding stable package.
+The repository-root `PKGBUILD` remains the tagged split-package recipe.
 
 Keep this directory's `PKGBUILD` and `melody.install` synchronized with the AUR
 `melody-git` repository. Build with `makepkg`; the check phase runs `go test ./...`.
 After updating sources, regenerate AUR metadata with `makepkg --printsrcinfo`.
 
-The package installs `/usr/lib/systemd/user/melodyd.service`. As your regular
+Only `melodyd-git` installs `/usr/lib/systemd/user/melodyd.service`. As your regular
 user, configure it before starting the service:
 
 ```sh
