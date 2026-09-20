@@ -123,6 +123,8 @@ func init() {
 
 		// Playback contexts (docs/protocol.md)
 		"melody_context":     cmdMelodyContext,
+		"melody_lastfm":      cmdMelodyLastFM,
+		"melody_upnext":      cmdMelodyUpNext,
 		"melody_scratch":     cmdMelodyScratch,
 		"melody_playlistadd": cmdMelodyPlaylistAdd,
 
@@ -315,18 +317,14 @@ func cmdCurrentSong(c *mpdConn, args []string) *mpdError {
 	pos := -1
 	mpdID := 0
 	prio := 0
-	for i, id := range a.playQueue {
-		if id == songID {
-			pos = i
-			if i < len(a.queueIDs) {
-				mpdID = a.queueIDs[i]
-			}
-			if i < len(a.queuePriority) {
-				prio = a.queuePriority[i]
-			}
-			break
+	if a.curQueuePos >= 0 && a.curQueuePos < len(a.queueIDs) {
+		pos = a.curQueuePos
+		mpdID = a.queueIDs[pos]
+		if pos < len(a.queuePriority) {
+			prio = a.queuePriority[pos]
 		}
 	}
+
 	a.playQueueMu.Unlock()
 
 	c.writeTrack(track, pos, mpdID, prio)
@@ -366,6 +364,15 @@ func cmdPlay(c *mpdConn, args []string) *mpdError {
 			a.playQueueMu.Unlock()
 			return mpdErr(errArg, "play", "invalid position")
 		}
+		a.scrobbleGeneration++
+		chosen := a.queueIDs[pos]
+		if !a.isRequest(chosen) {
+			a.abandonRequests()
+			pos = a.requestPosition(chosen)
+		} else if chosen != a.upNext.Active {
+			a.advanceRequest(pos)
+			pos = a.requestPosition(chosen)
+		}
 		a.curQueuePos = pos
 		// Explicitly playing a track makes it eligible again even if it
 		// already played through a priority jump this cycle.
@@ -378,6 +385,9 @@ func cmdPlay(c *mpdConn, args []string) *mpdError {
 		p := a.planSyncTarget()
 		plan = &p
 	} else if len(a.playQueue) > 0 {
+		if a.curQueuePos >= 0 && a.curQueuePos < len(a.queueIDs) && a.isRequest(a.queueIDs[a.curQueuePos]) && a.upNext.Active == 0 {
+			a.advanceRequest(a.curQueuePos)
+		}
 		// No position arg — outputs that are stopped (nothing loaded) need a
 		// full play command; outputs already playing or paused just get the
 		// resume below. Re-sync only the stopped ones so playing outputs
@@ -459,13 +469,29 @@ func cmdNext(c *mpdConn, args []string) *mpdError {
 	a := c.app
 	stopped, paused := a.transportState()
 	a.playQueueMu.Lock()
+	a.scrobbleGeneration++
 	qLen := len(a.playQueue)
 	if qLen == 0 {
 		a.playQueueMu.Unlock()
 		return nil
 	}
 	oldPos := a.curQueuePos
+	single := a.modeSingle
+	if len(a.upNext.Pending) > 0 || a.upNext.Active != 0 {
+		a.modeSingle = false
+	}
 	next := a.nextQueuePos()
+	a.modeSingle = single
+	if a.advanceRequest(next) {
+		plan := a.planSyncTarget()
+		plan.startPaused = paused
+		a.playQueueMu.Unlock()
+		if !stopped {
+			a.execSyncPlan(plan)
+		}
+		a.mpdHub.notify(SubPlaylist, SubPlayer)
+		return nil
+	}
 	a.logger.Printf("cmdNext: random=%v oldPos=%d nextPos=%d qLen=%d", a.modeRandom, oldPos, next, qLen)
 	if next < 0 {
 		a.playQueueMu.Unlock()
@@ -526,6 +552,17 @@ func cmdPrevious(c *mpdConn, args []string) *mpdError {
 	a := c.app
 	stopped, paused := a.transportState()
 	a.playQueueMu.Lock()
+	a.scrobbleGeneration++
+	if a.upNext.Active != 0 {
+		plan := a.planSyncTarget()
+		plan.startPaused = paused
+		a.playQueueMu.Unlock()
+		if !stopped {
+			a.execSyncPlan(plan)
+		}
+		a.mpdHub.notify(SubPlayer)
+		return nil
+	}
 	qLen := len(a.playQueue)
 	if qLen == 0 {
 		a.playQueueMu.Unlock()
@@ -915,6 +952,14 @@ func cmdDelete(c *mpdConn, args []string) *mpdError {
 		}
 	}
 
+	a.reconcileRequests()
+	if currentDeleted && a.upNext.Active != 0 {
+		single := a.modeSingle
+		a.modeSingle = false
+		next := a.nextQueuePos()
+		a.modeSingle = single
+		a.advanceRequest(next)
+	}
 	a.savePlayQueue()
 	if currentDeleted || len(a.playQueue) == 0 {
 		if stopped && len(a.playQueue) > 0 {
@@ -958,6 +1003,7 @@ func cmdDeleteID(c *mpdConn, args []string) *mpdError {
 func cmdClear(c *mpdConn, args []string) *mpdError {
 	a := c.app
 	a.playQueueMu.Lock()
+	a.upNext = requestQueue{}
 	a.playQueue = nil
 	a.queueIDs = nil
 	a.queuePriority = nil

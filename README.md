@@ -144,4 +144,6 @@ Android SDK and Gradle setup.
 
 ## License
 
-MIT
+Existing code is MIT. Files explicitly marked `GPL-3.0-only`, including the
+Last.fm and Up Next implementations, retain that license. Builds of `melodyd`
+that include these components must comply with GPL-3.0-only.

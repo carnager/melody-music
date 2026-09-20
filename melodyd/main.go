@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/carnager/melody/internal/lastfm"
 	"io"
 	"log"
 	"math/rand"
@@ -143,11 +144,15 @@ type device struct {
 // ---------------------------------------------------------------------------
 
 type app struct {
-	cfg     config
-	paths   paths
-	logger  *log.Logger
-	db      *musicDB
-	scanner *scanner
+	lastfm             *lastfm.Service
+	scrobbleGeneration uint64 // guarded by playQueueMu
+	requestUndo        *requestUndoState
+	upNext             requestQueue
+	cfg                config
+	paths              paths
+	logger             *log.Logger
+	db                 *musicDB
+	scanner            *scanner
 	// playQueue tracks song IDs (SQLite track IDs as strings) in current mpv playlist order
 	playQueue      []string
 	playQueueMu    sync.Mutex
@@ -321,7 +326,7 @@ func main() {
 
 	// Assign MPD queue IDs for restored queue
 	a.playQueueMu.Lock()
-	for range a.playQueue {
+	for len(a.queueIDs) < len(a.playQueue) {
 		a.queueIDCounter++
 		a.queueIDs = append(a.queueIDs, a.queueIDCounter)
 	}
@@ -342,6 +347,7 @@ func main() {
 
 	go a.startLocalAgent()
 	go a.watchPlayState()
+	a.startLastFM()
 	go a.deviceCleanup()
 	if a.cfg.MPD.Port > 0 {
 		go func() {
@@ -887,7 +893,7 @@ func (a *app) nextSequentialPos(from int) int {
 
 // nextQueuePos returns the queue position that should follow the current one,
 // applying playback modes. Returns -1 if there's no next track.
-func (a *app) nextQueuePos() int {
+func (a *app) baseNextQueuePos() int {
 	qLen := len(a.playQueue)
 	if qLen == 0 {
 		return -1
@@ -1111,6 +1117,7 @@ func (a *app) execNextTrackPlanOn(ti targetInfo, plan nextTrackPlan) {
 // The lock is released before IPC calls to avoid blocking clients querying status.
 func (a *app) advanceTrack() {
 	a.playQueueMu.Lock()
+	a.scrobbleGeneration++
 
 	qLen := len(a.playQueue)
 	if qLen == 0 {
@@ -1118,9 +1125,27 @@ func (a *app) advanceTrack() {
 		return
 	}
 
-	// Single mode: stop or repeat the current track
+	// Requests use the actual preloaded occurrence at a natural boundary.
+	if !a.modeSingle && a.advanceRequest(a.pendingNextPos) {
+		next := a.nextQueuePos()
+		a.pendingNextPos = next
+		song := ""
+		if next >= 0 {
+			song = a.playQueue[next]
+		}
+		ended := a.curQueuePos < 0
+		a.playQueueMu.Unlock()
+		if ended {
+			_ = a.target().playlistClear()
+		} else {
+			a.advancePreload(next, song)
+		}
+		a.mpdHub.notify(SubPlaylist, SubPlayer)
+		return
+	}
+	// Single mode still stops a request boundary; repeat cannot trap requests.
 	if a.modeSingle {
-		if a.modeRepeat {
+		if a.modeRepeat && len(a.upNext.Pending) == 0 && a.upNext.Active == 0 {
 			plan := a.planSyncTarget()
 			a.playQueueMu.Unlock()
 			a.execSyncPlan(plan)
@@ -1532,6 +1557,7 @@ func (a *app) addSongsToPlaylist(songIDs []string, mode string) error {
 // the priority return cursor, and the played-through-priority memory all
 // describe positions in the queue being discarded.
 func (a *app) replaceQueueLocked(songIDs []string, prios []int, startPos int) {
+	a.upNext = requestQueue{}
 	a.playQueue = nil
 	a.queueIDs = nil
 	a.queuePriority = nil
@@ -1699,6 +1725,9 @@ type contextPos struct {
 // are additive and omitted when unused, so older daemons ignore them and
 // files written by older daemons restore as "no contexts".
 type savedQueue struct {
+	RequestsVersion  int                    `json:"requests_version,omitempty"`
+	QueueIDs         []int                  `json:"queue_ids,omitempty"`
+	Requests         requestQueue           `json:"requests,omitempty"`
 	Songs            []string               `json:"songs"`
 	Priorities       []int                  `json:"priorities,omitempty"`
 	Version          int                    `json:"version,omitempty"`
@@ -1720,9 +1749,17 @@ type savedCtxPos struct {
 }
 
 // savePlayQueue persists the current play queue to disk (caller must hold playQueueMu or be safe).
-func (a *app) savePlayQueue() {
+func (a *app) savePlayQueue() (saveError error) {
+	if a.paths.PlayQueueFile == "" {
+		return nil
+	}
+	defer func() {
+		if saveError != nil && a.logger != nil {
+			a.logger.Printf("save play queue: %v", saveError)
+		}
+	}()
 	sq := savedQueue{Songs: a.playQueue, Priorities: a.queuePriority, Version: a.queueVersion,
-		ActiveContext: a.activeContext}
+		ActiveContext: a.activeContext, QueueIDs: a.queueIDs, Requests: a.upNext, RequestsVersion: 1}
 	if a.ctxStash != nil {
 		sq.Stash = &savedStash{
 			Songs:      a.ctxStash.Songs,
@@ -1737,8 +1774,38 @@ func (a *app) savePlayQueue() {
 			sq.ContextPositions[name] = savedCtxPos{Pos: position.Pos, Elapsed: position.Elapsed}
 		}
 	}
-	data, _ := json.Marshal(sq)
-	_ = os.WriteFile(a.paths.PlayQueueFile, data, 0o644)
+	payload, err := json.Marshal(sq)
+	if err != nil {
+		return err
+	}
+	directory := filepath.Dir(a.paths.PlayQueueFile)
+	temporary, err := os.CreateTemp(directory, ".play-queue-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(temporary.Name())
+	if err = temporary.Chmod(0o644); err == nil {
+		_, err = temporary.Write(payload)
+	}
+	if err == nil {
+		err = temporary.Sync()
+	}
+	closeErr := temporary.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err = os.Rename(temporary.Name(), a.paths.PlayQueueFile); err != nil {
+		return err
+	}
+	folder, err := os.Open(directory)
+	if err != nil {
+		return err
+	}
+	defer folder.Close()
+	return folder.Sync()
 }
 
 // restorePlayQueue loads the saved play queue from disk and reloads into
@@ -1753,8 +1820,19 @@ func (a *app) restorePlayQueue() {
 	if json.Unmarshal(data, &sq) == nil && len(sq.Songs) > 0 {
 		a.playQueue = sq.Songs
 		a.queuePriority = sq.Priorities
-		a.queueVersion = sq.Version
+		a.queueVersion = sq.Version + 1
 		a.activeContext = sq.ActiveContext
+		if len(sq.QueueIDs) == len(sq.Songs) {
+			a.queueIDs = sq.QueueIDs
+			if sq.RequestsVersion == 1 {
+				a.upNext = sq.Requests
+			}
+			for _, id := range a.queueIDs {
+				if id > a.queueIDCounter {
+					a.queueIDCounter = id
+				}
+			}
+		}
 		if sq.Stash != nil {
 			a.ctxStash = &queueStash{
 				Songs:      sq.Stash.Songs,
@@ -1812,6 +1890,9 @@ func (a *app) reloadQueueIntoTarget() {
 	a.restorePlayStatePos()
 
 	a.playQueueMu.Lock()
+	if a.upNext.Active != 0 {
+		a.curQueuePos = a.requestPosition(a.upNext.Active)
+	}
 	plan := a.planSyncTarget()
 	plan.startPaused = true
 	a.playQueueMu.Unlock()
@@ -1889,6 +1970,12 @@ func (a *app) restorePlayStatePos() {
 }
 
 func (a *app) restorePlayState() {
+	a.playQueueMu.Lock()
+	requestActive := a.upNext.Active != 0
+	a.playQueueMu.Unlock()
+	if requestActive {
+		return
+	}
 	data, err := os.ReadFile(a.paths.PlayStateFile)
 	if err != nil {
 		return

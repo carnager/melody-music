@@ -48,6 +48,22 @@ func (m *musicDB) close() error {
 	return m.db.Close()
 }
 
+func (m *musicDB) migrateTrackTagsCoveringIndex() error {
+	tx, err := m.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_track_tags_tag_value_track
+		ON track_tags(tag, value, track_id)`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DROP INDEX IF EXISTS idx_track_tags_tag_value`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (m *musicDB) migrate() error {
 	_, err := m.db.Exec(`
 		CREATE TABLE IF NOT EXISTS library_mounts (
@@ -131,7 +147,11 @@ func (m *musicDB) migrate() error {
 		return err
 	}
 	m.db.Exec(`CREATE INDEX IF NOT EXISTS idx_track_tags_track ON track_tags(track_id)`)
-	m.db.Exec(`CREATE INDEX IF NOT EXISTS idx_track_tags_tag_value ON track_tags(tag, value)`)
+	// Upgrade the old two-column index transactionally: genre and other
+	// tag lookups can return track IDs directly from the covering index.
+	if err := m.migrateTrackTagsCoveringIndex(); err != nil {
+		return err
+	}
 	if hadTrackTags == 0 {
 		m.db.Exec(`UPDATE tracks SET file_modified = 0`)
 	}
@@ -1911,4 +1931,27 @@ func (m *musicDB) buildTrackMap(id, albumID, added, fileModified int64, artist, 
 		}
 	}
 	return result
+}
+
+// replacePlaylistTracks publishes an ordered queue edit as one stored-list write.
+func (m *musicDB) replacePlaylistTracks(id int64, tracks []int64) error {
+	tx, err := m.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM playlist_tracks WHERE playlist_id = ?`, id); err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(`INSERT INTO playlist_tracks(playlist_id, track_id, position) VALUES (?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for pos, track := range tracks {
+		if _, err := stmt.Exec(id, track, pos+1); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

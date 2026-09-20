@@ -289,7 +289,16 @@ func (c *mpdConn) dispatch(cmd string, args []string) *mpdError {
 	if !ok {
 		return mpdErr(errUnknown, cmd, "unknown command")
 	}
-	return handler(c, args)
+	if err := handler(c, args); err != nil {
+		return err
+	}
+	switch cmd {
+	case "add", "addid", "addidprio", "delete", "deleteid", "clear", "move", "moveid", "shuffle", "load", "findadd", "searchadd":
+		if err := c.app.persistActiveContextQueue(); err != nil {
+			return mpdErr(errSystem, cmd, "queue changed but active list could not be saved: "+err.Error())
+		}
+	}
+	return nil
 }
 
 func (c *mpdConn) handleCommandList(withOK bool) {

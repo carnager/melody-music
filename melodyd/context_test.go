@@ -263,17 +263,17 @@ func TestContextQueueInfoListsStashElseLiveQueue(t *testing.T) {
 	}
 }
 
-func TestContextQueueEditsAreNotWrittenBack(t *testing.T) {
+func TestContextQueueEditsAreWrittenBack(t *testing.T) {
 	a, _ := newContextApp(t)
 	dispatchCapture(t, a, `melody_context play "Road"`)
 	dispatchCapture(t, a, `add "one.flac"`)
 	if got := strings.Join(queueTitles(t, a), ","); got != "alpha,beta,one.flac" {
 		t.Fatalf("queue edit = %q, want the added track in the materialization", got)
 	}
-	// The playlist itself is untouched, so switching away and back drops it.
+	// Switching away and back preserves edits made by an ordinary MPD client.
 	dispatchCapture(t, a, `melody_context play "Calm"`)
 	dispatchCapture(t, a, `melody_context play "Road"`)
-	if got := strings.Join(queueTitles(t, a), ","); got != "alpha,beta" {
+	if got := strings.Join(queueTitles(t, a), ","); got != "alpha,beta,one.flac" {
 		t.Fatalf("re-materialized = %q, want the stored playlist contents", got)
 	}
 }
@@ -580,5 +580,29 @@ func TestDeletedPlaylistLeavesNoTracksBehind(t *testing.T) {
 	out := dispatchCapture(t, a, `listplaylist "Fresh"`)
 	if strings.Count(out, "file: ") != 1 || !strings.Contains(out, "gamma") {
 		t.Fatalf("new playlist inherited tracks: %q", out)
+	}
+}
+
+func TestContextExternalAlbumReplacement(t *testing.T) {
+	a, _ := newContextApp(t)
+	dispatchCapture(t, a, `add "one.flac"`)
+	dispatchCapture(t, a, `melody_context play "Road"`)
+	for _, cmd := range []string{`clear`, `add "gamma.flac"`, `add "delta.flac"`, `play`} {
+		if err := dispatchError(t, a, cmd); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stored := dispatchCapture(t, a, `listplaylistinfo "Road"`)
+	if !strings.Contains(stored, "Title: gamma") || !strings.Contains(stored, "Title: delta") || strings.Contains(stored, "Title: alpha") {
+		t.Fatalf("active stored list did not follow external replacement: %s", stored)
+	}
+	dispatchCapture(t, a, `melody_context play "Calm"`)
+	dispatchCapture(t, a, `melody_context play "Road"`)
+	if got := strings.Join(queueTitles(t, a), ","); got != "gamma,delta" {
+		t.Fatalf("replacement lost: %s", got)
+	}
+	dispatchCapture(t, a, `melody_context queue`)
+	if got := strings.Join(queueTitles(t, a), ","); got != "one.flac" {
+		t.Fatalf("stash changed: %s", got)
 	}
 }

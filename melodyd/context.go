@@ -57,6 +57,10 @@ func (a *app) switchToPlaylistContext(name string, pos int, hasPos bool) error {
 	elapsed, _ := a.captureTransport()
 
 	a.playQueueMu.Lock()
+	if a.upNext.Active != 0 {
+		elapsed = 0
+	}
+	a.abandonRequests()
 	// Leaving a playlist records its resume point; leaving the queue
 	// context stashes the queue itself. An orphan stash (the previous
 	// active playlist was removed while playing) is kept as-is — the queue
@@ -109,6 +113,12 @@ func (a *app) switchToQueueContext(pos int, hasPos bool) error {
 	elapsed, paused := a.captureTransport()
 
 	a.playQueueMu.Lock()
+	if a.upNext.Active != 0 {
+		elapsed = 0
+	}
+	if a.ctxStash != nil {
+		a.abandonRequests()
+	}
 	if a.ctxStash == nil {
 		// Nothing displaced: a bare switch is a no-op, and one with a
 		// position plays that row of the current queue.
@@ -120,7 +130,9 @@ func (a *app) switchToQueueContext(pos int, hasPos bool) error {
 			a.playQueueMu.Unlock()
 			return fmt.Errorf("position out of range: %d", pos)
 		}
-		a.curQueuePos = pos
+		chosen := a.queueIDs[pos]
+		a.abandonRequests()
+		a.curQueuePos = a.requestPosition(chosen)
 		a.activeContext = ""
 		a.savePlayQueue()
 		a.playQueueMu.Unlock()
@@ -315,6 +327,7 @@ func (a *app) dropActiveContext(name string) {
 	delete(a.ctxPositions, name)
 	if a.activeContext == name {
 		a.activeContext = ""
+		a.upNext.Return = nil
 		a.savePlayQueue()
 	}
 }
@@ -346,6 +359,20 @@ func (a *app) resyncActiveContext(name string) {
 	elapsed, paused := a.captureTransport()
 
 	a.playQueueMu.Lock()
+	if a.upNext.Active != 0 || len(a.upNext.Pending) > 0 {
+		a.refreshRequestBase(songIDs)
+		a.savePlayQueue()
+		plan := a.planSyncTarget()
+		plan.startPaused = paused
+		a.playQueueMu.Unlock()
+		if plan.hasCurrent {
+			a.startEnabledOutputsAt(elapsed, paused)
+		} else {
+			a.execSyncPlan(plan)
+		}
+		a.mpdHub.notify(SubPlaylist, SubPlayer)
+		return
+	}
 	playing := ""
 	if a.curQueuePos >= 0 && a.curQueuePos < len(a.playQueue) {
 		playing = a.playQueue[a.curQueuePos]
@@ -378,4 +405,34 @@ func (a *app) resyncActiveContext(name string) {
 		a.startEnabledOutputsAt(elapsed, paused)
 	}
 	a.mpdHub.notify(SubPlaylist, SubPlayer)
+}
+
+// persistActiveContextQueue makes stock MPD edits visible through the same
+// stored list used by context-aware clients. Temporary requests stay separate.
+func (a *app) persistActiveContextQueue() error {
+	a.playQueueMu.Lock()
+	defer a.playQueueMu.Unlock()
+	if a.activeContext == "" {
+		return nil
+	}
+	id, err := a.db.playlistIDByName(a.activeContext)
+	if err != nil {
+		return err
+	}
+	var tracks []int64
+	for pos, song := range a.playQueue {
+		if pos < len(a.queueIDs) && a.isRequest(a.queueIDs[pos]) {
+			continue
+		}
+		track, err := strconv.ParseInt(song, 10, 64)
+		if err != nil {
+			return err
+		}
+		tracks = append(tracks, track)
+	}
+	if err := a.db.replacePlaylistTracks(id, tracks); err != nil {
+		return err
+	}
+	a.mpdHub.notify(SubStoredPlaylist)
+	return nil
 }

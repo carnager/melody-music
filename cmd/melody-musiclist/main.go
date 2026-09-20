@@ -30,11 +30,11 @@ type config struct {
 }
 
 type exportAlbum struct {
-	Artist  string  `json:"artist"`
-	Album   string  `json:"album"`
-	Year    string  `json:"year"`
-	YearInt int     `json:"year_int"`
-	Rating  int     `json:"rating"`
+	Artist   string  `json:"artist"`
+	Album    string  `json:"album"`
+	Year     string  `json:"year"`
+	YearInt  int     `json:"year_int"`
+	Rating   int     `json:"rating"`
 	Computed float64 `json:"computed"`
 }
 
@@ -233,11 +233,8 @@ func loadConfig() (config, error) {
 	if cfg.MPD.Port == 0 {
 		cfg.MPD.Port = 6600
 	}
-	if cfg.Upload.Host == "" {
-		cfg.Upload.Host = "proteus"
-	}
-	if cfg.Upload.Path == "" {
-		cfg.Upload.Path = "/srv/http/list"
+	if strings.TrimSpace(cfg.Upload.Host) == "" || strings.TrimSpace(cfg.Upload.Path) == "" {
+		return config{}, fmt.Errorf("configure both [upload].host and [upload].path in %s before running melody-musiclist", confPath)
 	}
 	if cfg.Output.TempFile == "" {
 		cfg.Output.TempFile = "/tmp/musiclist.html"
@@ -250,9 +247,10 @@ func defaultConfig() string {
 host = "localhost"
 port = 6600
 
+# Required: your SSH destination and the directory for index.html.
 [upload]
-host = "proteus"
-path = "/srv/http/list"
+host = ""
+path = ""
 
 [output]
 temp_file = "/tmp/musiclist.html"

@@ -65,145 +65,38 @@ func applyMPDEnv(c *config) {
 }
 
 func main() {
-	cfg := loadConfig()
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: melody-cli <command> [args...]")
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "Commands:")
-		fmt.Fprintln(os.Stderr, "  find <tag> <value> [tag value ...]   Find tracks (exact match)")
-		fmt.Fprintln(os.Stderr, "  search <tag> <value> [tag value ...] Search tracks (case-insensitive)")
-		fmt.Fprintln(os.Stderr, "  findadd <tag> <value> [...]          Find and add to queue")
-		fmt.Fprintln(os.Stderr, "  searchadd <tag> <value> [...]        Search and add to queue")
-		fmt.Fprintln(os.Stderr, "  rate <songid> <rating>               Rate track (0-10, 0=unrate)")
-		fmt.Fprintln(os.Stderr, "  albumrate <artist> <album> <date> <rating>")
-		fmt.Fprintln(os.Stderr, "  getrating <songid>                   Get track rating")
-		fmt.Fprintln(os.Stderr, "  getalbumrating <artist> <album> <date>")
-		fmt.Fprintln(os.Stderr, "  current                              Show current song with rating")
-		fmt.Fprintln(os.Stderr, "  lyrics                               Show lyrics for current song")
-		fmt.Fprintln(os.Stderr, "  raw <command>                        Send raw MPD command")
+		fmt.Fprint(os.Stderr, cliHelp)
 		os.Exit(1)
 	}
-
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", cfg.MPDHost, cfg.MPDPort), 3*time.Second)
+	if os.Args[1] == "help" || os.Args[1] == "--help" || os.Args[1] == "-h" {
+		fmt.Print(cliHelp)
+		return
+	}
+	command, args, err := prepareCommand(os.Args[1], os.Args[2:])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: cannot connect to %s:%d: %v\n", cfg.MPDHost, cfg.MPDPort, err)
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
+	cfg := loadConfig()
+	address := net.JoinHostPort(cfg.MPDHost, fmt.Sprint(cfg.MPDPort))
+	conn, err := net.DialTimeout("tcp", address, 3*time.Second)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: cannot connect to %s: %v\n", address, err)
 		os.Exit(1)
 	}
 	defer conn.Close()
-
-	r := bufio.NewReader(conn)
-	w := bufio.NewWriter(conn)
-
-	// Read greeting
-	greeting, err := r.ReadString('\n')
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	reader := bufio.NewReader(conn)
+	greeting, err := reader.ReadString('\n')
 	if err != nil || !strings.HasPrefix(greeting, "OK MPD") {
 		fmt.Fprintln(os.Stderr, "Error: not an MPD server")
 		os.Exit(1)
 	}
-
-	command := os.Args[1]
-	args := os.Args[2:]
-
-	var mpdCmd string
-	switch command {
-	case "find", "search", "findadd", "searchadd":
-		mpdCmd = buildFindCmd(command, args)
-	case "rate":
-		if len(args) != 2 {
-			fmt.Fprintln(os.Stderr, "Usage: melody-cli rate <songid> <rating>")
-			os.Exit(1)
-		}
-		mpdCmd = fmt.Sprintf("rate %s %s", args[0], args[1])
-	case "albumrate":
-		if len(args) != 4 {
-			fmt.Fprintln(os.Stderr, "Usage: melody-cli albumrate <artist> <album> <date> <rating>")
-			os.Exit(1)
-		}
-		mpdCmd = fmt.Sprintf("albumrate %s %s %s %s", quote(args[0]), quote(args[1]), quote(args[2]), args[3])
-	case "getrating":
-		if len(args) != 1 {
-			fmt.Fprintln(os.Stderr, "Usage: melody-cli getrating <songid>")
-			os.Exit(1)
-		}
-		mpdCmd = "getrating " + args[0]
-	case "getalbumrating":
-		if len(args) != 3 {
-			fmt.Fprintln(os.Stderr, "Usage: melody-cli getalbumrating <artist> <album> <date>")
-			os.Exit(1)
-		}
-		mpdCmd = fmt.Sprintf("getalbumrating %s %s %s", quote(args[0]), quote(args[1]), quote(args[2]))
-	case "current":
-		mpdCmd = "currentsong"
-	case "lyrics":
-		// Need to get current song file first, then request lyrics
-		conn.SetDeadline(time.Now().Add(10 * time.Second))
-		w.WriteString("currentsong\n")
-		w.Flush()
-
-		file := ""
-		for {
-			line, err := r.ReadString('\n')
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-			line = strings.TrimRight(line, "\r\n")
-			if line == "OK" {
-				break
-			}
-			if strings.HasPrefix(line, "ACK ") {
-				fmt.Fprintln(os.Stderr, line)
-				os.Exit(1)
-			}
-			if strings.HasPrefix(line, "file: ") {
-				file = line[6:]
-			}
-		}
-		if file == "" {
-			fmt.Fprintln(os.Stderr, "Error: no track playing")
-			os.Exit(1)
-		}
-		mpdCmd = "readlyrics " + quote(file)
-	case "raw":
-		if len(args) == 0 {
-			fmt.Fprintln(os.Stderr, "Usage: melody-cli raw <command>")
-			os.Exit(1)
-		}
-		mpdCmd = strings.Join(args, " ")
-	default:
-		// Pass through as raw command
-		mpdCmd = command
-		if len(args) > 0 {
-			mpdCmd += " " + strings.Join(args, " ")
-		}
-	}
-
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
-	w.WriteString(mpdCmd + "\n")
-	w.Flush()
-
-	isLyrics := command == "lyrics"
-	for {
-		line, err := r.ReadString('\n')
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		line = strings.TrimRight(line, "\r\n")
-		if line == "OK" {
-			break
-		}
-		if strings.HasPrefix(line, "ACK ") {
-			fmt.Fprintln(os.Stderr, line)
-			os.Exit(1)
-		}
-		if isLyrics && strings.HasPrefix(line, "X-Lyrics: ") {
-			fmt.Println(unescapeLyrics(line[10:]))
-		} else if isLyrics && strings.HasPrefix(line, "X-Lyrics-Type: ") {
-			// skip type header for clean output
-		} else {
-			fmt.Println(line)
-		}
+	client := mpdClient{conn: conn, reader: reader}
+	if err := client.run(command, args, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
 	}
 }
 
@@ -227,18 +120,6 @@ func unescapeLyrics(s string) string {
 		}
 	}
 	return b.String()
-}
-
-func buildFindCmd(cmd string, args []string) string {
-	if len(args) < 2 || len(args)%2 != 0 {
-		fmt.Fprintf(os.Stderr, "Usage: melody-cli %s <tag> <value> [tag value ...]\n", cmd)
-		os.Exit(1)
-	}
-	parts := []string{cmd}
-	for i := 0; i < len(args); i += 2 {
-		parts = append(parts, args[i], quote(args[i+1]))
-	}
-	return strings.Join(parts, " ")
 }
 
 func quote(s string) string {
