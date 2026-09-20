@@ -66,8 +66,12 @@ a panel for adding, reordering, removing, and clearing requests. See
 revision checks, and compatibility limits.
 
 For scrobbling, open **Trackknife → Settings → Last.fm → Melody server**.
-Enter your Last.fm application API key and shared secret, authorize in the
-browser, finish authorization, and enable scrobbling. Melody accounts for its
+Follow the registration link and paste your own Last.fm application API key and
+shared secret once. Choose **Connect to Last.fm…**, approve access in the browser,
+and Trackknife completes authorization automatically. Scrobbling starts enabled
+on the first connection; reconnecting the same account preserves your choice. No application credentials are
+bundled. The setup checkbox reuses your key for Trackknife’s dynamic playlists;
+**Reconnect in browser…** reuses credentials saved on Melody. Melody accounts for its
 primary output and continues scrobbling when clients close; a client should
 not also scrobble that same playback. Local Trackknife playback has a separate
 account. Love/Unlove actions do not require scrobbling to be enabled.

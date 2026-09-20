@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -193,5 +194,94 @@ func TestCoarsePositionReports(t *testing.T) {
 	}
 	if len(s.state.Pending) != 1 {
 		t.Fatal("coarse progress was mistaken for seeking")
+	}
+}
+
+func TestReconnectUsesSavedCredentials(t *testing.T) {
+	key, secret := strings.Repeat("a", 32), strings.Repeat("b", 32)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		if r.Form.Get("api_key") != key || r.Form.Get("api_sig") != Signature(r.Form, secret) {
+			t.Error("saved credentials not used")
+		}
+		w.Write([]byte(`{"token":"TOKEN"}`))
+	}))
+	defer server.Close()
+	path := filepath.Join(t.TempDir(), "state.json")
+	s := New(path)
+	s.endpoint = server.URL
+	if _, err := s.Execute("begin", nil); err == nil {
+		t.Fatal("missing credentials accepted")
+	}
+	if _, err := s.Execute("begin", []string{key, secret}); err != nil {
+		t.Fatal(err)
+	}
+	restored := New(path)
+	restored.endpoint = server.URL
+	state, err := restored.Execute("begin", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state["credentials_saved"] != true || state["authorization_pending"] != true {
+		t.Fatal(state)
+	}
+	data, _ := json.Marshal(state)
+	if strings.Contains(string(data), secret) {
+		t.Fatal("secret exposed")
+	}
+	if _, err := restored.Execute("disconnect", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restored.Execute("begin", nil); err == nil {
+		t.Fatal("disconnected credentials retained")
+	}
+}
+
+func TestAuthorizationPendingAndScrobblingDefault(t *testing.T) {
+	var approved atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		if r.Form.Get("method") == "auth.getToken" {
+			w.Write([]byte(`{"token":"TOKEN"}`))
+			return
+		}
+		if !approved.Load() {
+			w.Write([]byte(`{"error":14}`))
+			return
+		}
+		w.Write([]byte(`{"session":{"name":"listener","key":"SESSION"}}`))
+	}))
+	defer server.Close()
+	s := New(filepath.Join(t.TempDir(), "state.json"))
+	s.endpoint = server.URL
+	if _, err := s.Execute("begin", []string{strings.Repeat("a", 32), strings.Repeat("b", 32)}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.Execute("finish", nil)
+	if err != nil || pending["authorization_pending"] != true || s.state.Enabled {
+		t.Fatalf("unexpected pending state: %v %v", pending, err)
+	}
+	approved.Store(true)
+	if _, err := s.Execute("finish", nil); err != nil {
+		t.Fatal(err)
+	}
+	if !s.state.Enabled {
+		t.Fatal("first connection did not enable scrobbling")
+	}
+	if _, err := s.Execute("enable", []string{"0"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Execute("begin", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Execute("finish", nil); err != nil {
+		t.Fatal(err)
+	}
+	if s.state.Enabled {
+		t.Fatal("reconnection overwrote disabled preference")
+	}
+	restored := New(s.path)
+	if restored.state.Enabled || restored.state.Session == "" {
+		t.Fatal("preference not persisted")
 	}
 }

@@ -188,7 +188,7 @@ func (s *Service) call(method string, args url.Values) (map[string]json.RawMessa
 	return result, nil
 }
 func (s *Service) status() map[string]any {
-	return map[string]any{"connected": s.state.Session != "", "user": s.state.User, "enabled": s.state.Enabled, "pending": len(s.state.Pending), "message": s.message}
+	return map[string]any{"connected": s.state.Session != "", "user": s.state.User, "enabled": s.state.Enabled, "pending": len(s.state.Pending), "message": s.message, "credentials_saved": len(s.state.Key) == 32 && len(s.state.Secret) == 32, "authorization_pending": s.token != ""}
 }
 
 // Execute is serialized independently of listen sampling; no audio locks are held.
@@ -217,12 +217,16 @@ func (s *Service) Execute(op string, args []string) (map[string]any, error) {
 	switch op {
 	case "status":
 	case "begin":
+		if len(args) == 0 {
+			args = []string{s.state.Key, s.state.Secret}
+		}
 		if len(args) != 2 || len(args[0]) != 32 || len(args[1]) != 32 {
 			return nil, errors.New("provide the 32-character API key and shared secret")
 		}
 		if s.state.Session != "" && (s.state.Key != args[0] || s.state.Secret != args[1]) {
 			return nil, errors.New("disconnect before changing API credentials")
 		}
+		s.token = ""
 		s.state.Key = args[0]
 		s.state.Secret = args[1]
 		r, e := call("auth.getToken", url.Values{})
@@ -239,11 +243,18 @@ func (s *Service) Execute(op string, args []string) (map[string]any, error) {
 		}
 		r, e := call("auth.getSession", url.Values{"token": {s.token}})
 		if e != nil {
+			var apiErr apiError
+			if errors.As(e, &apiErr) && apiErr.code == 14 {
+				return s.status(), nil
+			}
 			return nil, e
 		}
 		var session struct{ Key, Name string }
 		if json.Unmarshal(r["session"], &session) != nil || session.Key == "" {
 			return nil, errors.New("Last.fm returned no session")
+		}
+		if s.state.User == "" {
+			s.state.Enabled = true
 		}
 		if s.state.User != "" && s.state.User != session.Name {
 			s.state.Enabled = false

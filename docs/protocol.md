@@ -419,7 +419,7 @@ clients. No second scrobbler should run for Melody playback in a client.
 
 ```
 melody_lastfm status
-melody_lastfm begin "API_KEY" "SHARED_SECRET"
+melody_lastfm begin ["API_KEY" "SHARED_SECRET"]
 melody_lastfm finish
 melody_lastfm enable 0|1
 melody_lastfm info "ARTIST" "TITLE"
@@ -427,6 +427,19 @@ melody_lastfm love "ARTIST" "TITLE"
 melody_lastfm unlove "ARTIST" "TITLE"
 melody_lastfm disconnect
 ```
+
+`begin` without arguments reuses credentials already saved on this daemon;
+first-time setup still requires the user’s API key and shared secret. No
+application credentials are bundled. `finish` returns a successful response with `authorization_pending: true` while
+Last.fm reports that browser approval is pending (provider code 14). Clients may
+check again after a short delay, with only one request in flight, and must stop
+on success, cancellation, timeout, or other errors. The first successful account
+connection enables scrobbling; reconnecting the same account preserves its
+setting. Switching to a different username still clears pending submissions and
+disables scrobbling for review.
+
+Status includes `credentials_saved` and
+`authorization_pending` booleans so clients can show the appropriate setup step.
 
 Each successful command returns one `lastfm: JSON` line with `connected`, `user`,
 `enabled`, `pending`, and `message`. `begin` additionally returns the HTTPS `url`
