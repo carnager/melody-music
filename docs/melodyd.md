@@ -8,17 +8,28 @@ the server address. Replace those two values with your own.
 Install `mpv` for playback on the server and `ffmpeg` for converting audio
 when a client requests another format.
 
-Run melodyd from your build directory:
+Run the setup command in a terminal, then start the server:
 
 ```sh
+./bin/melodyd setup
 ./bin/melodyd
 ```
+
+For installed binaries, use `melodyd setup` and `melodyd`. Setup writes the
+configuration and exits; it does not start the daemon or install a service.
+Run it before enabling the user service.
 
 Started in a terminal without a configuration, it asks for your music
 folder, ports, and an optional web password, then writes
 `~/.config/melody/melodyd.toml` and starts. `./bin/melodyd setup` re-runs
 the questions later with your current settings as defaults (hand-added
 settings are kept; the previous file is saved as `melodyd.toml.bak`).
+Comments are not preserved. The questions cover an existing music directory,
+MPD port (`0` disables MPD), HTTP listening address, web password, and server
+name. Enter keeps the current value, including an existing password; remove
+`server.web_secret` by editing the file if you want to disable web login.
+An invalid existing config is replaced only after the wizard asks you to confirm.
+`melodyd help` lists commands; `melodyd version` prints the installed version.
 
 You can also write the config yourself:
 
@@ -38,6 +49,35 @@ It scans your music folder and watches for changes. Open
 `192.168.1.10:6600`. The Android app uses `192.168.1.10:6701`.
 
 Restart melodyd after editing the config.
+
+## Playlists, Up Next, and Last.fm
+
+With a supporting client, named playlists and scratch lists can be independent
+playback contexts. Melody stashes the unnamed queue when a named list starts
+and remembers the position left in each list. Ordinary MPD queue edits update
+the active named list; inactive lists and the stashed queue remain separate.
+
+**Up Next** is a daemon-owned temporary request queue. Requests play once in
+order before normal playback resumes, and do not become permanent entries in
+the underlying stored playlist. Pending requests and continuation state survive
+restarts; submitting a request does not start stopped playback. Trackknife has
+a panel for adding, reordering, removing, and clearing requests. See
+[`melody_upnext`](protocol.md#up-next-request-queue-melody_upnext) for commands,
+revision checks, and compatibility limits.
+
+For scrobbling, open **Trackknife → Settings → Last.fm → Melody server**.
+Enter your Last.fm application API key and shared secret, authorize in the
+browser, finish authorization, and enable scrobbling. Melody accounts for its
+primary output and continues scrobbling when clients close; a client should
+not also scrobble that same playback. Local Trackknife playback has a separate
+account. Love/Unlove actions do not require scrobbling to be enabled.
+
+Account credentials and a bounded retry outbox are stored privately in
+`lastfm-v1.json` beside `playqueue.json`. Trackknife's
+[Last.fm guide](https://github.com/carnager/trackknife/blob/main/docs/lastfm.md)
+explains eligibility, retries, and loved-track playlists. The
+[protocol reference](protocol.md#lastfm-account-and-scrobbling-melody_lastfm)
+documents the account and track commands for other clients.
 
 ## Album covers
 

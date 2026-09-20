@@ -1,8 +1,9 @@
 # Melody
 
 Melody plays your music library on your computer, phone, or remote speakers.
-The server keeps a shared queue, ratings, and playback state. Control it from
-the terminal, web browser, or Android app.
+The server owns your library, playlists, queue, ratings, and playback state.
+Control it from the terminal, web browser, Android app, or an MPD client such as
+[Trackknife](https://github.com/carnager/trackknife).
 
 Most of the code was written with AI. Design and testing are human-led.
 
@@ -15,16 +16,27 @@ remote computer, and `ffmpeg` on the server for transcoding.
 ./build
 ```
 
-Binaries are written to `bin/`. Start the server:
+Binaries are written to `bin/`. Configure the server in a terminal, then start it:
 
 ```sh
+./bin/melodyd setup
 ./bin/melodyd
 ```
 
-The first start walks you through setup — music folder, ports, optional web
-password — and writes `~/.config/melody/melodyd.toml` for you. Re-run
-`./bin/melodyd setup` any time to change the answers, or edit the file by
-hand; the minimum it needs is:
+The setup wizard asks for your music folder, MPD port, HTTP listening address,
+optional web password, and server name. Press Enter to accept a suggested value.
+It writes `~/.config/melody/melodyd.toml` (or
+`$XDG_CONFIG_HOME/melody/melodyd.toml`) and exits without starting the server.
+
+You can rerun `./bin/melodyd setup` to change settings. Existing values become
+the defaults; additional settings are kept, and the previous file is backed up
+as `melodyd.toml.bak`. Comments are not retained. Restart a running daemon after
+changing its configuration. `./bin/melodyd help` lists the available commands.
+
+On a first start without a usable config, `./bin/melodyd` launches setup
+automatically when run in a terminal. For a systemd service, run setup first;
+the service cannot answer interactive questions. If you prefer to edit the
+config yourself, the minimum is:
 
 ```toml
 [library]
@@ -40,11 +52,39 @@ For a server on another machine:
 MPD_HOST=192.168.1.10 ./bin/melody-tui
 ```
 
-See [Configuring melodyd](docs/melodyd.md) for network access, mounted libraries,
-playback settings, and running it as a service.
+With an installed binary, use `melodyd setup` instead of `./bin/melodyd setup`.
+If your package includes the user service, start it after setup with
+`systemctl --user enable --now melodyd`.
+
+HTTP normally uses port `6701`; MPD uses `6600`. Keep the MPD port on a trusted
+network or VPN: the web password does not authenticate TCP MPD connections.
+See [Configuring melodyd](docs/melodyd.md) for remote access, mounted libraries,
+playback settings, and service installation.
+
+## Playback and library features
+
+- Browse and search the indexed library, with album covers, lyrics, and track
+  and album ratings.
+- Play through the server, a remote agent, a browser, or a phone. Clients select
+  outputs while Melody retains playback state.
+- Open server-owned working lists and stored playlists as independent playback
+  contexts with supporting clients. Switching lists preserves the displaced
+  queue and remembers playback positions.
+- Queue temporary **Up Next** requests, then return to normal playlist playback.
+  The daemon handles progression even after the requesting client disconnects.
+- Authorize Melody's own **Last.fm scrobbler**, submit Now Playing updates, and
+  love or unlove tracks with a supporting client. Account state and pending
+  scrobbles persist on the server.
+
+Trackknife provides a native Linux interface for working lists, Up Next,
+Last.fm setup, and library-matched dynamic playlists. These extensions require
+updated client and daemon builds; ordinary MPD clients retain their normal
+queue and transport commands. See [server features](docs/melodyd.md#playlists-up-next-and-lastfm)
+and the [protocol reference](docs/protocol.md) for details.
 
 ## Clients and tools
 
+- **[Trackknife](https://github.com/carnager/trackknife)** — native Qt MPD/Melody workspace, with local playback and file tools in separate tabs. [Connection guide](https://github.com/carnager/trackknife/blob/main/docs/melody.md).
 - **melody-tui** — browse, search, queue music, view lyrics, and rate tracks and albums.
 - **Web UI** — control playback or listen in your browser.
 - **Android app** — control playback, stream to your phone, and download albums for offline listening.
@@ -71,6 +111,17 @@ cd android
 Enter the server's HTTP address in the app settings, for example `192.168.1.10:6701`.
 
 On Arch Linux, build the packages with `makepkg -si`.
+
+## Documentation and development
+
+- [Daemon setup and configuration](docs/melodyd.md)
+- [Clients, agents, and remote playback](docs/clients.md)
+- [MPD compatibility and Melody extensions](docs/protocol.md)
+- [Protocol roadmap](docs/protocol-roadmap.md)
+
+Run `go test ./...` to check the Go services and clients. Playback needs the
+runtime tools described above; building the Android client also needs its
+Android SDK and Gradle setup.
 
 ## Screenshots
 

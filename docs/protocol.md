@@ -281,9 +281,10 @@ Melody-only `context` subsystem.
 
 Rules worth knowing:
 
-- Queue edits while a playlist context is active apply to the
-  materialization only. They are never written back to the playlist and
-  are lost on the next switch — the same contract as MPD's `load`.
+- Successful ordinary MPD queue edits while a named context is active are
+  written back transactionally to that stored list and emit `stored_playlist`.
+  This includes clear/add sequences from external clients. Temporary Up Next
+  occurrences are excluded. The displaced unnamed queue is unchanged.
 - Editing the **active** playlist with `playlistadd`, `playlistdelete`,
   or `playlistmove` re-materializes it immediately, keeping the playing
   track playing where it moved to, so the queue mirrors the list you are
@@ -357,3 +358,104 @@ contract.
   (see above).
 - The legacy `tracks.rating` text column is unused; the `ratings` table is
   authoritative.
+
+## Up Next request queue (`melody_upnext`)
+
+Advertised through `commands`. A daemon-owned FIFO temporarily precedes normal
+playback without editing its stored playlist. Temporary requests have distinct
+MPD queue IDs, including duplicate library tracks; standard `status` and
+`currentsong` refer to these real queue occurrences. Normal traversal excludes
+requests, and completion removes their temporary occurrences. All clients share
+the same FIFO; disconnecting the requesting client does not stop progression.
+
+`melody_upnext` returns `revision`, `active` (request ID, or 0), `context` (normal
+playlist name, empty for Queue), `undo` (0/1), then ordinary track records for
+pending requests in FIFO order. Each pending record has its own `Id` and `Pos`.
+
+Mutations require the last observed revision:
+
+```text
+melody_upnext append REV [URI...]
+melody_upnext prepend REV [URI...]
+melody_upnext insert REV POSITION [URI...]
+melody_upnext remove REV REQUEST_ID
+melody_upnext move REV REQUEST_ID POSITION
+melody_upnext play REV REQUEST_ID
+melody_upnext clear REV
+melody_upnext undo REV
+melody_upnext return REV
+```
+
+Positions are zero-based; insertion can target the end. Append/prepend/insert
+may consume URIs staged with `melody_context stage`, allowing bounded line sizes
+and one atomic queue publication. Maximum pending count and batch size are 500.
+Stale revisions return an ACK without applying the edit; refresh before deciding
+whether to submit another action. Never automatically replay an operation after
+an ambiguous connection loss.
+
+Enqueue does not start or unpause playback. Clear affects pending requests only.
+Play starts a selected request immediately, retaining the other pending entries.
+Return discards pending requests and resumes normal playback immediately. Undo
+reverses one pending edit and expires when playback or another queue edit changes
+the revision; it is not durable history.
+
+Requests are FIFO regardless of normal random/repeat traversal. Single still
+stops at a boundary; repeat-current cannot repeat a request indefinitely. Natural
+handoffs use the actual preloaded occurrence. Next, Previous, explicit play,
+clear, and deletion also pass through request arbitration. An explicit normal
+track/context selection abandons pending requests.
+
+Saved queue state adds `requests_version: 1`, `requests`, and `queue_ids`.
+Restoration retains request occurrences/return candidates and increments the
+revision. Before downgrading to a daemon without this capability, clear pending
+requests and return to normal playback; otherwise the old daemon would interpret
+the temporary projected rows as ordinary queue content.
+
+## Last.fm account and scrobbling (`melody_lastfm`)
+
+Advertised by supporting daemons. Melody owns the account, primary-output listen
+accounting, Now Playing updates, and a durable ordered outbox independently of
+clients. No second scrobbler should run for Melody playback in a client.
+
+```
+melody_lastfm status
+melody_lastfm begin "API_KEY" "SHARED_SECRET"
+melody_lastfm finish
+melody_lastfm enable 0|1
+melody_lastfm info "ARTIST" "TITLE"
+melody_lastfm love "ARTIST" "TITLE"
+melody_lastfm unlove "ARTIST" "TITLE"
+melody_lastfm disconnect
+```
+
+Each successful command returns one `lastfm: JSON` line with `connected`, `user`,
+`enabled`, `pending`, and `message`. `begin` additionally returns the HTTPS `url`
+to open for browser authorization; call `finish` after authorization. Tokens
+stay in daemon memory; repeating `begin` starts over. The API key and shared
+secret must each be 32 characters. Changing credentials requires disconnecting
+first. Auth/session credentials are never included in status. Setup travels
+through the existing trusted MPD connection, so use a trusted network/tunnel.
+
+`info`, `love`, and `unlove` add `artist`, `title`, and `loved` (boolean) to their
+response. Love/Unlove is independent of scrobbling enable. Failures use MPD ACK;
+clients must not automatically replay account mutations after disconnects.
+Requests run outside queue/audio locks, with an eight-second HTTP timeout and
+one network operation at a time. A concurrent operation can return a busy ACK;
+status is always a local read. This extension does not issue queue events.
+
+Scrobbling is off until explicitly enabled. Artist/title and duration >30s are
+required. Advancing position is bounded by monotonic time; submit once per play
+after min(duration/2, 240s). Pause/seek/stall time is excluded conservatively;
+coarse output reports are supported. Multiple outputs and multiple clients do
+not generate multiple submissions. Up Next and repeat occurrences are distinct.
+Qualified submissions persist in order in a version-1 `lastfm-v1.json` beside
+the saved play queue (0600, synced atomic replacement). The outbox is bounded to
+1000 and retries transient failures with backoff. Invalid sessions pause retry
+until reauthorization. Provider-ignored/permanently rejected entries are removed
+with visible status. Ambiguous failures may retry a submission already accepted.
+
+`enable 0` pauses collection/delivery but retains the outbox. `disconnect` clears
+both credentials and outbox. Restart loses partial listening progress and does
+not retroactively credit a restored seek position. No database migration is
+needed; to reset/remove this integration, stop the daemon and remove its private
+state file. Older daemons ignore the additive file.
