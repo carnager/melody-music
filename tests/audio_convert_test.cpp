@@ -303,7 +303,7 @@ struct ReadPicture {
 void builtinPresetsProbeAvailable() {
     CHECK(trackknife::convert::conversion_backend_versions().find("ffmpeg=") == 0U);
     const auto& presets = trackknife::convert::builtin_encoder_presets();
-    CHECK(presets.size() == 5U);
+    CHECK(presets.size() == 6U);
     for (const auto& preset : presets) {
         const auto availability = trackknife::convert::probe_encoder_preset(preset);
         if (!availability.available) {
@@ -313,6 +313,8 @@ void builtinPresetsProbeAvailable() {
     }
     const auto found = trackknife::convert::find_encoder_preset("opus-192");
     CHECK(found.has_value() && found->codec_name == "libopus");
+    const auto portable = trackknife::convert::find_encoder_preset("opus-128");
+    CHECK(portable.has_value() && portable->bit_rate == 128'000);
     CHECK(!trackknife::convert::find_encoder_preset("wax-cylinder").has_value());
     trackknife::convert::EncoderPreset unbuildable;
     unbuildable.id = "bogus";
@@ -440,7 +442,7 @@ void convertsToEveryPresetAtomically() {
         CHECK(converted->channels == 2);
         // Opus only speaks 48 kHz-family rates, so 44.1 kHz material is
         // resampled up; every other preset keeps the source rate.
-        const auto expected_rate = preset.id == "opus-192" ? 48'000 : sample_rate;
+        const auto expected_rate = preset.codec_name == "libopus" ? 48'000 : sample_rate;
         CHECK(converted->sample_rate == expected_rate);
         const auto expected_frames = static_cast<std::int64_t>(tone_seconds * expected_rate);
         CHECK(std::abs(converted->duration_samples - expected_frames) <= expected_rate / 5);
