@@ -97,61 +97,156 @@ void isolateTestEngineState() {
     }
 }
 
-QString applyPendingWorkspaceRestore() {
-    QString restore_notice;
+namespace {
+
+constexpr auto restore_from_key = "recovery/restore-from";
+constexpr auto restore_parts_key = "recovery/restore-parts";
+// The open tabs, in the settings; restored with the tabs, not the settings.
+constexpr auto tabs_key = "tabs/v1";
+
+[[nodiscard]] QString settingsBeside(const QString& from) {
+    return from + QStringLiteral(".settings.ini");
+}
+
+[[nodiscard]] QString tabsBeside(const QString& from) { return from + QStringLiteral(".tabs"); }
+
+[[nodiscard]] std::filesystem::path rawPath(const QString& path) {
+    const auto encoded = QFile::encodeName(path);
+    return std::string{encoded.constData(), static_cast<std::size_t>(encoded.size())};
+}
+
+[[nodiscard]] QString shownPath(const std::filesystem::path& path) {
+    return QFile::decodeName(QByteArray::fromStdString(path.native()));
+}
+
+// The settings as they are now, kept where `presets` keeps its database.
+[[nodiscard]] bool keepSettings(const QSettings& current, const QString& destination) {
+    QSettings kept{destination, QSettings::IniFormat};
+    kept.setValue(QStringLiteral("backup/format"), 1);
+    for (const auto& key : current.allKeys()) {
+        kept.setValue(QStringLiteral("values/") + key, current.value(key));
+    }
+    kept.sync();
+    return kept.status() == QSettings::NoError;
+}
+
+} // namespace
+
+WorkspaceRestore workspaceBackupParts(const QString& from) {
+    QSettings imported{settingsBeside(from), QSettings::IniFormat};
+    const auto settings_valid = QFile::exists(settingsBeside(from)) &&
+                                imported.status() == QSettings::NoError &&
+                                imported.value(QStringLiteral("backup/format")).toInt() == 1;
+    return {.from = from,
+            .presets = QFile::exists(from),
+            .settings = settings_valid,
+            // Which tabs are open is in the settings, their rows beside them.
+            .tabs = settings_valid && QDir{tabsBeside(from)}.exists()};
+}
+
+void scheduleWorkspaceRestore(const WorkspaceRestore& restore) {
+    QStringList parts;
+    if (restore.presets) {
+        parts << QStringLiteral("presets");
+    }
+    if (restore.settings) {
+        parts << QStringLiteral("settings");
+    }
+    if (restore.tabs) {
+        parts << QStringLiteral("tabs");
+    }
     QSettings settings;
-    const auto pending =
-        settings.value(QStringLiteral("recovery/pending-workspace-restore")).toString();
-    const auto pending_settings =
-        settings.value(QStringLiteral("recovery/pending-settings-restore")).toString();
-    if (!pending.isEmpty()) {
-        // ADR-0287: the database is the engine's, in its folder.
-        const auto data =
-            QFile::decodeName(QByteArray::fromStdString(core::engine_state_directory().native()));
-        QDir{}.mkpath(data);
-        const auto live = std::filesystem::path{
-            QFile::encodeName(data + QStringLiteral("/lists.sqlite")).toStdString()};
-        const auto rollback_name =
-            QStringLiteral("/lists-before-restore-%1.sqlite")
-                .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss")));
+    settings.setValue(QLatin1String(restore_from_key), restore.from);
+    settings.setValue(QLatin1String(restore_parts_key), parts);
+    settings.sync();
+}
+
+QString applyPendingWorkspaceRestore() {
+    QSettings settings;
+    const auto from = settings.value(QLatin1String(restore_from_key)).toString();
+    const auto parts = settings.value(QLatin1String(restore_parts_key)).toStringList();
+    settings.remove(QLatin1String(restore_from_key));
+    settings.remove(QLatin1String(restore_parts_key));
+    // Scheduled before: it put the backup over the engine's database. Never
+    // applied.
+    settings.remove(QStringLiteral("recovery/pending-workspace-restore"));
+    settings.remove(QStringLiteral("recovery/pending-settings-restore"));
+    settings.sync();
+    if (from.isEmpty() || parts.isEmpty()) {
+        return {};
+    }
+
+    const auto data = core::melody_data_directory();
+    std::error_code ignored;
+    std::filesystem::create_directories(data, ignored);
+    const auto stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss"));
+    QStringList restored;
+    QStringList failed;
+
+    if (parts.contains(QStringLiteral("presets"))) {
         const auto rollback =
-            std::filesystem::path{QFile::encodeName(data + rollback_name).toStdString()};
-        const auto backup = std::filesystem::path{QFile::encodeName(pending).toStdString()};
-        auto restored = persistence::restore_workspace_database_backup(backup, live, rollback);
-        if (restored) {
-            QString settings_error;
-            if (!pending_settings.isEmpty()) {
-                QSettings imported{pending_settings, QSettings::IniFormat};
-                if (imported.value(QStringLiteral("backup/format")).toInt() != 1 ||
-                    imported.status() != QSettings::NoError) {
-                    settings_error = QStringLiteral("; settings backup was invalid");
-                } else {
-                    settings.clear();
-                    for (const auto& key : imported.allKeys()) {
-                        if (key.startsWith(QStringLiteral("values/"))) {
-                            settings.setValue(key.sliced(7), imported.value(key));
-                        }
-                    }
-                }
-            }
-            // ADR-0286: and the tabs kept beside it, the ones here set aside.
-            if (const auto tabs = pending + QStringLiteral(".tabs");
-                QDir{tabs}.exists() && !TabStore::restoreFrom(tabs)) {
-                settings_error += QStringLiteral("; the tabs could not be restored");
-            }
-            settings.remove(QStringLiteral("recovery/pending-workspace-restore"));
-            settings.remove(QStringLiteral("recovery/pending-settings-restore"));
-            settings.sync();
-            restore_notice =
-                QStringLiteral("Workspace restored. Previous database: %1%2")
-                    .arg(QFile::decodeName(QByteArray::fromStdString(rollback.native())),
-                         settings_error);
+            data / rawPath(QStringLiteral("presets-before-restore-%1.sqlite").arg(stamp));
+        if (auto done = persistence::restore_workspace_database_backup(
+                rawPath(from), core::presets_database_path(), rollback)) {
+            restored << QStringLiteral("presets");
         } else {
-            restore_notice = QStringLiteral("Workspace restore failed: %1")
-                                 .arg(QString::fromStdString(restored.error().message));
+            failed
+                << QStringLiteral("presets: %1").arg(QString::fromStdString(done.error().message));
         }
     }
-    return restore_notice;
+
+    const auto want_settings = parts.contains(QStringLiteral("settings"));
+    const auto want_tabs = parts.contains(QStringLiteral("tabs"));
+    if (want_settings || want_tabs) {
+        QSettings imported{settingsBeside(from), QSettings::IniFormat};
+        const auto rollback =
+            shownPath(data) + QStringLiteral("/settings-before-restore-%1.ini").arg(stamp);
+        if (!QFile::exists(settingsBeside(from)) || imported.status() != QSettings::NoError ||
+            imported.value(QStringLiteral("backup/format")).toInt() != 1) {
+            failed << QStringLiteral("settings: the backup's settings could not be read");
+        } else if (!keepSettings(settings, rollback)) {
+            failed << QStringLiteral("settings: the current ones could not be kept, so nothing "
+                                     "was replaced");
+        } else {
+            const auto backed_up_tabs = QStringLiteral("values/") + QLatin1String(tabs_key);
+            if (want_settings) {
+                const auto open_tabs = settings.value(QLatin1String(tabs_key));
+                settings.clear();
+                for (const auto& key : imported.allKeys()) {
+                    if (key.startsWith(QStringLiteral("values/")) && key != backed_up_tabs &&
+                        !key.startsWith(QStringLiteral("values/recovery/"))) {
+                        settings.setValue(key.sliced(7), imported.value(key));
+                    }
+                }
+                if (open_tabs.isValid()) {
+                    settings.setValue(QLatin1String(tabs_key), open_tabs);
+                }
+                restored << QStringLiteral("settings");
+            }
+            if (want_tabs) {
+                if (TabStore::restoreFrom(tabsBeside(from))) {
+                    if (imported.contains(backed_up_tabs)) {
+                        settings.setValue(QLatin1String(tabs_key), imported.value(backed_up_tabs));
+                    }
+                    restored << QStringLiteral("tabs");
+                } else {
+                    failed << QStringLiteral("tabs: they could not be copied back");
+                }
+            }
+            settings.sync();
+        }
+    }
+
+    auto notice = restored.isEmpty()
+                      ? QStringLiteral("Workspace restore failed")
+                      : QStringLiteral("Restored %1 from %2; what they replaced is kept in %3")
+                            .arg(restored.join(QStringLiteral(", ")), from, shownPath(data));
+    if (!failed.isEmpty()) {
+        notice +=
+            (restored.isEmpty() ? QStringLiteral(": %1") : QStringLiteral("; not restored: %1"))
+                .arg(failed.join(QStringLiteral("; ")));
+    }
+    return notice;
 }
 
 } // namespace trackknife::bench

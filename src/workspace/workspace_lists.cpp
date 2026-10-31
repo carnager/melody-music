@@ -1132,6 +1132,9 @@ void Workspace::backupWorkspace(const QString& path) {
             10'000);
         return;
     }
+    // Which tabs are open is in the settings: saved first, so the copy has
+    // the tabs as they are.
+    persistNow(false);
     QSettings current;
     QSettings settings_backup{temporary_settings, QSettings::IniFormat};
     settings_backup.setValue(QStringLiteral("backup/format"), 1);
@@ -1147,7 +1150,6 @@ void Workspace::backupWorkspace(const QString& path) {
     const auto encoded = QFile::encodeName(path);
     const auto destination = std::filesystem::path{
         std::string{encoded.constData(), static_cast<std::size_t>(encoded.size())}};
-    persistNow(false);
     // ADR-0286: the tabs' rows too -- for a tab that is no saved playlist,
     // their only copy.
     if (tab_store_ != nullptr && !tab_store_->copyTo(path + QStringLiteral(".tabs"))) {
@@ -1170,15 +1172,6 @@ void Workspace::backupWorkspace(const QString& path) {
                                    : QStringLiteral("Workspace backup failed: %1").arg(error),
                                error.isEmpty() ? 7'000 : 10'000);
         });
-}
-
-void Workspace::scheduleWorkspaceRestore(const QString& path) {
-    QSettings settings;
-    settings.setValue(QStringLiteral("recovery/pending-workspace-restore"), path);
-    const auto settings_backup = path + QStringLiteral(".settings.ini");
-    settings.setValue(QStringLiteral("recovery/pending-settings-restore"),
-                      QFile::exists(settings_backup) ? settings_backup : QString{});
-    settings.sync();
 }
 
 } // namespace trackknife::bench

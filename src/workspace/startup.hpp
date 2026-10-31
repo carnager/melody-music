@@ -18,9 +18,25 @@ void adoptTrackknifeNames();
 // to name one once moved a user's library out from under their engine.
 // Melody's presets (ADR-0339) are kept there too.
 void isolateTestEngineState();
-// A restore chosen last time (File › Restore workspace database…) is applied
-// now, the database it replaces kept beside it. What happened, to tell the
-// user; empty when nothing was pending.
+// File › Back up workspace… writes three parts beside one another: Melody's
+// own database (presets.sqlite -- presets, layouts, view presets) at the
+// chosen path, its settings in `path`.settings.ini and the open tabs' rows
+// in `path`.tabs. Never the engine's database: that is the engine's.
+struct WorkspaceRestore {
+    // The backup's database path; the other parts are found beside it.
+    QString from;
+    bool presets{false};
+    // Every setting but the open tabs.
+    bool settings{false};
+    // Which tabs are open, and their rows.
+    bool tabs{false};
+};
+// What a backup at `from` holds: each part there, true.
+[[nodiscard]] WorkspaceRestore workspaceBackupParts(const QString& from);
+// Kept for the next start: the running window still holds what it replaces.
+void scheduleWorkspaceRestore(const WorkspaceRestore& restore);
+// A restore chosen last time is applied now, what it replaces kept beside
+// it. What happened, to tell the user; empty when nothing was pending.
 [[nodiscard]] QString applyPendingWorkspaceRestore();
 
 } // namespace trackknife::bench

@@ -361,6 +361,7 @@ class BenchMainWindowTest final : public QObject {
     void aScratchTabNeverReachesItsEngine();
     void listsLeftOnTheEngineAreOfferedOnce();
     void theTabStoreKeepsWhatItCannotRead();
+    void aRestoreTakesBackOnlyWhatIsTicked();
     void aPlayingTabsEditsReachTheQueueAsEdits();
     void thisComputersTabsAreMarkedWhenTheLibraryIsElsewhere();
     void theLibraryMenuMovesTheLibrary();

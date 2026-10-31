@@ -282,10 +282,10 @@ void BenchMainWindow::buildWorkspace() {
     auto* dynamic = file_menu->addAction(QStringLiteral("Dynamic playlists…"));
     dynamic->setObjectName(QStringLiteral("action-dynamic-playlists"));
     connect(dynamic, &QAction::triggered, this, &BenchMainWindow::showDynamicPlaylists);
-    auto* backup_workspace = file_menu->addAction(QStringLiteral("Back up workspace database…"));
+    auto* backup_workspace = file_menu->addAction(QStringLiteral("Back up workspace…"));
     backup_workspace->setObjectName(QStringLiteral("action-backup-workspace"));
     connect(backup_workspace, &QAction::triggered, this, &BenchMainWindow::backupWorkspace);
-    auto* restore_workspace = file_menu->addAction(QStringLiteral("Restore workspace database…"));
+    auto* restore_workspace = file_menu->addAction(QStringLiteral("Restore workspace…"));
     restore_workspace->setObjectName(QStringLiteral("action-restore-workspace"));
     connect(restore_workspace, &QAction::triggered, this,
             &BenchMainWindow::scheduleWorkspaceRestore);

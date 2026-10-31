@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Accepted. Restore amended by ADR-0347: it restores Melody's own presets database, settings and tabs, by part, never the engine's.
 
 ## Context
 

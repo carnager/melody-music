@@ -12,6 +12,7 @@
 #include "uicommon/local_files_mime_data.hpp"
 #include "workspace/open_list_session.hpp"
 #include "workspace/sources.hpp"
+#include "workspace/startup.hpp"
 
 #include "bench/bench_main_window_helpers.hpp"
 #include "bench/dynamic_playlist_dialog.hpp"
@@ -29,6 +30,7 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -109,12 +111,12 @@ void BenchMainWindow::backupWorkspace() {
     if (persistence_ == nullptr) {
         return;
     }
-    auto* dialog = new QFileDialog(this, tr("Back up Melody workspace database"));
+    auto* dialog = new QFileDialog(this, tr("Back up Melody workspace"));
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setAcceptMode(QFileDialog::AcceptSave);
     dialog->setFileMode(QFileDialog::AnyFile);
     dialog->setDefaultSuffix(QStringLiteral("sqlite"));
-    dialog->setNameFilter(tr("Melody workspace database (*.sqlite)"));
+    dialog->setNameFilter(tr("Melody workspace backup (*.sqlite)"));
     dialog->setOption(QFileDialog::DontConfirmOverwrite);
     dialog->selectFile(QStringLiteral("melody-workspace.sqlite"));
     connect(dialog, &QFileDialog::fileSelected, this,
@@ -124,21 +126,75 @@ void BenchMainWindow::backupWorkspace() {
 
 void BenchMainWindow::scheduleWorkspaceRestore() {
     const auto path =
-        QFileDialog::getOpenFileName(this, tr("Restore Melody workspace database"), {},
-                                     tr("Melody workspace database (*.sqlite);;All files (*)"));
-    if (path.isEmpty()) {
-        return;
+        QFileDialog::getOpenFileName(this, tr("Restore Melody workspace"), {},
+                                     tr("Melody workspace backup (*.sqlite);;All files (*)"));
+    if (!path.isEmpty()) {
+        chooseWorkspaceRestore(path);
     }
-    const auto answer = QMessageBox::warning(
-        this, tr("Restore workspace database"),
-        tr("Melody will validate and restore this database at the next start. "
-           "The current database will be retained beside it for rollback. Close Melody now?"),
-        QMessageBox::Close | QMessageBox::Cancel, QMessageBox::Cancel);
-    if (answer != QMessageBox::Close) {
-        return;
+}
+
+void BenchMainWindow::chooseWorkspaceRestore(const QString& path) {
+    const auto found = workspaceBackupParts(path);
+    auto* dialog = new QDialog(this);
+    dialog->setObjectName(QStringLiteral("bench-restore-workspace"));
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(tr("Restore workspace"));
+    auto* layout = new QVBoxLayout(dialog);
+    auto* from = new QLabel(tr("From %1").arg(QDir::toNativeSeparators(path)), dialog);
+    from->setWordWrap(true);
+    layout->addWidget(from);
+    const auto addPart = [&](const QString& name, const QString& text, const QString& holds,
+                             bool there) {
+        auto* box = new QCheckBox(text, dialog);
+        box->setObjectName(name);
+        box->setChecked(there);
+        box->setEnabled(there);
+        layout->addWidget(box);
+        auto* detail = new QLabel(there ? holds : tr("Not in this backup"), dialog);
+        detail->setWordWrap(true);
+        detail->setEnabled(false);
+        detail->setContentsMargins(24, 0, 0, 6);
+        layout->addWidget(detail);
+        return box;
+    };
+    auto* presets =
+        addPart(QStringLiteral("restore-presets"), tr("Presets and tagging scripts"),
+                tr("Tagging scripts, naming layouts, encoder and view presets"), found.presets);
+    auto* settings =
+        addPart(QStringLiteral("restore-settings"), tr("Settings"),
+                tr("Everything set in Settings, the window and its panels"), found.settings);
+    auto* tabs = addPart(QStringLiteral("restore-tabs"), tr("Open tabs"),
+                         tr("Which tabs are open, and what is in them"), found.tabs);
+    auto* note = new QLabel(tr("Melody closes now and restores at its next start. What is "
+                               "replaced is kept beside it. The engine's library, lists and "
+                               "history are not touched."),
+                            dialog);
+    note->setWordWrap(true);
+    layout->addWidget(note);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, dialog);
+    auto* restore =
+        buttons->addButton(tr("Close Melody and restore"), QDialogButtonBox::AcceptRole);
+    restore->setObjectName(QStringLiteral("restore-apply"));
+    layout->addWidget(buttons);
+    const auto anyChosen = [presets, settings, tabs] {
+        return presets->isChecked() || settings->isChecked() || tabs->isChecked();
+    };
+    for (auto* box : {presets, settings, tabs}) {
+        connect(box, &QCheckBox::toggled, restore,
+                [restore, anyChosen] { restore->setEnabled(anyChosen()); });
     }
-    Workspace::scheduleWorkspaceRestore(path);
-    close();
+    restore->setEnabled(anyChosen());
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, dialog,
+            [this, dialog, path, presets, settings, tabs] {
+                trackknife::bench::scheduleWorkspaceRestore({.from = path,
+                                                             .presets = presets->isChecked(),
+                                                             .settings = settings->isChecked(),
+                                                             .tabs = tabs->isChecked()});
+                dialog->accept();
+                close();
+            });
+    dialog->open();
 }
 
 int BenchMainWindow::engineRank(const QWidget* view) const {

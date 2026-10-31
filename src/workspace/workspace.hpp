@@ -554,12 +554,9 @@ class Workspace final : public QObject {
                          std::vector<std::string> paths, int row = -1);
     // An imported playlist, as a new saved list of this computer's.
     void addImportedList(std::vector<LocalTrackRow> rows, const QString& name);
-    // The workspace database and its settings copied beside `path`: the
-    // database there, the settings in `path`.settings.ini; said when done.
+    // Melody's presets database copied to `path`, the settings to
+    // `path`.settings.ini and the tabs' rows to `path`.tabs; said when done.
     void backupWorkspace(const QString& path);
-    // `path` restored at the next start, with the settings backed up beside
-    // it; the current database kept for rollback.
-    static void scheduleWorkspaceRestore(const QString& path);
     // The lists as the workspace starts: those saved, or one to begin with.
     void restoreLists(std::vector<PreparedList> documents);
     // ADR-0259: the tabs as this window keeps them, each from its cache --

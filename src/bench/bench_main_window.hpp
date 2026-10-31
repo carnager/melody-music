@@ -340,6 +340,9 @@ class BenchMainWindow final : public QMainWindow, public WorkspaceView {
     QTimer* lists_present_timer_{nullptr};
     void backupWorkspace();
     void scheduleWorkspaceRestore();
+    // Which parts of the backup at `path` to restore, each one it holds
+    // ticked; restoring closes Melody.
+    void chooseWorkspaceRestore(const QString& path);
     [[nodiscard]] std::vector<persistence::ListDocument> collectDocuments() {
         return workspace_.collectDocuments();
     }

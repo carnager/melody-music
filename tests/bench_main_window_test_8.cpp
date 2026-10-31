@@ -2,7 +2,13 @@
 
 #include "bench_main_window_test.hpp"
 
+#include "workspace/startup.hpp"
 #include "workspace/tab_store.hpp"
+
+#include "trackknife/core/engine_state.hpp"
+#include "trackknife/persistence/list_repository.hpp"
+
+#include <QCheckBox>
 
 namespace trackknife::bench {
 
@@ -2286,6 +2292,112 @@ void BenchMainWindowTest::theTabStoreKeepsWhatItCannotRead() {
     QVERIFY(QFile::exists(TabStore::defaultDirectory() + QStringLiteral("/") +
                           QString::fromStdString(id.to_string()) + QStringLiteral(".tabcache")));
     QDir{TabStore::defaultDirectory()}.removeRecursively();
+}
+
+// A backup is Melody's presets, settings and tabs; a restore puts back the
+// parts ticked and never the engine's database.
+void BenchMainWindowTest::aRestoreTakesBackOnlyWhatIsTicked() {
+    const auto engine_database = core::engine_state_directory() / "lists.sqlite";
+    QTemporaryDir backups;
+    QVERIFY(backups.isValid());
+    const auto backup = backups.filePath(QStringLiteral("melody-workspace.sqlite"));
+    QSettings{}.setValue(QStringLiteral("test/restore-probe"), QStringLiteral("backed up"));
+    {
+        BenchMainWindow window;
+        window.show();
+        auto* open_tabs = window.findChild<QTabWidget*>(QStringLiteral("bench-tabs"));
+        QTRY_COMPARE(open_tabs->count(), 1);
+        window.workspace_.backupWorkspace(backup);
+        QTRY_VERIFY(QFile::exists(backup + QStringLiteral(".settings.ini")));
+        QVERIFY(QFile::exists(backup));
+        QVERIFY(QDir{backup + QStringLiteral(".tabs")}.exists());
+
+        // Every part it holds is offered and ticked; none ticked, nothing to do.
+        window.chooseWorkspaceRestore(backup);
+        QDialog* dialog = nullptr;
+        QTRY_VERIFY((dialog = window.findChild<QDialog*>(
+                         QStringLiteral("bench-restore-workspace"))) != nullptr);
+        auto* presets = dialog->findChild<QCheckBox*>(QStringLiteral("restore-presets"));
+        auto* settings = dialog->findChild<QCheckBox*>(QStringLiteral("restore-settings"));
+        auto* tabs = dialog->findChild<QCheckBox*>(QStringLiteral("restore-tabs"));
+        auto* apply = dialog->findChild<QPushButton*>(QStringLiteral("restore-apply"));
+        QVERIFY(presets->isChecked() && settings->isChecked() && tabs->isChecked());
+        for (auto* box : {presets, settings, tabs}) {
+            box->setChecked(false);
+        }
+        QVERIFY(!apply->isEnabled());
+        presets->setChecked(true);
+        settings->setChecked(true);
+        apply->click();
+    }
+
+    // What has changed since: the presets, a setting, the open tabs.
+    const auto live = core::presets_database_path();
+    {
+        auto repository = persistence::ListRepository::open(live);
+        QVERIFY(repository.has_value());
+        const std::vector changed{persistence::ListDocument{.id = core::StableId::random(),
+                                                            .kind = persistence::ListKind::scratch,
+                                                            .name = "Changed since",
+                                                            .pinned = false,
+                                                            .dirty = false,
+                                                            .items = {}}};
+        QVERIFY(repository->replace_all(changed).has_value());
+    }
+    const auto backed_up_tabs =
+        QSettings{backup + QStringLiteral(".settings.ini"), QSettings::IniFormat}.value(
+            QStringLiteral("values/tabs/v1"));
+    {
+        QSettings settings;
+        settings.setValue(QStringLiteral("test/restore-probe"), QStringLiteral("changed"));
+        settings.setValue(QStringLiteral("tabs/v1"), QStringLiteral("open now"));
+    }
+    const auto engine_before = std::filesystem::exists(engine_database)
+                                   ? std::filesystem::last_write_time(engine_database)
+                                   : std::filesystem::file_time_type{};
+
+    const auto notice = applyPendingWorkspaceRestore();
+    QVERIFY2(notice.startsWith(QStringLiteral("Restored presets, settings from")),
+             qPrintable(notice));
+    {
+        auto restored = persistence::ListRepository::open(live);
+        auto original = persistence::ListRepository::open(
+            std::filesystem::path{QFile::encodeName(backup).toStdString()});
+        QVERIFY(restored.has_value() && original.has_value());
+        QCOMPARE(restored->load_all().value(), original->load_all().value());
+    }
+    QCOMPARE(QSettings{}.value(QStringLiteral("test/restore-probe")).toString(),
+             QStringLiteral("backed up"));
+    // The tabs were not ticked: those open now stay.
+    QCOMPARE(QSettings{}.value(QStringLiteral("tabs/v1")).toString(), QStringLiteral("open now"));
+    const auto kept =
+        QDir{QFile::decodeName(QByteArray::fromStdString(core::melody_data_directory().native()))}
+            .entryList({QStringLiteral("*-before-restore-*")});
+    QCOMPARE(kept.size(), 2);
+    // Nothing pending is applied twice.
+    QVERIFY(applyPendingWorkspaceRestore().isEmpty());
+
+    // Then the tabs alone.
+    scheduleWorkspaceRestore({.from = backup, .tabs = true});
+    QSettings{}.setValue(QStringLiteral("test/restore-probe"), QStringLiteral("changed again"));
+    const auto tabs_notice = applyPendingWorkspaceRestore();
+    QVERIFY2(tabs_notice.startsWith(QStringLiteral("Restored tabs from")), qPrintable(tabs_notice));
+    QVERIFY(backed_up_tabs.isValid());
+    QCOMPARE(QSettings{}.value(QStringLiteral("tabs/v1")), backed_up_tabs);
+    QCOMPARE(QSettings{}.value(QStringLiteral("test/restore-probe")).toString(),
+             QStringLiteral("changed again"));
+
+    // The engine's database is the engine's.
+    QCOMPARE(std::filesystem::exists(engine_database)
+                 ? std::filesystem::last_write_time(engine_database)
+                 : std::filesystem::file_time_type{},
+             engine_before);
+    QVERIFY(
+        QDir{QFile::decodeName(QByteArray::fromStdString(core::engine_state_directory().native()))}
+            .entryList({QStringLiteral("lists-before-restore-*")})
+            .isEmpty());
+    QSettings{}.remove(QStringLiteral("test/restore-probe"));
+    QSettings{}.remove(QStringLiteral("tabs/v1"));
 }
 
 } // namespace trackknife::bench
