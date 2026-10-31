@@ -38,7 +38,7 @@ using protocol::Json;
 
 // MusicBrainz requires an identifying User-Agent naming the application --
 // the one Trackknife has always sent.
-constexpr auto user_agent = "Melody/0.0.1 ( https://github.com/carnager/melody-next )";
+constexpr auto user_agent = "Melody/0.0.1 ( https://github.com/carnager/melody-music )";
 // Covers can be large; nothing a lookup needs is larger.
 constexpr std::size_t response_limit = 64U * 1024U * 1024U;
 constexpr long request_timeout_ms = 30'000;

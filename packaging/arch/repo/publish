@@ -29,7 +29,7 @@ target=${MELODY_REPO_TARGET:-proteus:/srv/http/melody-repo}
 key=${MELODY_REPO_KEY:-}
 name=${MELODY_REPO_NAME:-melody}
 work=${MELODY_REPO_WORK:-${XDG_CACHE_HOME:-$HOME/.cache}/melody-repo}
-upstream=https://github.com/carnager/melody-next.git
+upstream=https://github.com/carnager/melody-music.git
 packages=(melodyd-git melody-git melody-cli-git melody-watch-git)
 
 force=false

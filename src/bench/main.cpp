@@ -21,6 +21,7 @@
 #include <QMessageBox>
 #include <QPainter>
 #include <QSettings>
+#include <QSize>
 #include <QStandardPaths>
 #include <QString>
 #include <QTimer>
@@ -145,6 +146,8 @@ int main(int argc, char** argv) {
     bool grab_live = false;
     QString open_for_screenshot;
     std::optional<trackknife::bench::ColorScheme> forced_scheme;
+    QSize forced_size;
+    int grab_after = 0;
     std::vector<std::string> raw_paths;
     const auto arguments = QApplication::arguments();
     raw_paths.reserve(static_cast<std::size_t>(arguments.size()));
@@ -164,6 +167,19 @@ int main(int argc, char** argv) {
         }
         if (arguments.at(index) == QStringLiteral("--open") && index + 1 < arguments.size()) {
             open_for_screenshot = arguments.at(++index);
+            continue;
+        }
+        // --wait SECONDS: how long before the picture, for a lookup to finish.
+        if (arguments.at(index) == QStringLiteral("--wait") && index + 1 < arguments.size()) {
+            grab_after = arguments.at(++index).toInt() * 1'000;
+            continue;
+        }
+        // --size WxH: the window's size, for a picture of it.
+        if (arguments.at(index) == QStringLiteral("--size") && index + 1 < arguments.size()) {
+            const auto parts = arguments.at(++index).split(QLatin1Char('x'));
+            if (parts.size() == 2) {
+                forced_size = QSize{parts.at(0).toInt(), parts.at(1).toInt()};
+            }
             continue;
         }
         if (arguments.at(index) == QStringLiteral("--dark") ||
@@ -211,6 +227,9 @@ int main(int argc, char** argv) {
     // ADR-0302: melody:// links opened inside Melody -- a vote in a panel --
     // are its own, not the desktop's to hand to a second Melody.
     QDesktopServices::setUrlHandler(QStringLiteral("melody"), &window, "openLinkUrl");
+    if (forced_size.isValid()) {
+        window.resize(forced_size);
+    }
     window.show();
     if (instance) {
         QObject::connect(&*instance, &trackknife::bench::SingleInstance::asked, &window,
@@ -237,7 +256,8 @@ int main(int argc, char** argv) {
                 window.openForScreenshot(open_for_screenshot);
             });
         }
-        QTimer::singleShot(grab_live ? 6'000 : 3'000, &application, [&window, screenshot_path] {
+        const auto delay = grab_after > 0 ? grab_after : grab_live ? 6'000 : 3'000;
+        QTimer::singleShot(delay, &application, [&window, screenshot_path] {
             // The window opened last -- a tag editor, say -- else the main one.
             QWidget* shown = &window;
             for (auto* candidate : QApplication::topLevelWidgets()) {
@@ -246,6 +266,12 @@ int main(int argc, char** argv) {
                     !candidate->windowFlags().testFlag(Qt::Popup)) {
                     shown = candidate;
                 }
+            }
+            // Of several, the one in front.
+            if (auto* active = QApplication::activeWindow();
+                active != nullptr && active->isVisible() && !active->inherits("QMenu") &&
+                !active->windowFlags().testFlag(Qt::Popup)) {
+                shown = active;
             }
             // A popup over the window is part of the picture of it.
             auto image = shown->grab().toImage();

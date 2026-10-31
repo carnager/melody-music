@@ -1,6 +1,6 @@
 # makepkg works in each package's directory: VCS clone, build/package
 # trees, products.
-*/melody-next/
+*/melody-music/
 */src/
 */pkg/
 *.pkg.tar.zst

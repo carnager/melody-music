@@ -2,7 +2,7 @@ pkgbase = melody-cli-git
 	pkgdesc = Melody engines from the shell: playback, the queue, the library by words
 	pkgver = r443.g588cc53
 	pkgrel = 1
-	url = https://github.com/carnager/melody-next
+	url = https://github.com/carnager/melody-music
 	arch = x86_64
 	arch = aarch64
 	license = GPL-3.0-only
@@ -21,7 +21,7 @@ pkgbase = melody-cli-git
 	conflicts = melody-cli
 	conflicts = melody-musiclist
 	conflicts = melody-musiclist-git
-	source = melody-next::git+https://github.com/carnager/melody-next.git
+	source = melody-music::git+https://github.com/carnager/melody-music.git
 	sha256sums = SKIP
 
 pkgname = melody-cli-git

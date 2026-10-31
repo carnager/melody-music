@@ -31,7 +31,7 @@ makepkg -si
 
 ## Debian 13
 
-Each [release](https://github.com/carnager/melody-next/releases/latest) has
+Each [release](https://github.com/carnager/melody-music/releases/latest) has
 `melodyd`, `melody-agent` and `melody-cli` built for Debian 13, for amd64 and
 arm64. They need these libraries:
 
@@ -61,7 +61,7 @@ docker compose -f packaging/docker/docker-compose.yml up -d
 ## Android
 
 Download the APK from the
-[latest release](https://github.com/carnager/melody-next/releases/latest)
+[latest release](https://github.com/carnager/melody-music/releases/latest)
 and open it on the phone. Android asks you to allow installs from your
 browser or file manager first.
 

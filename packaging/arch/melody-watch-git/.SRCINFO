@@ -2,7 +2,7 @@ pkgbase = melody-watch-git
 	pkgdesc = Tells a Melody engine which music files changed on a NAS, so it need not scan
 	pkgver = r462.gd3c7d32
 	pkgrel = 1
-	url = https://github.com/carnager/melody-next
+	url = https://github.com/carnager/melody-music
 	install = melody-watch.install
 	arch = x86_64
 	arch = aarch64
@@ -16,7 +16,7 @@ pkgbase = melody-watch-git
 	depends = libutf8proc
 	provides = melody-watch
 	conflicts = melody-watch
-	source = melody-next::git+https://github.com/carnager/melody-next.git
+	source = melody-music::git+https://github.com/carnager/melody-music.git
 	sha256sums = SKIP
 
 pkgname = melody-watch-git

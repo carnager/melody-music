@@ -168,6 +168,13 @@ void BenchMainWindow::openForScreenshot(const QString& name) {
         }
         return;
     }
+    if (name == QStringLiteral("identify")) {
+        if (auto* view = activeTrackView()) {
+            view->selectAll();
+            showIdentify();
+        }
+        return;
+    }
     if (name == QStringLiteral("replaygain-menu")) {
         if (auto* button = findChild<QToolButton*>(QStringLiteral("bench-local-replaygain"))) {
             QTimer::singleShot(0, button, &QToolButton::showMenu);

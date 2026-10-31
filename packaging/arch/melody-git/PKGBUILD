@@ -8,7 +8,7 @@ pkgver=r706.g9c3faa82
 pkgrel=1
 pkgdesc='Melody: your music library -- play, tag, convert and share it (built from HEAD)'
 arch=(x86_64 aarch64)
-url='https://github.com/carnager/melody-next'
+url='https://github.com/carnager/melody-music'
 license=(GPL-3.0-only)
 depends=(melodyd-git qt6-base qt6-svg
          curl ffmpeg libebur128 libopenmpt libpipewire libupnp libutf8proc openssl sqlite taglib)
@@ -18,16 +18,16 @@ optdepends=('chromaprint: AcoustID fingerprinting in the MusicBrainz Identify di
 provides=(melody trackknife)
 conflicts=(trackknife trackknife-git trackbench-git)
 replaces=(trackknife-git trackbench-git)
-source=("melody-next::git+https://github.com/carnager/melody-next.git")
+source=("melody-music::git+https://github.com/carnager/melody-music.git")
 sha256sums=('SKIP')
 
 pkgver() {
-  cd melody-next
+  cd melody-music
   printf 'r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
 }
 
 build() {
-  cd melody-next
+  cd melody-music
   # Only the window, and melody-pick: the engine comes from melodyd-git. Warnings-as-errors
   # stays off so packaging never fails on warnings a future compiler invents.
   # UPnP on, as in melodyd-git: the window's setting for it is greyed out in
@@ -39,7 +39,7 @@ build() {
 }
 
 package() {
-  cd melody-next
+  cd melody-music
   DESTDIR="$pkgdir" cmake --install build/release --component app
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 THIRD_PARTY.md "$pkgdir/usr/share/doc/$pkgname/THIRD_PARTY.md"

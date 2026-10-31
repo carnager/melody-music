@@ -64,8 +64,8 @@ AboutDialog::AboutDialog(QWidget* parent) : QDialog(parent) {
             "<p>Your music library: play, tag, convert and share it.</p>"
             "<p>Free software under the <a href=\"https://www.gnu.org/licenses/gpl-3.0.html\">"
             "GNU General Public License, version 3</a>.</p>"
-            "<p><a href=\"https://github.com/carnager/melody-next\">Project</a> · "
-            "<a href=\"https://github.com/carnager/melody-next/tree/main/docs\">"
+            "<p><a href=\"https://github.com/carnager/melody-music\">Project</a> · "
+            "<a href=\"https://github.com/carnager/melody-music/tree/main/docs\">"
             "Documentation</a></p>"),
         this);
     text->setAlignment(Qt::AlignHCenter);

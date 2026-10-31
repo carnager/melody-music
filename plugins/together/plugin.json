@@ -35,7 +35,7 @@
       "key": "server",
       "label": "Server",
       "help": "Where your melody-together runs, e.g. https://together.example.org",
-      "link": "https://github.com/carnager/melody-next/blob/main/docs/together.md"
+      "link": "https://github.com/carnager/melody-music/blob/main/docs/together.md"
     },
     {
       "key": "name",

@@ -10,21 +10,21 @@ pkgver=r421.gadb8d61
 pkgrel=1
 pkgdesc='Melody music engine and speakers (built from HEAD)'
 arch=(x86_64 aarch64)
-url='https://github.com/carnager/melody-next'
+url='https://github.com/carnager/melody-music'
 license=(GPL-3.0-only)
 makedepends=(cmake git ninja nlohmann-json
              curl ffmpeg libebur128 libopenmpt libpipewire libupnp libutf8proc openssl sqlite
              taglib)
-source=("melody-next::git+https://github.com/carnager/melody-next.git")
+source=("melody-music::git+https://github.com/carnager/melody-music.git")
 sha256sums=('SKIP')
 
 pkgver() {
-  cd melody-next
+  cd melody-music
   printf 'r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
 }
 
 build() {
-  cd melody-next
+  cd melody-music
   # No window here: that is melody-git. Warnings-as-errors stays off
   # so packaging never fails on warnings a future compiler invents. UPnP
   # speakers as outputs (ADR-0235) asked for, not found by chance: without
@@ -36,8 +36,8 @@ build() {
 }
 
 _install() {
-  DESTDIR="$pkgdir" cmake --install "$srcdir/melody-next/build/release" --component "$1"
-  install -Dm644 "$srcdir/melody-next/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  DESTDIR="$pkgdir" cmake --install "$srcdir/melody-music/build/release" --component "$1"
+  install -Dm644 "$srcdir/melody-music/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }
 
 package_melodyd-git() {
@@ -47,7 +47,7 @@ package_melodyd-git() {
   conflicts=(melodyd)
   install=melody.install
   _install engine
-  install -Dm644 "$srcdir/melody-next/docs/melody.md" "$pkgdir/usr/share/doc/$pkgname/melody.md"
+  install -Dm644 "$srcdir/melody-music/docs/melody.md" "$pkgdir/usr/share/doc/$pkgname/melody.md"
 }
 
 package_melody-agent-git() {

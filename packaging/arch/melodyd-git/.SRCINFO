@@ -2,7 +2,7 @@ pkgbase = melodyd-git
 	pkgdesc = Melody music engine and speakers (built from HEAD)
 	pkgver = r421.gadb8d61
 	pkgrel = 1
-	url = https://github.com/carnager/melody-next
+	url = https://github.com/carnager/melody-music
 	arch = x86_64
 	arch = aarch64
 	license = GPL-3.0-only
@@ -20,7 +20,7 @@ pkgbase = melodyd-git
 	makedepends = openssl
 	makedepends = sqlite
 	makedepends = taglib
-	source = melody-next::git+https://github.com/carnager/melody-next.git
+	source = melody-music::git+https://github.com/carnager/melody-music.git
 	sha256sums = SKIP
 
 pkgname = melodyd-git

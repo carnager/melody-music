@@ -1,3 +1,3 @@
-module github.com/carnager/melody-next/together
+module github.com/carnager/melody-music/together
 
 go 1.23

@@ -2,7 +2,7 @@ pkgbase = melody-git
 	pkgdesc = Melody: your music library -- play, tag, convert and share it (built from HEAD)
 	pkgver = r706.g9c3faa82
 	pkgrel = 1
-	url = https://github.com/carnager/melody-next
+	url = https://github.com/carnager/melody-music
 	install = melody.install
 	arch = x86_64
 	arch = aarch64
@@ -33,7 +33,7 @@ pkgbase = melody-git
 	conflicts = trackbench-git
 	replaces = trackknife-git
 	replaces = trackbench-git
-	source = melody-next::git+https://github.com/carnager/melody-next.git
+	source = melody-music::git+https://github.com/carnager/melody-music.git
 	sha256sums = SKIP
 
 pkgname = melody-git

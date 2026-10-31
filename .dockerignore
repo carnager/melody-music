@@ -3,7 +3,7 @@ build/
 .git/
 packaging/arch/*/src/
 packaging/arch/*/pkg/
-packaging/arch/*/melody-next/
+packaging/arch/*/melody-music/
 **/*.pkg.tar.zst
 Screenshots/
 android/
