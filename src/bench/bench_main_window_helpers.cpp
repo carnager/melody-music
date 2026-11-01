@@ -13,10 +13,92 @@
 
 namespace trackknife::bench {
 
-QIcon albumShuffleIcon(const QPalette& palette) {
+namespace {
+
+// An arrowhead whose tip is at `tip`, pointing along (dx, dy).
+void arrowhead(QPainterPath& path, const QPointF tip, const double dx, const double dy) {
+    constexpr double back = 2.6;
+    constexpr double side = 2.6;
+    path.moveTo(tip.x() - dx * back - dy * side, tip.y() - dy * back + dx * side);
+    path.lineTo(tip);
+    path.lineTo(tip.x() - dx * back + dy * side, tip.y() - dy * back - dx * side);
+}
+
+// A loop of two arrows, the shape of repeat, on a 24-unit grid.
+void repeatLoop(QPainterPath& path) {
+    path.moveTo(4, 12);
+    path.lineTo(4, 10);
+    path.quadTo(4, 7, 7, 7);
+    path.lineTo(20, 7);
+    arrowhead(path, {20, 7}, 1, 0);
+    path.moveTo(20, 12);
+    path.lineTo(20, 14);
+    path.quadTo(20, 17, 17, 17);
+    path.lineTo(4, 17);
+    arrowhead(path, {4, 17}, -1, 0);
+}
+
+// Two crossing arrows, the shape of shuffle, between heights top and bottom.
+void shuffleArrows(QPainterPath& path, const double top, const double bottom) {
+    path.moveTo(3, bottom);
+    path.lineTo(7, bottom);
+    path.lineTo(15, top);
+    path.lineTo(21, top);
+    arrowhead(path, {21, top}, 1, 0);
+    path.moveTo(3, top);
+    path.lineTo(7, top);
+    path.lineTo(15, bottom);
+    path.lineTo(21, bottom);
+    arrowhead(path, {21, bottom}, 1, 0);
+}
+
+QPainterPath glyphPath(const ModeGlyph glyph) {
+    QPainterPath path;
+    switch (glyph) {
+    case ModeGlyph::repeat:
+        repeatLoop(path);
+        break;
+    case ModeGlyph::single:
+        // A "1": one track.
+        path.moveTo(8.5, 8.5);
+        path.lineTo(13, 5);
+        path.lineTo(13, 19);
+        break;
+    case ModeGlyph::random:
+        shuffleArrows(path, 7, 17);
+        break;
+    case ModeGlyph::album_random:
+        // A record with two arrows out of it: whole albums, shuffled.
+        path.addEllipse(QPointF(7, 12), 4.5, 4.5);
+        path.addEllipse(QPointF(7, 12), 0.8, 0.8);
+        path.moveTo(12.5, 9);
+        path.lineTo(15, 7);
+        path.lineTo(21, 7);
+        arrowhead(path, {21, 7}, 1, 0);
+        path.moveTo(12.5, 15);
+        path.lineTo(15, 17);
+        path.lineTo(21, 17);
+        arrowhead(path, {21, 17}, 1, 0);
+        break;
+    case ModeGlyph::consume:
+        // A mouth eating the dots ahead of it: entries go as they play.
+        path.moveTo(9, 12);
+        path.arcTo(QRectF(2, 5, 14, 14), 35, 290);
+        path.closeSubpath();
+        path.addEllipse(QPointF(18.5, 12), 0.7, 0.7);
+        path.addEllipse(QPointF(22, 12), 0.7, 0.7);
+        break;
+    }
+    return path;
+}
+
+} // namespace
+
+QIcon modeIcon(const ModeGlyph glyph, const QPalette& palette) {
+    const auto path = glyphPath(glyph);
     QIcon icon;
     for (const auto mode : {QIcon::Normal, QIcon::Disabled, QIcon::Active}) {
-        for (const int size : {24, 48}) {
+        for (const int size : {16, 22, 24, 32, 48}) {
             QPixmap pixmap(size, size);
             pixmap.fill(Qt::transparent);
             QPainter painter(&pixmap);
@@ -26,26 +108,8 @@ QIcon albumShuffleIcon(const QPalette& palette) {
                 QPen(palette.color(mode == QIcon::Disabled ? QPalette::Disabled : QPalette::Active,
                                    QPalette::ButtonText),
                      1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-            // Stacked album sleeves above two crossing shuffle arrows.
-            painter.drawRoundedRect(QRectF(4, 2, 10, 8), 1, 1);
-            painter.drawPolyline(QPolygonF{QPointF(16, 4), QPointF(18, 4), QPointF(18, 12)});
-            painter.drawEllipse(QPointF(9, 6), 2, 2);
-            QPainterPath arrows;
-            arrows.moveTo(3, 14);
-            arrows.lineTo(7, 14);
-            arrows.lineTo(15, 21);
-            arrows.lineTo(21, 21);
-            arrows.moveTo(3, 21);
-            arrows.lineTo(7, 21);
-            arrows.lineTo(15, 14);
-            arrows.lineTo(21, 14);
-            arrows.moveTo(18, 12);
-            arrows.lineTo(21, 14);
-            arrows.lineTo(18, 16);
-            arrows.moveTo(18, 19);
-            arrows.lineTo(21, 21);
-            arrows.lineTo(18, 23);
-            painter.drawPath(arrows);
+            painter.setBrush(Qt::NoBrush);
+            painter.drawPath(path);
             painter.end();
             icon.addPixmap(pixmap, mode);
         }

@@ -87,11 +87,11 @@ void BenchMainWindow::changeEvent(QEvent* event) {
             styleStatusBar();
         }
         // Icons painted here rather than taken from the theme are painted
-        // again in the palette's colours: album shuffle, and the one-shot
-        // dot drawn onto a theme icon. Painted once, they kept the light
-        // palette's dark strokes on the dark ground.
+        // again in the palette's colours: the mode buttons, and the one-shot
+        // dot drawn onto them. Painted once, they kept the light palette's
+        // dark strokes on the dark ground.
         if (local_album_random_action_ != nullptr) {
-            local_album_random_action_->setIcon(albumShuffleIcon(palette()));
+            paintModeIcons();
             refreshLocalPlaybackControls();
         }
     }

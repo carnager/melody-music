@@ -21,7 +21,12 @@
 
 namespace trackknife::bench {
 
-[[nodiscard]] QIcon albumShuffleIcon(const QPalette& palette);
+// The playback mode buttons' icons, drawn here in one line style rather than
+// taken from the icon theme: a theme -- or macOS, which has none and maps
+// only some names to its own symbols -- gave each button a different style,
+// and "repeat one" and "clear list" fell back to the same reload arrow.
+enum class ModeGlyph { repeat, random, single, album_random, consume };
+[[nodiscard]] QIcon modeIcon(ModeGlyph glyph, const QPalette& palette);
 
 // ADR-0227, ADR-0234: the engine whose files a track view lists, as its maker marked
 // it; a view nobody marked lists this computer's.

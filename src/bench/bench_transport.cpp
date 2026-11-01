@@ -648,6 +648,18 @@ void BenchMainWindow::rebuildDeviceMenu() {
     connect(refresh, &QAction::triggered, &workspace_, &Workspace::refreshOutputs);
 }
 
+// The mode buttons' icons in the palette's colours; single and consume keep
+// theirs plain as well, so one-shot can be drawn as a mark on them.
+void BenchMainWindow::paintModeIcons() {
+    for (auto* button : local_mode_buttons_) {
+        auto* action = button->defaultAction();
+        const auto glyph = static_cast<ModeGlyph>(action->property("bench-mode-glyph").toInt());
+        const auto icon = modeIcon(glyph, palette());
+        action->setIcon(icon);
+        action->setProperty("bench-plain-icon", QVariant::fromValue(icon));
+    }
+}
+
 QIcon BenchMainWindow::oneShotIcon(const QIcon& plain) const {
     QIcon marked;
     for (const int extent : {16, 22, 32}) {
@@ -668,43 +680,34 @@ QIcon BenchMainWindow::oneShotIcon(const QIcon& plain) const {
 
 void BenchMainWindow::buildLocalPlaybackControls(QMenu* playback_menu) {
     // The modes themselves the workspace read when it was made.
-    const auto add_mode = [&](const QString& id, const QString& label, const QString& icon) {
+    const auto add_mode = [&](const QString& id, const QString& label, const ModeGlyph glyph) {
         auto* action = new QAction(label, this);
         action->setObjectName(QStringLiteral("action-local-%1").arg(id));
         action->setCheckable(true);
+        action->setProperty("bench-mode-glyph", static_cast<int>(glyph));
         auto* button = new QToolButton(statusBar());
         button->setObjectName(QStringLiteral("bench-local-%1").arg(id));
         button->setAutoRaise(true);
-        if (!icon.isEmpty()) {
-            action->setIcon(
-                QIcon::fromTheme(icon, style()->standardIcon(QStyle::SP_BrowserReload)));
-            button->setToolButtonStyle(Qt::ToolButtonIconOnly);
-        } else {
-            button->setToolButtonStyle(Qt::ToolButtonTextOnly);
-        }
+        button->setToolButtonStyle(Qt::ToolButtonIconOnly);
         button->setDefaultAction(action);
         statusBar()->addPermanentWidget(button);
         local_mode_buttons_.push_back(button);
         playback_menu->addAction(action);
         return action;
     };
-    local_repeat_action_ = add_mode(QStringLiteral("repeat"), QStringLiteral("Repeat"),
-                                    QStringLiteral("media-playlist-repeat"));
-    local_random_action_ = add_mode(QStringLiteral("random"), QStringLiteral("Random"),
-                                    QStringLiteral("media-playlist-shuffle"));
-    local_single_action_ = add_mode(QStringLiteral("single"), QStringLiteral("Single"),
-                                    QStringLiteral("media-playlist-repeat-song"));
-    local_album_random_action_ = add_mode(QStringLiteral("album-random"), tr("Album shuffle"),
-                                          QStringLiteral("media-playlist-shuffle"));
-    local_album_random_action_->setIcon(albumShuffleIcon(palette()));
+    local_repeat_action_ =
+        add_mode(QStringLiteral("repeat"), QStringLiteral("Repeat"), ModeGlyph::repeat);
+    local_random_action_ =
+        add_mode(QStringLiteral("random"), QStringLiteral("Random"), ModeGlyph::random);
+    local_album_random_action_ =
+        add_mode(QStringLiteral("album-random"), tr("Album shuffle"), ModeGlyph::album_random);
     connect(local_album_random_action_, &QAction::triggered, &workspace_,
             &Workspace::setAlbumRandom);
-    local_consume_action_ = add_mode(QStringLiteral("consume"), QStringLiteral("Consume"),
-                                     QStringLiteral("edit-clear-list"));
-    // Their plain icons, so one-shot can be drawn as a mark on them.
-    for (auto* action : {local_single_action_, local_consume_action_}) {
-        action->setProperty("bench-plain-icon", QVariant::fromValue(action->icon()));
-    }
+    local_single_action_ =
+        add_mode(QStringLiteral("single"), QStringLiteral("Single"), ModeGlyph::single);
+    local_consume_action_ =
+        add_mode(QStringLiteral("consume"), QStringLiteral("Consume"), ModeGlyph::consume);
+    paintModeIcons();
     connect(local_repeat_action_, &QAction::triggered, &workspace_, &Workspace::setRepeat);
     connect(local_random_action_, &QAction::triggered, &workspace_, &Workspace::setRandom);
     connect(local_single_action_, &QAction::triggered, &workspace_, &Workspace::cycleSingle);

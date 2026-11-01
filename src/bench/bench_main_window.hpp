@@ -747,6 +747,7 @@ class BenchMainWindow final : public QMainWindow, public WorkspaceView {
     void chooseLibraryEngine(const QString& address);
     void applySavedSettings(const LocalEngineSharing& before);
     // A mode's icon marked as one-shot: on for one track, then off.
+    void paintModeIcons();
     [[nodiscard]] QIcon oneShotIcon(const QIcon& plain) const;
     void configurePlaybackBuffer(const QString& profile, int capacity_ms, int start_threshold_ms) {
         workspace_.configurePlaybackBuffer(profile, capacity_ms, start_threshold_ms);
