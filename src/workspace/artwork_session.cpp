@@ -27,6 +27,7 @@
 #include <filesystem>
 #include <mutex>
 #include <set>
+#include <span>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
@@ -97,6 +98,12 @@ namespace {
             QStringLiteral("\n%1: %2").arg(display_utf8(context.key), display_utf8(context.value));
     }
     return result;
+}
+
+// A file whose embedded covers Melody writes (ADR-0137, ADR-0337).
+[[nodiscard]] bool holds_covers(const metadata::LocalArtworkInventory& inventory) {
+    return inventory.capabilities.embedded_readable &&
+           metadata::is_qualified_artwork_adapter(inventory.embedded_adapter_name);
 }
 
 [[nodiscard]] QString source_label(const MetadataArtworkScopeSource& source) {
@@ -415,8 +422,9 @@ bool ArtworkSession::canCopy() const {
                 donor.mime_type == "image/png" || donor.mime_type == "image/jpeg";
             const auto destination_count =
                 static_cast<std::size_t>(std::ranges::count_if(scope_, [&](const auto& source) {
-                    return donor.provenance != metadata::ArtworkProvenance::embedded ||
-                           source.raw_path != donor.raw_source_path;
+                    return writable_sources_.contains(source.raw_path) &&
+                           (donor.provenance != metadata::ArtworkProvenance::embedded ||
+                            source.raw_path != donor.raw_source_path);
                 }));
             copy_available = supported && donor.width && donor.height && destination_count > 0U;
         }
@@ -428,7 +436,7 @@ bool ArtworkSession::canReplace() const {
     const auto selected = selectedItemRows();
     const auto actionable = std::ranges::any_of(selected, [this](const int row) {
         return row >= 0 && static_cast<std::size_t>(row) < action_targets_.size() &&
-               action_targets_[static_cast<std::size_t>(row)].has_value();
+               !action_targets_[static_cast<std::size_t>(row)].empty();
     });
     return actionable && mutationIdle();
 }
@@ -506,8 +514,8 @@ void ArtworkSession::removeFrontCover() {
     });
     item_selection_->clearSelection();
     for (std::size_t index = 0; index < action_targets_.size(); ++index) {
-        if (action_targets_[index] &&
-            action_targets_[index]->item.role == metadata::ArtworkRole::front) {
+        if (!action_targets_[index].empty() &&
+            copy_targets_[index].item.role == metadata::ArtworkRole::front) {
             item_selection_->select(items_model_->index(static_cast<int>(index), 0),
                                     QItemSelectionModel::Select | QItemSelectionModel::Rows);
         }
@@ -563,13 +571,11 @@ void ArtworkSession::refreshStoragePolicy() {
     scheduleInventory();
 }
 
-void ArtworkSession::setScope(std::vector<MetadataArtworkScopeSource> sources,
-                              const bool source_limit_exceeded) {
-    if (scope_ == sources && source_limit_exceeded_ == source_limit_exceeded) {
+void ArtworkSession::setScope(std::vector<MetadataArtworkScopeSource> sources) {
+    if (scope_ == sources) {
         return;
     }
     scope_ = std::move(sources);
-    source_limit_exceeded_ = source_limit_exceeded;
     ++generation_;
     cancellation_.request_cancellation();
     mutation_cancellation_.request_cancellation();
@@ -606,16 +612,6 @@ void ArtworkSession::scheduleInventory() {
         continueArchiveFront();
         return;
     }
-    if (source_limit_exceeded_ || scope_.size() > metadata_artwork_source_limit) {
-        clearPresentation();
-        setStatus(QStringLiteral("Artwork inventory is limited to %1 physical sources; narrow the "
-                                 "file selection")
-                      .arg(metadata_artwork_source_limit));
-        displayed_generation_ = generation_;
-        emit changed();
-        continueArchiveFront();
-        return;
-    }
     setStatus(QStringLiteral("Preparing artwork inventory for %1 %2…")
                   .arg(scope_.size())
                   .arg(scope_.size() == 1U ? QStringLiteral("source") : QStringLiteral("sources")));
@@ -628,8 +624,7 @@ void ArtworkSession::scheduleInventory() {
 }
 
 void ArtworkSession::startInventory() {
-    if (!reading() || job_running_ || scope_.empty() || source_limit_exceeded_ ||
-        scope_.size() > metadata_artwork_source_limit) {
+    if (!reading() || job_running_ || scope_.empty()) {
         return;
     }
     clearPresentation();
@@ -660,6 +655,8 @@ void ArtworkSession::startInventory() {
         auto batch = std::make_shared<BatchResult>();
         batch->generation = generation;
         batch->sources.reserve(scope.size());
+        // An album carries one cover in every file: drawn once, not per file.
+        std::unordered_map<std::string, QImage> drawn;
         for (auto& source : scope) {
             if (token.is_cancellation_requested()) {
                 batch->cancelled = true;
@@ -680,17 +677,19 @@ void ArtworkSession::startInventory() {
                         batch->cancelled = true;
                         break;
                     }
-                    QImage thumbnail;
-                    if (item.duplicate_of && *item.duplicate_of < result.thumbnails.size()) {
-                        thumbnail = result.thumbnails[*item.duplicate_of];
-                    } else if (auto bytes =
-                                   artwork.image_bytes(thumbnail_evidence(item),
-                                                       maximum_thumbnail_source_bytes, token)) {
-                        thumbnail = decode_thumbnail(
-                            QByteArray{reinterpret_cast<const char*>(bytes->data()),
-                                       static_cast<qsizetype>(bytes->size())});
+                    const auto key = metadata::artwork_fingerprint_hex(item.content_fingerprint);
+                    auto known = drawn.find(key);
+                    if (known == drawn.end()) {
+                        QImage thumbnail;
+                        if (auto bytes = artwork.image_bytes(
+                                thumbnail_evidence(item), maximum_thumbnail_source_bytes, token)) {
+                            thumbnail = decode_thumbnail(
+                                QByteArray{reinterpret_cast<const char*>(bytes->data()),
+                                           static_cast<qsizetype>(bytes->size())});
+                        }
+                        known = drawn.emplace(key, std::move(thumbnail)).first;
                     }
-                    result.thumbnails.push_back(std::move(thumbnail));
+                    result.thumbnails.push_back(known->second);
                 }
             } else {
                 result.error = std::move(read.error());
@@ -754,6 +753,10 @@ void ArtworkSession::finishInventory() {
     std::optional<core::ContentFingerprint> first;
     bool have_source = false;
     for (const auto& source : result->sources) {
+        // A file that cannot hold a cover does not make the others' mixed.
+        if (!folder_only && source.inventory && !holds_covers(*source.inventory)) {
+            continue;
+        }
         std::optional<core::ContentFingerprint> fingerprint;
         if (source.inventory) {
             for (std::size_t index = 0; index < source.inventory->items.size(); ++index) {
@@ -788,6 +791,7 @@ void ArtworkSession::clearPresentation() {
     issues_model_->removeRows(0, issues_model_->rowCount());
     action_targets_.clear();
     copy_targets_.clear();
+    writable_sources_.clear();
     local_covers_.clear();
     add_available_ = false;
     empty_visible_ = true;
@@ -796,19 +800,29 @@ void ArtworkSession::clearPresentation() {
 
 void ArtworkSession::present(const BatchResult& result) {
     clearPresentation();
-    add_available_ = !result.sources.empty();
-    std::size_t item_count = 0U;
     std::size_t issue_count = 0U;
     std::size_t read_only_count = 0U;
+    bool revision_conflict = false;
     const auto policy = SettingsKeys::artworkPolicy();
     const auto folder_only = !policy.embed && policy.write_folder_image;
+
+    // ADR-0348: one row per distinct image, however many files carry it --
+    // an album's cover is one row, not one per track.
+    struct Row {
+        metadata::ArtworkInventoryItem item;
+        QImage thumbnail;
+        std::vector<MetadataArtworkScopeSource> files;
+        std::vector<ActionTarget> targets;
+        std::size_t pictures{0U};
+    };
+    std::vector<Row> rows;
+    std::unordered_map<std::string, std::size_t> row_of;
 
     for (const auto& source : result.sources) {
         const auto label = source_label(source.scope);
         const auto media_path =
             QString::fromStdString(core::display_raw_path(source.scope.raw_path));
         if (!source.inventory) {
-            add_available_ = false;
             ++read_only_count;
             const auto details = source.error ? error_tool_tip(*source.error)
                                               : QStringLiteral("The inventory returned no result");
@@ -824,26 +838,24 @@ void ArtworkSession::present(const BatchResult& result) {
         }
 
         const auto& inventory = *source.inventory;
+        const auto current = source.scope.captured_revision_consistent &&
+                             source.scope.captured_revision &&
+                             *source.scope.captured_revision == inventory.media_revision;
         const auto changes_available =
-            applier_factory_ &&
-            (folder_only ||
-             (inventory.capabilities.embedded_readable &&
-              metadata::is_qualified_artwork_adapter(inventory.embedded_adapter_name))) &&
-            source.scope.captured_revision_consistent && source.scope.captured_revision &&
-            *source.scope.captured_revision == inventory.media_revision;
-        if (!changes_available) {
-            add_available_ = false;
+            applier_factory_ && (folder_only || holds_covers(inventory)) && current;
+        if (changes_available) {
+            writable_sources_.insert(source.scope.raw_path);
+        } else {
             ++read_only_count;
             // Only a blocked file earns a row; the old always-on capability
             // table restated this for every file.
             QString reason;
-            if (!inventory.capabilities.embedded_readable ||
-                !metadata::is_qualified_artwork_adapter(inventory.embedded_adapter_name)) {
-                reason = QStringLiteral("Artwork changes need a FLAC, MP3, MP4, Opus or Vorbis "
-                                        "file whose covers can be written; this file is view-only");
-            } else if (!source.scope.captured_revision_consistent ||
-                       !source.scope.captured_revision ||
-                       *source.scope.captured_revision != inventory.media_revision) {
+            if (!holds_covers(inventory)) {
+                // ADR-0348: left out of covers added to the others.
+                reason = QStringLiteral("Only FLAC, MP3, MP4, Opus and Vorbis files hold covers "
+                                        "Melody writes; covers added to the others skip this file");
+            } else if (!current) {
+                revision_conflict = true;
                 reason = QStringLiteral(
                     "The file changed since the tag editor opened; reopen to edit artwork");
             } else {
@@ -857,57 +869,34 @@ void ArtworkSession::present(const BatchResult& result) {
 
         for (std::size_t index = 0U; index < inventory.items.size(); ++index) {
             const auto& artwork = inventory.items[index];
-            const auto raw_artwork_path =
-                QString::fromStdString(core::display_raw_path(artwork.raw_source_path));
-            const auto fingerprint = QString::fromStdString(
-                metadata::artwork_fingerprint_hex(artwork.content_fingerprint));
             const auto embedded = artwork.provenance == metadata::ArtworkProvenance::embedded;
-
-            auto* preview = new QStandardItem;
-            preview->setEditable(false);
-            if (index < source.thumbnails.size() && !source.thumbnails[index].isNull()) {
-                preview->setData(sharp_thumbnail(source.thumbnails[index]), Qt::DecorationRole);
-            } else {
-                preview->setText(QStringLiteral("—"));
-                preview->setToolTip(QStringLiteral("No preview available"));
+            // The same bytes in the same role are one image; a picture beside
+            // the files is one file, whichever track found it.
+            auto key = std::string{metadata::artwork_role_name(artwork.role)} + '\n' +
+                       (embedded ? std::string{"embedded"} : artwork.raw_source_path) + '\n' +
+                       metadata::artwork_fingerprint_hex(artwork.content_fingerprint) + '\n' +
+                       artwork.mime_type + '\n' + artwork.description;
+            auto [found, inserted] = row_of.emplace(std::move(key), rows.size());
+            if (inserted) {
+                rows.push_back(Row{
+                    .item = artwork,
+                    .thumbnail =
+                        index < source.thumbnails.size() ? source.thumbnails[index] : QImage{},
+                    .files = {},
+                    .targets = {},
+                    .pictures = 0U,
+                });
             }
-
-            const auto image = QStringLiteral("%1 · %2 · %3")
-                                   .arg(mime_label(artwork.mime_type), dimensions(artwork),
-                                        format_bytes(artwork.byte_size));
-            auto image_tool_tip =
-                QStringLiteral("%1 · %2 bytes\nSHA-256: %3")
-                    .arg(artwork.mime_type.empty() ? QStringLiteral("Unknown MIME")
-                                                   : display_utf8(artwork.mime_type))
-                    .arg(artwork.byte_size)
-                    .arg(fingerprint);
-            if (!artwork.description.empty()) {
-                image_tool_tip +=
-                    QStringLiteral("\nDescription: %1").arg(display_utf8(artwork.description));
+            auto& row = rows[found->second];
+            ++row.pictures;
+            if (std::ranges::none_of(row.files, [&](const auto& file) {
+                    return file.raw_path == source.scope.raw_path;
+                })) {
+                row.files.push_back(source.scope);
             }
-
-            auto origin = embedded ? QStringLiteral("Embedded") : QStringLiteral("External");
-            if (artwork.duplicate_of) {
-                origin += QStringLiteral(" · same image as row %1").arg(*artwork.duplicate_of + 1U);
-            }
-            auto origin_tool_tip = raw_artwork_path;
-            if (!artwork.native_type.empty()) {
-                origin_tool_tip +=
-                    QStringLiteral("\nNative type: %1").arg(display_utf8(artwork.native_type));
-            }
-            origin_tool_tip += QStringLiteral("\nPicture %1").arg(artwork.source_ordinal + 1U);
-
-            items_model_->appendRow(
-                {preview, table_item(label, media_path),
-                 table_item(title_case(display_utf8(metadata::artwork_role_name(artwork.role)))),
-                 table_item(image, image_tool_tip), table_item(origin, origin_tool_tip)});
             if (changes_available && embedded) {
-                action_targets_.push_back(ActionTarget{.scope = source.scope, .item = artwork});
-            } else {
-                action_targets_.push_back(std::nullopt);
+                row.targets.push_back(ActionTarget{.scope = source.scope, .item = artwork});
             }
-            copy_targets_.push_back(ActionTarget{.scope = source.scope, .item = artwork});
-            ++item_count;
         }
 
         for (const auto& issue : inventory.issues) {
@@ -921,6 +910,81 @@ void ArtworkSession::present(const BatchResult& result) {
         }
     }
 
+    // Covers are added to the files that hold them, the rest skipped; a file
+    // changed under the editor stops it, as it stops the tags' Apply.
+    add_available_ = !writable_sources_.empty() && !revision_conflict;
+
+    for (auto& row : rows) {
+        const auto& artwork = row.item;
+        const auto embedded = artwork.provenance == metadata::ArtworkProvenance::embedded;
+        auto* preview = new QStandardItem;
+        preview->setEditable(false);
+        if (!row.thumbnail.isNull()) {
+            preview->setData(sharp_thumbnail(row.thumbnail), Qt::DecorationRole);
+        } else {
+            preview->setText(QStringLiteral("—"));
+            preview->setToolTip(QStringLiteral("No preview available"));
+        }
+
+        QString file_text;
+        QStringList file_paths;
+        constexpr qsizetype listed_files = 12;
+        for (const auto& file : row.files) {
+            if (file_paths.size() == listed_files) {
+                file_paths.push_back(
+                    QStringLiteral("… and %1 more")
+                        .arg(static_cast<qsizetype>(row.files.size()) - listed_files));
+                break;
+            }
+            file_paths.push_back(QString::fromStdString(core::display_raw_path(file.raw_path)));
+        }
+        if (row.files.size() == 1U) {
+            file_text = source_label(row.files.front());
+        } else {
+            file_text = QStringLiteral("%1 files").arg(row.files.size());
+        }
+
+        const auto image = QStringLiteral("%1 · %2 · %3")
+                               .arg(mime_label(artwork.mime_type), dimensions(artwork),
+                                    format_bytes(artwork.byte_size));
+        auto image_tool_tip = QStringLiteral("%1 · %2 bytes\nSHA-256: %3")
+                                  .arg(artwork.mime_type.empty() ? QStringLiteral("Unknown MIME")
+                                                                 : display_utf8(artwork.mime_type))
+                                  .arg(artwork.byte_size)
+                                  .arg(QString::fromStdString(metadata::artwork_fingerprint_hex(
+                                      artwork.content_fingerprint)));
+        if (!artwork.description.empty()) {
+            image_tool_tip +=
+                QStringLiteral("\nDescription: %1").arg(display_utf8(artwork.description));
+        }
+
+        auto origin = embedded ? QStringLiteral("Embedded") : QStringLiteral("External");
+        if (embedded && row.pictures > row.files.size()) {
+            origin += QStringLiteral(" · %1 copies").arg(row.pictures);
+        }
+        auto origin_tool_tip =
+            embedded
+                ? QStringLiteral("In %1").arg(
+                      row.files.size() == 1U ? QStringLiteral("the file")
+                                             : QStringLiteral("%1 files").arg(row.files.size()))
+                : QString::fromStdString(core::display_raw_path(artwork.raw_source_path));
+        if (!artwork.native_type.empty()) {
+            origin_tool_tip +=
+                QStringLiteral("\nNative type: %1").arg(display_utf8(artwork.native_type));
+        }
+        if (row.files.size() == 1U) {
+            origin_tool_tip += QStringLiteral("\nPicture %1").arg(artwork.source_ordinal + 1U);
+        }
+
+        items_model_->appendRow(
+            {preview, table_item(file_text, file_paths.join(QLatin1Char('\n'))),
+             table_item(title_case(display_utf8(metadata::artwork_role_name(artwork.role)))),
+             table_item(image, image_tool_tip), table_item(origin, origin_tool_tip)});
+        copy_targets_.push_back(ActionTarget{.scope = row.files.front(), .item = artwork});
+        action_targets_.push_back(std::move(row.targets));
+    }
+
+    const auto item_count = rows.size();
     empty_visible_ = item_count == 0U;
     if (item_count == 0U) {
         empty_text_ = QStringLiteral("No artwork found for the selected files");
@@ -1359,7 +1423,8 @@ void ArtworkSession::startReview(const metadata::ArtworkWritePlanIntentKind kind
     std::vector<metadata::ArtworkWritePlanIntent> intents;
     if (kind == metadata::ArtworkWritePlanIntentKind::add) {
         for (const auto& source : scope_) {
-            if (embedded_donor && source.raw_path == embedded_donor->raw_source_path) {
+            if ((embedded_donor && source.raw_path == embedded_donor->raw_source_path) ||
+                !writable_sources_.contains(source.raw_path)) {
                 continue;
             }
             for (const auto occurrence_index : source.occurrence_indexes) {
@@ -1384,25 +1449,23 @@ void ArtworkSession::startReview(const metadata::ArtworkWritePlanIntentKind kind
             if (row < 0 || static_cast<std::size_t>(row) >= action_targets_.size()) {
                 continue;
             }
-            const auto& target = action_targets_[static_cast<std::size_t>(row)];
-            if (!target) {
-                continue;
-            }
-            for (const auto occurrence_index : target->scope.occurrence_indexes) {
-                intents.push_back(metadata::ArtworkWritePlanIntent{
-                    .occurrence_index = occurrence_index,
-                    .raw_media_path = target->scope.raw_path,
-                    .expected_media_revision = target->scope.captured_revision_consistent
-                                                   ? target->scope.captured_revision
-                                                   : std::nullopt,
-                    .target_ordinal = target->item.source_ordinal,
-                    .expected_target_fingerprint = target->item.content_fingerprint,
-                    .kind = kind,
-                    .replacement_raw_path = replacement_raw_path,
-                    .added_role = added_role,
-                    .added_description = added_description,
-                    .replacement_embedded_source = std::nullopt,
-                });
+            for (const auto& target : action_targets_[static_cast<std::size_t>(row)]) {
+                for (const auto occurrence_index : target.scope.occurrence_indexes) {
+                    intents.push_back(metadata::ArtworkWritePlanIntent{
+                        .occurrence_index = occurrence_index,
+                        .raw_media_path = target.scope.raw_path,
+                        .expected_media_revision = target.scope.captured_revision_consistent
+                                                       ? target.scope.captured_revision
+                                                       : std::nullopt,
+                        .target_ordinal = target.item.source_ordinal,
+                        .expected_target_fingerprint = target.item.content_fingerprint,
+                        .kind = kind,
+                        .replacement_raw_path = replacement_raw_path,
+                        .added_role = added_role,
+                        .added_description = added_description,
+                        .replacement_embedded_source = std::nullopt,
+                    });
+                }
             }
         }
     }
@@ -1457,20 +1520,35 @@ bool ArtworkSession::reviewFetchedCover(const std::string& replacement_raw_path)
                    return source.raw_path == intent.raw_media_path;
                });
     });
+    // The fronts each file carries now, replaced by the new one.
+    std::unordered_map<std::string, std::vector<const metadata::ArtworkInventoryItem*>> fronts;
+    if (policy.embed) {
+        for (const auto& row : action_targets_) {
+            for (const auto& target : row) {
+                if (target.item.role == metadata::ArtworkRole::front) {
+                    fronts[target.scope.raw_path].push_back(&target.item);
+                }
+            }
+        }
+    }
     std::vector<metadata::ArtworkWritePlanIntent> intents;
     for (const auto& source : scope_) {
+        // ADR-0348: a file that cannot hold the cover is skipped.
+        if (!writable_sources_.contains(source.raw_path)) {
+            continue;
+        }
+        const auto carried = fronts.find(source.raw_path);
         for (const auto occurrence_index : source.occurrence_indexes) {
-            for (const auto& target : action_targets_) {
-                if (!policy.embed || !target || target->scope.raw_path != source.raw_path ||
-                    target->item.role != metadata::ArtworkRole::front) {
-                    continue;
-                }
+            for (const auto* front :
+                 carried == fronts.end()
+                     ? std::span<const metadata::ArtworkInventoryItem* const>{}
+                     : std::span<const metadata::ArtworkInventoryItem* const>{carried->second}) {
                 intents.push_back(metadata::ArtworkWritePlanIntent{
                     .occurrence_index = occurrence_index,
                     .raw_media_path = source.raw_path,
                     .expected_media_revision = source.captured_revision,
-                    .target_ordinal = target->item.source_ordinal,
-                    .expected_target_fingerprint = target->item.content_fingerprint,
+                    .target_ordinal = front->source_ordinal,
+                    .expected_target_fingerprint = front->content_fingerprint,
                     .kind = metadata::ArtworkWritePlanIntentKind::remove,
                     .replacement_raw_path = std::nullopt,
                     .added_role = metadata::ArtworkRole::front,
@@ -1558,11 +1636,12 @@ void ArtworkSession::updatePendingPresentation() {
                             : QStringLiteral("Loading…"))});
         if (intent.kind != metadata::ArtworkWritePlanIntentKind::add) {
             for (std::size_t index = 0; index < action_targets_.size(); ++index) {
-                const auto& target = action_targets_[index];
-                if (target && target->scope.raw_path == intent.raw_media_path &&
-                    target->item.provenance == metadata::ArtworkProvenance::embedded &&
-                    target->item.source_ordinal == intent.target_ordinal &&
-                    target->item.content_fingerprint == intent.expected_target_fingerprint) {
+                if (std::ranges::any_of(action_targets_[index], [&intent](const auto& target) {
+                        return target.scope.raw_path == intent.raw_media_path &&
+                               target.item.source_ordinal == intent.target_ordinal &&
+                               target.item.content_fingerprint ==
+                                   intent.expected_target_fingerprint;
+                    })) {
                     auto* before = pending_model_->item(pending_model_->rowCount() - 1, 4);
                     const auto image =
                         items_model_->index(static_cast<int>(index), 0).data(Qt::DecorationRole);
@@ -1577,9 +1656,12 @@ void ArtworkSession::updatePendingPresentation() {
     }
     startPendingPreviews();
     for (std::size_t row = 0; row < action_targets_.size(); ++row) {
-        const auto& target = action_targets_[row];
+        // Struck through once every copy the row stands for goes.
+        const auto& targets = action_targets_[row];
         const auto removed =
-            target && removals.contains({target->scope.raw_path, target->item.source_ordinal});
+            !targets.empty() && std::ranges::all_of(targets, [&removals](const auto& target) {
+                return removals.contains({target.scope.raw_path, target.item.source_ordinal});
+            });
         for (int column = 0; column < items_model_->columnCount(); ++column) {
             auto* item = items_model_->item(static_cast<int>(row), column);
             auto font = item->font();

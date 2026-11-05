@@ -157,8 +157,7 @@ class TaggerArtwork {
     virtual void setWorking(bool working) = 0;
     virtual void discardPendingChanges() = 0;
     virtual void requestOperationCancellation() = 0;
-    virtual void setScope(std::vector<MetadataArtworkScopeSource> sources,
-                          bool source_limit_exceeded) = 0;
+    virtual void setScope(std::vector<MetadataArtworkScopeSource> sources) = 0;
     virtual void setCoverArtRelease(std::optional<QString> release_id) = 0;
     // ADR-0316: the Cover Art Archive's front cover of the release the
     // files in scope carry, staged as Fetch cover… stages one chosen --

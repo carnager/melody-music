@@ -2,6 +2,7 @@
 
 #include "bench_main_window_test.hpp"
 
+#include "workspace/artwork_session.hpp"
 #include "workspace/startup.hpp"
 #include "workspace/tab_store.hpp"
 
@@ -1340,6 +1341,78 @@ void BenchMainWindowTest::metadataPropertiesArtworkSectionShowsProvenanceAndCapa
     QPointer guard{properties};
     properties->close();
     QTRY_VERIFY(guard.isNull());
+}
+
+// ADR-0348: a release of 99 tracks -- a CD with short silent ones -- is
+// not too many files for its covers, the cover every file carries is one row,
+// and a file that cannot hold a cover is skipped instead of blocking the rest.
+void BenchMainWindowTest::artworkOfAWholeReleaseIsOneRowAndSkipsFilesWithoutCovers() {
+    QTemporaryDir media;
+    QVERIFY(media.isValid());
+    constexpr std::size_t flac_count = 99U;
+    std::vector<MetadataArtworkScopeSource> scope;
+    const auto add_source = [&scope](const QString& path) {
+        const auto encoded = QFile::encodeName(path);
+        const std::string raw_path{encoded.constData(), static_cast<std::size_t>(encoded.size())};
+        const auto revision = core::observe_local_source_revision(raw_path);
+        QVERIFY(revision.has_value());
+        const auto index = scope.size();
+        scope.push_back(MetadataArtworkScopeSource{
+            .raw_path = raw_path,
+            .captured_revision = *revision,
+            .label = QFileInfo{path}.fileName(),
+            .occurrence_indexes = {index},
+            .occurrence_count = 1U,
+            .captured_revision_consistent = true,
+        });
+    };
+    for (std::size_t index = 0U; index < flac_count; ++index) {
+        const auto path =
+            media.filePath(QStringLiteral("%1.flac").arg(index + 1U, 2, 10, QLatin1Char('0')));
+        QVERIFY(materialize_audio_fixture(QStringLiteral("art-tone-flac.b64"), path));
+        add_source(path);
+    }
+    const auto wav_path = media.filePath(QStringLiteral("silence.wav"));
+    QVERIFY(materialize_audio_fixture(QStringLiteral("rf64-tone-wav.b64"), wav_path));
+    add_source(wav_path);
+    const auto wav_raw = scope.back().raw_path;
+    QTemporaryDir images;
+    QVERIFY(images.isValid());
+    const auto cover_path = images.filePath(QStringLiteral("front.jpg"));
+    QVERIFY(materialize_audio_fixture(QStringLiteral("external-blue-jpeg.b64"), cover_path));
+
+    ArtworkSession session;
+    session.setMutationServices([] { return ArtworkWritePlanApplier{}; }, {});
+    session.setScope(std::move(scope));
+    session.setActive(true);
+    QTRY_VERIFY_WITH_TIMEOUT(session.status().contains(QStringLiteral("across 100 files")), 20'000);
+
+    // The fixture's one embedded picture, the same in all 99 files.
+    QCOMPARE(session.items()->rowCount(), 1);
+    QCOMPARE(session.items()->index(0, 1).data().toString(), QStringLiteral("99 files"));
+    QCOMPARE(session.items()->index(0, 4).data().toString(), QStringLiteral("Embedded"));
+    QVERIFY(session.status().contains(QStringLiteral("1 view-only")));
+    QCOMPARE(session.issues()->rowCount(), 1);
+    QVERIFY(session.issues()->index(0, 3).data().toString().contains(QStringLiteral("skip")));
+    QVERIFY(session.canAdd());
+    QVERIFY(session.frontEditable());
+
+    session.stageFrontCover(cover_path);
+    const auto intents = session.pendingIntents();
+    QCOMPARE(intents.size(), flac_count);
+    QVERIFY(std::ranges::all_of(intents, [&wav_raw](const auto& intent) {
+        return intent.kind == metadata::ArtworkWritePlanIntentKind::add &&
+               intent.raw_media_path != wav_raw;
+    }));
+
+    // Selecting the row reaches the picture in every file that holds it.
+    session.discardPendingChanges();
+    session.itemSelection()->select(session.items()->index(0, 0),
+                                    QItemSelectionModel::Select | QItemSelectionModel::Rows);
+    QVERIFY(session.canRemove());
+    session.removeSelected();
+    QCOMPARE(session.pendingIntents().size(), flac_count);
+    QVERIFY(session.items()->item(0, 1)->font().strikeOut());
 }
 
 void BenchMainWindowTest::metadataPropertiesArtworkRemoveReviewsAppliesAndRefreshes_data() {

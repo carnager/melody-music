@@ -25,6 +25,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace trackknife::bench {
@@ -67,8 +68,7 @@ class ArtworkSession final : public QObject, public TaggerArtwork {
     void setWorking(bool working) override;
     void discardPendingChanges() override;
     void requestOperationCancellation() override;
-    void setScope(std::vector<MetadataArtworkScopeSource> sources,
-                  bool source_limit_exceeded = false) override;
+    void setScope(std::vector<MetadataArtworkScopeSource> sources) override;
     void setCoverArtRelease(std::optional<QString> release_id) override;
     void stageArchiveFront(std::function<void(bool, QString)> done) override;
 
@@ -248,8 +248,13 @@ class ArtworkSession final : public QObject, public TaggerArtwork {
     std::vector<metadata::ArtworkWritePlanIntent> pending_intents_;
     std::vector<metadata::ArtworkWritePlanIntent> pending_rows_;
     std::vector<MetadataArtworkScopeSource> scope_;
-    std::vector<std::optional<ActionTarget>> action_targets_;
+    // Per inventory row: the embedded copies that row's image stands for,
+    // in the files whose covers can be changed (empty: view-only).
+    std::vector<std::vector<ActionTarget>> action_targets_;
+    // Per inventory row: one copy of its image, to copy or export.
     std::vector<ActionTarget> copy_targets_;
+    // The files covers can be added to; the rest are skipped (ADR-0348).
+    std::unordered_set<std::string> writable_sources_;
     ArtworkWritePlanApplierFactory applier_factory_;
     FileWorkTools tools_;
     ArtworkApplyObserver apply_observer_;
@@ -273,7 +278,6 @@ class ArtworkSession final : public QObject, public TaggerArtwork {
     std::size_t generation_{0U};
     std::size_t job_generation_{0U};
     std::size_t displayed_generation_{0U};
-    bool source_limit_exceeded_{false};
     bool active_{false};
     bool job_running_{false};
     bool plan_running_{false};

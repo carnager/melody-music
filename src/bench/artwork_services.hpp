@@ -29,8 +29,6 @@ struct ArtworkApplyProgressState {
     std::size_t completed_sources{0U};
 };
 
-inline constexpr std::size_t metadata_artwork_source_limit = 64U;
-
 struct MetadataArtworkScopeSource {
     std::string raw_path;
     std::optional<core::LocalSourceRevision> captured_revision;

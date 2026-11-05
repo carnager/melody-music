@@ -528,7 +528,7 @@ void BenchMainWindowTest::metadataRetrySkipsSavedFiles() {
     sections->setCurrentIndex(1);
     auto* covers = dialog->findChild<QTableView*>(QStringLiteral("bench-metadata-artwork-items"));
     QVERIFY(covers != nullptr);
-    QTRY_COMPARE(covers->model()->rowCount(), 2);
+    QTRY_COMPARE(covers->model()->rowCount(), 1); // ADR-0348: one cover, one row
     covers->selectAll();
     auto* remove = dialog->findChild<QPushButton*>(QStringLiteral("bench-metadata-artwork-remove"));
     QVERIFY(remove != nullptr);

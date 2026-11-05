@@ -560,6 +560,7 @@ class BenchMainWindowTest final : public QObject {
     void metadataPropertiesFileSelectionDrivesIndividualAndBulkEdits();
     void metadataFieldReviewPreservesDraftAndSelectionScope();
     void metadataPropertiesArtworkSectionShowsProvenanceAndCapabilities();
+    void artworkOfAWholeReleaseIsOneRowAndSkipsFilesWithoutCovers();
     void metadataPropertiesArtworkRemoveReviewsAppliesAndRefreshes_data();
     void metadataPropertiesArtworkRemoveReviewsAppliesAndRefreshes();
     void cueSheetsExpandIntoPersistentSegmentRows();

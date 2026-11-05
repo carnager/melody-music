@@ -38,9 +38,8 @@ class MetadataArtworkSection final : public QWidget {
     void pasteFrontCover(const QImage& image) { session_->pasteFrontCover(image); }
     void removeFrontCover() { session_->removeFrontCover(); }
     void refreshStoragePolicy() { session_->refreshStoragePolicy(); }
-    void setScope(std::vector<MetadataArtworkScopeSource> sources,
-                  bool source_limit_exceeded = false) {
-        session_->setScope(std::move(sources), source_limit_exceeded);
+    void setScope(std::vector<MetadataArtworkScopeSource> sources) {
+        session_->setScope(std::move(sources));
     }
     void setActive(bool active) { session_->setActive(active); }
     // ADR-0237: where the section reads, resizes and hands over artwork --

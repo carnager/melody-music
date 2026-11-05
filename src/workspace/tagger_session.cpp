@@ -1119,12 +1119,9 @@ void TaggerSession::updateArtworkScope(const std::span<const std::size_t> select
         return;
     }
     std::vector<MetadataArtworkScopeSource> scope;
-    const auto bounded_source_capacity =
-        std::min(selected_items.size(), metadata_artwork_source_limit + 1U);
-    scope.reserve(bounded_source_capacity);
+    scope.reserve(selected_items.size());
     std::unordered_map<std::string_view, std::size_t> source_positions;
-    source_positions.reserve(bounded_source_capacity);
-    bool source_limit_exceeded = false;
+    source_positions.reserve(selected_items.size());
     for (const auto item_index : selected_items) {
         const auto& source = grid_model_->selection().source(item_index);
         const auto [position, inserted] = source_positions.emplace(source.raw_path, scope.size());
@@ -1147,12 +1144,8 @@ void TaggerSession::updateArtworkScope(const std::span<const std::size_t> select
             .occurrence_count = 1U,
             .captured_revision_consistent = true,
         });
-        if (scope.size() > metadata_artwork_source_limit) {
-            source_limit_exceeded = true;
-            break;
-        }
     }
-    artwork_->setScope(std::move(scope), source_limit_exceeded);
+    artwork_->setScope(std::move(scope));
 
     // Cover fetching needs one unambiguous release: every selected file must
     // carry the same MUSICBRAINZ_ALBUMID, draft or embedded — so an Identify

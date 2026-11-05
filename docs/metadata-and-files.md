@@ -668,8 +668,9 @@ write; export, copy, and every non-FLAC embedded mapping remain unqualified.
 **Artwork** beneath the same file selector; the selected rows remain the sole
 scope for either section. Artwork inventory begins only while its section is
 active, collapses repeated logical occurrences by exact raw media path, and
-runs sequentially on one cancellable worker. A scope above 64 physical sources
-is rejected visibly rather than partially inventoried. Source rows expose
+runs sequentially on one cancellable worker. Any number of files is read;
+ADR-0348 removed the earlier 64-source limit and shows one row per distinct
+image. Source rows expose
 embedded and exact-sibling read capability, then-unavailable change capability, and
 captured-versus-observed revision state. Inventory and issue rows expose the
 complete typed ADR-0076 evidence without decoding pixels. The presentation is
