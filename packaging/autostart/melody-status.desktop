@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-only
+[Desktop Entry]
+Type=Application
+Name=Melody Engine Status
+Comment=Show melodyd status, restart its service, and rescan its library
+Exec=melody-status
+Icon=melody-symbolic
+Terminal=false
+NoDisplay=false
+Hidden=true

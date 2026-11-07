@@ -55,6 +55,8 @@ struct Settings {
     // ADR-0322: the library's folders watched for changes, as MPD's
     // auto_update; `watch = no` leaves them to Refresh.
     bool watch_library = true;
+    bool status_icon = false;
+    std::string status_service;
     std::string upnp_interface;
     std::string password;
     std::string password_file;

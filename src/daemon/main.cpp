@@ -11,6 +11,7 @@
 #include "agent/speaker_arbiter.hpp"
 #include "config_methods.hpp"
 #include "settings.hpp"
+#include "status_launcher.hpp"
 #include "trackknife/core/posix.hpp"
 #include "trackknife/core/stable_id.hpp"
 #include "trackknife/discovery/mdns.hpp"
@@ -229,6 +230,9 @@ void usage() {
         << "  --socket PATH  where to listen (default $XDG_RUNTIME_DIR/melodyd.sock)\n"
         << "  --state DIR    where the database lives (default $MELODY_STATE_DIR, else\n"
         << "                 $XDG_DATA_HOME/melody/engine)\n"
+        << "  --status-icon  show the optional melody-status menu-bar/tray companion\n"
+        << "  --status-service NAME\n"
+        << "                 service to restart: LaunchAgent label on macOS, user unit on Linux\n"
         << "  --music-root DIR\n"
         << "                 where the music is: output agents with their own copy are\n"
         << "                 sent paths relative to it (ADR-0228)\n"
@@ -1143,6 +1147,9 @@ int main(int argc, char** argv) {
         trackknife::engine::tidy_undo_copies(database, left_undo_copies, token);
     }};
 
+    if (settings.status_icon) {
+        trackknife::daemon::launch_status_icon(argv[0], socket_path, settings.status_service);
+    }
     wait_for_stop();
 
     tidying_stopped.request_cancellation();

@@ -44,6 +44,11 @@ option(MELODY_BUILD_WATCH "Build the Linux inotify melody-watch utility"
 # melody-cli alone: it needs the protocol and discovery, not the media
 # libraries, so a package of just the CLI builds in seconds.
 option(MELODY_CLI_ONLY "Build only melody-cli, without the media libraries" OFF)
+set(MELODY_STATUS_DEFAULT ${MELODY_BUILD_UI})
+if(MELODY_CLI_ONLY)
+    set(MELODY_STATUS_DEFAULT OFF)
+endif()
+option(MELODY_BUILD_STATUS_ICON "Build the optional melodyd menu-bar/tray companion" ${MELODY_STATUS_DEFAULT})
 
 # Linking is most of an incremental Debug build: about a hundred test binaries
 # each link the libraries whole, and lld does each about nine times faster
@@ -155,6 +160,11 @@ if(MELODY_CLI_ONLY)
     # ADR-0286: melodyd.conf's settings, which melody-cli config checks by.
     add_subdirectory(src/daemon)
     add_subdirectory(src/cli)
+    if(MELODY_BUILD_STATUS_ICON)
+        find_package(Qt6 6.4 REQUIRED COMPONENTS Concurrent Network Svg Widgets)
+        qt_standard_project_setup()
+        add_subdirectory(src/status)
+    endif()
     if(MELODY_BUILD_WATCH)
         add_subdirectory(src/watch)
     endif()
@@ -193,6 +203,13 @@ endif()
 # Always: the engine builds AcoustID requests with its Qt-free core
 # (ADR-0237); its Qt client comes with the UI.
 add_subdirectory(src/musicbrainz)
+if(MELODY_BUILD_STATUS_ICON)
+    if(NOT MELODY_BUILD_UI)
+        find_package(Qt6 6.4 REQUIRED COMPONENTS Concurrent Network Svg Widgets)
+        qt_standard_project_setup()
+    endif()
+    add_subdirectory(src/status)
+endif()
 if(MELODY_BUILD_UI)
     add_subdirectory(src/workspace)
     add_subdirectory(src/uicommon)

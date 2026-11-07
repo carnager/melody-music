@@ -295,9 +295,9 @@ void theSkeletonHolds() {
         }
         CHECK(taken.has_value());
     }
-    // Every key has its example: the 18 of the file and the 7 of an
+    // Every key has its example: the 20 of the file and the 7 of an
     // [engine]. A key added to melodyd and not here fails this.
-    CHECK(examples == 25U);
+    CHECK(examples == 27U);
 }
 
 } // namespace
@@ -308,6 +308,19 @@ int main() {
     std::filesystem::create_directories(root);
     ::unsetenv("MELODYD_CONFIG");
     flagsAlone();
+    const auto icon_config =
+        file("status-icon.conf", "status-icon = yes\nstatus-service = com.example.melodyd\n");
+    const auto icon = settings_of(icon_config);
+    CHECK(icon && icon->status_icon && icon->status_service == "com.example.melodyd");
+    const std::vector<std::string_view> no_icon{"--config", icon_config.native(),
+                                                "--no-status-icon"};
+    const auto disabled_icon = read_settings(no_icon, {});
+    CHECK(disabled_icon && !disabled_icon->status_icon);
+    const std::vector<std::string_view> with_icon{"--config", icon_config.native(), "--status-icon",
+                                                  "--status-service", "org.example.engine"};
+    const auto enabled_icon = read_settings(with_icon, {});
+    CHECK(enabled_icon && enabled_icon->status_icon &&
+          enabled_icon->status_service == "org.example.engine");
     theFileAndFlagsOverIt();
     refusesWithTheLine();
     whichFile();

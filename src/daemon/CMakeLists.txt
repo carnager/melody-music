@@ -26,7 +26,7 @@ if(MELODY_CLI_ONLY)
     return()
 endif()
 
-add_executable(trackknife_engine_daemon main.cpp config_methods.cpp)
+add_executable(trackknife_engine_daemon main.cpp config_methods.cpp status_launcher.cpp)
 target_link_libraries(
     trackknife_engine_daemon
     PRIVATE trackknife_daemon_settings Trackknife::Agent Trackknife::Engine Trackknife::Protocol Trackknife::Core Threads::Threads

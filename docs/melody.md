@@ -26,6 +26,65 @@ Every connection over the network gives the engine's password. Use one
 password for all your engines and agents: an engine playing for another, or
 lending its speakers with `--agent`, uses its own unless told otherwise.
 
+## Optional menu-bar or system-tray icon
+
+`melody-status` shows whether this computer's engine is responding, with
+**Rescan Library**, **Restart melodyd**, and **Quit Status Icon** in its menu.
+Right-click the icon on Linux; the Mac menu opens on either click. The icon
+stays visible but dimmed when the engine cannot be reached. Quitting the icon
+leaves melodyd running. Rescan reports progress and incomplete/error outcomes;
+restarting may briefly interrupt this engine's playback.
+
+Run it at a desktop login, pointing it at the same local socket as melodyd:
+
+```sh
+# macOS: use the Label in your melodyd LaunchAgent plist.
+melody-status --socket "$TMPDIR/melodyd.sock" --service org.melody.melodyd
+# Linux: defaults to $XDG_RUNTIME_DIR/melodyd.sock and melodyd.service.
+melody-status
+```
+
+On macOS the icon is a monochrome system template derived from Melody's SVG.
+`--service` is required for Restart on Mac; it names a LaunchAgent in the
+logged-in user's GUI session. Linux uses `systemctl --user restart`, with
+`--service other.service` for a different unit. Neither command launches an
+unmanaged duplicate engine. A failed restart is shown in the menu.
+
+Alternatively, ask melodyd to launch the icon when it starts:
+
+```ini
+status-icon = yes
+status-service = org.melody.melodyd
+```
+
+The equivalent flags are `--status-icon --status-service NAME`; disable with
+`--no-status-icon`. `melody-status` must be installed beside melodyd or on its
+PATH (the build-tree sibling is also found). A desktop session must already
+exist; an engine launched at boot should use a separate login item instead.
+A separate login icon survives an engine restart. Service managers may restart
+an engine-launched icon alongside the engine. Duplicate starts on the same
+socket exit.
+
+Build with `-DMELODY_BUILD_STATUS_ICON=ON`, enabled by default in desktop
+builds. Headless builds need no Qt when it is OFF. A small status-only build
+without media libraries is also supported:
+
+```sh
+cmake -S . -B build/status -DMELODY_CLI_ONLY=ON -DMELODY_BUILD_UI=OFF \
+  -DMELODY_BUILD_STATUS_ICON=ON -DBUILD_TESTING=OFF
+cmake --build build/status --target melody_status
+cmake --install build/status --component status-icon
+```
+
+For Linux autostart, copy the supplied `melody-status.desktop` to
+`~/.config/autostart/` and change `Hidden=true` to `Hidden=false` (or use your
+desktop's startup settings). The system tray must be supported/enabled by
+your shell. On macOS copy the supplied `org.melody.status.plist` from
+`share/melody` to `~/Library/LaunchAgents/`, set its executable path and engine
+service label, and load it with `launchctl bootstrap gui/$(id -u) PATH`.
+The supplied file runs only in an Aqua login. The companion uses only the
+local socket and needs no network password.
+
 ## Headless melodyd
 
 On a desktop the engine is a user service too, started the first time

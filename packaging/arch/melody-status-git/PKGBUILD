@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Optional desktop status for a headless melodyd; no media libraries.
+pkgname=melody-status-git
+pkgver=r1
+pkgrel=1
+pkgdesc='Melody engine menu-bar/system-tray status, service restart and library rescan'
+arch=(x86_64 aarch64)
+url='https://github.com/carnager/melody-music'
+license=(GPL-3.0-only)
+depends=(qt6-base qt6-svg libutf8proc)
+makedepends=(cmake git ninja nlohmann-json sqlite)
+optdepends=('melodyd-git: local engine to monitor and control')
+provides=(melody-status)
+conflicts=(melody-status)
+source=("melody-music::git+https://github.com/carnager/melody-music.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd melody-music
+  printf 'r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cmake -S melody-music -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr -DMELODY_CLI_ONLY=ON -DMELODY_BUILD_UI=OFF \
+    -DMELODY_BUILD_STATUS_ICON=ON -DBUILD_TESTING=OFF -DMELODY_WARNINGS_AS_ERRORS=OFF
+  cmake --build build --target melody_status
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build --component status-icon
+  install -Dm644 melody-music/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

@@ -2,6 +2,9 @@
 
 ## Using Melody
 
+- [Engine status icon](melody.md#optional-menu-bar-or-system-tray-icon): running status,
+  service restart, and library rescan ([ADR-0349](adr/0349-optional-engine-status-icon.md)).
+
 - [Installation](install.md) and [setup](setup.md).
 - [Engines, agents and the phone](melody.md): how they connect, a headless
   `melodyd`, and `melody-cli`.
