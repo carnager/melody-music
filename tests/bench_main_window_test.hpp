@@ -335,6 +335,7 @@ class BenchMainWindowTest final : public QObject {
     void commandPaletteTracksAvailabilityAndLifetime();
     void commandPaletteOffersEveryMenuEntry();
     void commandPaletteHidesWhatAGreyedMenuHolds();
+    void locateCommandsUseCurrentSelectionAndShortcuts();
     void localListeningColumnsLoadRefreshAndRespectAuthority();
     void shortcutSettingsValidateSaveAndCancel();
     void everyCommandTakesAKeyAndCtrlLSearchesTheLibrary();

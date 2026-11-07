@@ -1406,6 +1406,120 @@ void BenchMainWindowTest::transportIsOneRowWithCoverAndPills() {
     QCOMPARE(up_next->accessibleName(), QStringLiteral("Up Next"));
 }
 
+void BenchMainWindowTest::locateCommandsUseCurrentSelectionAndShortcuts() {
+    QTemporaryDir media;
+    QVERIFY(media.isValid());
+    const auto path = media.filePath(QStringLiteral("art.flac"));
+    QVERIFY(materialize_audio_fixture(QStringLiteral("art-tone-flac.b64"), path));
+    BenchMainWindow window;
+    window.show();
+    QTRY_VERIFY(window.lists_restored_);
+    {
+        auto catalogue = window.localCatalogue()->open();
+        QVERIFY(catalogue->add_root(QFile::encodeName(media.path()).toStdString()).has_value());
+        persistence::LibraryScanProgress progress;
+        QVERIFY(catalogue->scan({}, progress).has_value());
+    }
+    auto* panel = window.localLibrary();
+    QVERIFY(panel != nullptr);
+    panel->refreshLibrary();
+    auto* tree = panel->findChild<QTreeView*>();
+    QVERIFY(tree != nullptr);
+    auto* tab = window.currentListTab();
+    QVERIFY(tab != nullptr);
+    LocalTrackRow indexed;
+    indexed.raw_path = QFile::encodeName(path).toStdString();
+    indexed.probed = true;
+    auto missing = indexed;
+    missing.raw_path = media.filePath(QStringLiteral("not-indexed.flac")).toStdString();
+    tab->model->replaceRows({indexed, missing}, true);
+
+    auto* album = window.findChild<QAction*>(QStringLiteral("action-local-locate-album"));
+    auto* artist = window.findChild<QAction*>(QStringLiteral("action-local-locate-artist"));
+    QVERIFY(album != nullptr && artist != nullptr);
+    QVERIFY(album->shortcut().isEmpty() && artist->shortcut().isEmpty());
+    QVERIFY(!album->isEnabled() && !artist->isEnabled());
+    window.findChild<QAction*>(QStringLiteral("action-command-palette"))->trigger();
+    auto* palette = window.findChild<ui::CommandPalette*>();
+    QVERIFY(palette != nullptr);
+    auto* filter = palette->findChild<QLineEdit*>(QStringLiteral("command-filter"));
+    auto* results = palette->findChild<QListWidget*>(QStringLiteral("command-results"));
+    filter->setText(QStringLiteral("locate"));
+    QCOMPARE(results->count(), 0);
+    tab->view->setCurrentIndex(tab->model->index(0, local_title_column));
+    tab->view->selectRow(0);
+    QCOMPARE(results->count(), 2);
+    filter->setText(QStringLiteral("locate album"));
+    QCOMPARE(results->count(), 1);
+    palette->findChild<QPushButton*>(QStringLiteral("command-run"))->click();
+    QTRY_VERIFY(tree->currentIndex().isValid());
+    const auto album_label = tree->currentIndex().data().toString();
+    // No context menu was opened, and the library is brought forward, not Playlists.
+    QCOMPARE(window.local_source_tabs_->currentIndex(), 0);
+    QCOMPARE(window.source_stack_->currentWidget(), panel);
+
+    auto* settings = window.showSettingsDialog(SettingsDialog::Page::shortcuts);
+    auto* album_key = settings->findChild<QKeySequenceEdit*>(
+        QStringLiteral("shortcut-action-local-locate-album"));
+    auto* artist_key = settings->findChild<QKeySequenceEdit*>(
+        QStringLiteral("shortcut-action-local-locate-artist"));
+    QVERIFY(album_key != nullptr && artist_key != nullptr);
+    album_key->setKeySequence(QKeySequence(QStringLiteral("F9")));
+    artist_key->setKeySequence(QKeySequence(QStringLiteral("F8")));
+    settings->findChild<QDialogButtonBox*>(QStringLiteral("bench-settings-buttons"))
+        ->button(QDialogButtonBox::Save)
+        ->click();
+    QCOMPARE(album->shortcut(), QKeySequence(QStringLiteral("F9")));
+    QCOMPARE(artist->shortcut(), QKeySequence(QStringLiteral("F8")));
+    QCOMPARE(QSettings{}.value(QStringLiteral("shortcuts/action-local-locate-artist")).toString(),
+             QStringLiteral("F8"));
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    window.activateWindow();
+    QVERIFY(QTest::qWaitForWindowActive(&window));
+    // Applying view settings rebuilds the selection model.
+    tab->view->setCurrentIndex(tab->model->index(0, local_title_column));
+    tab->view->selectRow(0);
+    tab->view->setFocus();
+    QTRY_VERIFY(tab->view->hasFocus());
+    QVERIFY(artist->isEnabled());
+    QVERIFY(album->isEnabled());
+    QSignalSpy artist_invoked{artist, &QAction::triggered};
+    QTest::keyClick(tab->view, Qt::Key_F8);
+    QTRY_COMPARE(artist_invoked.count(), 1);
+    QTRY_VERIFY(tree->currentIndex().isValid() &&
+                tree->currentIndex().data().toString() != album_label);
+    // The same command resolves the new current row, not the old menu's captured path.
+    tab->view->setCurrentIndex(tab->model->index(1, local_title_column));
+    tab->view->selectRow(1);
+    QTest::keyClick(tab->view, Qt::Key_F9);
+    auto* status = panel->findChild<QLabel*>(QStringLiteral("local-library-status"));
+    QTRY_VERIFY(status->text().contains(QStringLiteral("not in the local library")));
+    tab->view->setCurrentIndex(tab->model->index(0, local_title_column));
+    tab->view->selectRow(0);
+    QTest::keyClick(tab->view, Qt::Key_F9);
+    QTRY_COMPARE(tree->currentIndex().data().toString(), album_label);
+    QCOMPARE(tab->model->rowCount(), 2);
+
+    tab->view->clearSelection();
+    QVERIFY(!album->isEnabled() && !artist->isEnabled());
+    tab->view->selectRow(0);
+    QVERIFY(album->isEnabled() && artist->isEnabled());
+    window.localEngine().library = nullptr;
+    window.refreshSelectionActions();
+    QVERIFY(!album->isEnabled() && !artist->isEnabled());
+    window.localEngine().library = panel;
+    window.refreshSelectionActions();
+    {
+        BenchMainWindow reopened;
+        QCOMPARE(
+            reopened.findChild<QAction*>(QStringLiteral("action-local-locate-album"))->shortcut(),
+            QKeySequence(QStringLiteral("F9")));
+        QCOMPARE(
+            reopened.findChild<QAction*>(QStringLiteral("action-local-locate-artist"))->shortcut(),
+            QKeySequence(QStringLiteral("F8")));
+    }
+}
+
 void BenchMainWindowTest::shortcutSettingsValidateSaveAndCancel() {
     QSettings{}.remove(QStringLiteral("shortcuts"));
     BenchMainWindow window;

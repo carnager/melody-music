@@ -1523,7 +1523,7 @@ void LocalLibraryTest::cachedSearchTabsLoadCovers() {
     QSettings{}.clear();
     // ADR-0226: the window's library is an engine's, on the window's data.
     testing::TestEngine engine;
-    QVERIFY2(engine.start(), engine.log().constData());
+    QVERIFY2(engine.start(temporary.path().toStdString()), engine.log().constData());
     const auto root = std::filesystem::path{temporary.path().toStdString()} / "music";
     QVERIFY(!fixture(root, "01.flac").empty());
     QVERIFY(!fixture(root, "02.flac").empty());
@@ -1536,8 +1536,7 @@ void LocalLibraryTest::cachedSearchTabsLoadCovers() {
         QTRY_VERIFY(window.findChild<LocalLibraryPanel*>() != nullptr);
         auto* panel = window.findChild<LocalLibraryPanel*>();
         panel->addRoot(root.native());
-        QTRY_COMPARE(panel->findChild<QLabel*>(QStringLiteral("local-library-status"))->text(),
-                     QStringLiteral("Folder added. Press Refresh to scan for music."));
+        QTRY_COMPARE(panel->browser().rootList().size(), std::size_t{1});
         panel->findChild<QToolButton*>(QStringLiteral("local-library-scan"))->click();
         QTRY_VERIFY(!panel->property("scanning").toBool());
         auto* tabs = window.findChild<QTabWidget*>(QStringLiteral("bench-tabs"));
@@ -1581,16 +1580,17 @@ void LocalLibraryTest::cachedSearchTabsLoadCovers() {
             auto* menu = window.findChild<QMenu*>(QStringLiteral("bench-track-context-menu"));
             QVERIFY(menu);
             auto* locate =
-                menu->findChild<QAction*>(album ? QStringLiteral("action-local-locate-album")
-                                                : QStringLiteral("action-local-locate-artist"));
+                window.findChild<QAction*>(album ? QStringLiteral("action-local-locate-album")
+                                                 : QStringLiteral("action-local-locate-artist"));
             QVERIFY(locate && locate->isEnabled());
+            QVERIFY(menu->actions().contains(locate));
             locate->trigger();
             menu->close();
             QTRY_VERIFY(tree->currentIndex().data().toString().contains(
                 album ? QStringLiteral("Test album") : QStringLiteral("Björk")));
             QCOMPARE(window.findChild<QTabBar*>(QStringLiteral("bench-local-source-tabs"))
                          ->currentIndex(),
-                     1);
+                     0);
             QCOMPARE(model->rowCount(), 2);
             QVERIFY(!panel->property("scanning").toBool());
         }

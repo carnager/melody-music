@@ -603,6 +603,12 @@ bindings disable a shortcut. Duplicate and chord-prefix conflicts are
 rejected; `Ctrl+L` is an ordinary binding like the others.
 These are application shortcuts, not desktop-wide hotkeys.
 
+**Workspace → Locate album / Locate artist** finds the current selected list
+track in its engine's library and brings that library forward. These commands
+are also in the command palette and the track context menu. They have no default
+keys; assign them in Settings → Shortcuts. They are unavailable without a selected
+track or when that track's library is not available.
+
 | Action | Default |
 | --- | --- |
 | Play / Pause | Space |

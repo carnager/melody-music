@@ -689,6 +689,7 @@ void BenchMainWindow::refreshActiveContext() {
     if (seek_ != nullptr) {
         refreshTransport();
     }
+    refreshSelectionActions();
 }
 
 bool BenchMainWindow::transferRows(QTableView* source, const QVariantList& rows,
@@ -1174,37 +1175,9 @@ void BenchMainWindow::showTrackContextMenu(QTableView* view, const QPoint& posit
             });
     }
     if (source_tab != nullptr && target.row() < source_tab->model->rowCount()) {
-        const auto path =
-            source_tab->model->rows()[static_cast<std::size_t>(target.row())].raw_path;
         track_context_menu_->addSeparator();
-        // Found in the library of the engine the tab plays on: a remote
-        // tab's file is in the remote's library, which also shows it.
-        const auto engine = EngineKey::of(source_tab->document);
-        auto* library = libraryOf(engine);
-        const bool available = library != nullptr && (!engine.isLocal() || localLibraryShown());
-        for (const bool album : {false, true}) {
-            auto* locate = track_context_menu_->addAction(album ? QStringLiteral("Locate album")
-                                                                : QStringLiteral("Locate artist"));
-            locate->setObjectName(album ? QStringLiteral("action-local-locate-album")
-                                        : QStringLiteral("action-local-locate-artist"));
-            locate->setEnabled(available);
-            connect(locate, &QAction::triggered, this, [this, path, album, engine] {
-                auto* finder = libraryOf(engine);
-                if (finder == nullptr)
-                    return;
-                // The sidebar's tab for that engine's library.
-                int source = 1;
-                for (int index = 0; !engine.isLocal() && index < local_source_tabs_->count();
-                     ++index) {
-                    if (local_source_tabs_->tabData(index).toString() == engine.text()) {
-                        source = index;
-                    }
-                }
-                local_source_tabs_->setCurrentIndex(source);
-                refreshActiveContext();
-                finder->locatePath(path, album);
-            });
-        }
+        track_context_menu_->addAction(locate_artist_action_);
+        track_context_menu_->addAction(locate_album_action_);
     }
     addLocalRateMenus(view, source_tab);
     track_context_menu_->addSeparator();
@@ -1410,6 +1383,39 @@ void BenchMainWindow::playCurrentRow() {
     if (tab != nullptr && tab->view->currentIndex().isValid()) {
         playRow(*tab, tab->view->currentIndex().row());
     }
+}
+
+void BenchMainWindow::locateSelectedTrack(const bool album) {
+    const auto* tab = currentListTab();
+    if (tab == nullptr || !tab->view->currentIndex().isValid() ||
+        tab->view->selectionModel()->selectedRows().isEmpty()) {
+        return;
+    }
+    const auto row = tab->view->currentIndex().row();
+    if (row < 0 || row >= tab->model->rowCount()) {
+        return;
+    }
+    // Resolve the row at invocation, including when no context menu has opened.
+    // A remote tab's track belongs to that engine's library.
+    const auto engine = EngineKey::of(tab->document);
+    auto* finder = libraryOf(engine);
+    if (finder == nullptr || (engine.isLocal() && !localLibraryShown())) {
+        return;
+    }
+    const auto path = tab->model->rows()[static_cast<std::size_t>(row)].raw_path;
+    int source = engine.isLocal() ? 0 : -1;
+    for (int index = 0; !engine.isLocal() && index < local_source_tabs_->count(); ++index) {
+        if (local_source_tabs_->tabData(index).toString() == engine.text()) {
+            source = index;
+            break;
+        }
+    }
+    if (source < 0) {
+        return;
+    }
+    local_source_tabs_->setCurrentIndex(source);
+    refreshActiveContext();
+    finder->locatePath(path, album);
 }
 
 void BenchMainWindow::refreshListHistoryActions() {

@@ -642,7 +642,7 @@ QTableView* BenchMainWindow::activeTrackView() {
     return nullptr;
 }
 
-// Delete and Play are menubar actions, so their enabled state has to follow
+// Selection-driven commands are menubar actions, so their enabled state has to follow
 // the selection continuously — not only when a context menu happens to open.
 void BenchMainWindow::refreshSelectionActions() {
     auto* view = activeTrackView();
@@ -657,6 +657,16 @@ void BenchMainWindow::refreshSelectionActions() {
     }
     if (play_selected_action_ != nullptr) {
         play_selected_action_->setEnabled(view != nullptr && view->currentIndex().isValid());
+    }
+    const auto* tab = currentListTab();
+    const auto engine = tab != nullptr ? EngineKey::of(tab->document) : EngineKey::local();
+    const bool can_locate = has_selection && view->currentIndex().isValid() &&
+                            libraryOf(engine) != nullptr &&
+                            (!engine.isLocal() || localLibraryShown());
+    for (auto* action : {locate_album_action_, locate_artist_action_}) {
+        if (action != nullptr) {
+            action->setEnabled(can_locate);
+        }
     }
 }
 

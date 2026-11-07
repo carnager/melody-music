@@ -445,6 +445,18 @@ void BenchMainWindow::buildWorkspace() {
     jump_playing->setObjectName(QStringLiteral("action-jump-to-playing"));
     jump_playing->setShortcut(QKeySequence(QStringLiteral("Ctrl+J")));
     connect(jump_playing, &QAction::triggered, this, [this] { refreshPlaybackCursor(true); });
+    locate_album_action_ = workspace_menu->addAction(tr("Locate album"));
+    locate_album_action_->setObjectName(QStringLiteral("action-local-locate-album"));
+    locate_artist_action_ = workspace_menu->addAction(tr("Locate artist"));
+    locate_artist_action_->setObjectName(QStringLiteral("action-local-locate-artist"));
+    for (auto* action : {locate_album_action_, locate_artist_action_}) {
+        action->setEnabled(false);
+        action->setShortcutContext(Qt::WindowShortcut);
+        addAction(action);
+    }
+    connect(locate_album_action_, &QAction::triggered, this, [this] { locateSelectedTrack(true); });
+    connect(locate_artist_action_, &QAction::triggered, this,
+            [this] { locateSelectedTrack(false); });
     follow_playback_action_ = workspace_menu->addAction(tr("Cursor follows playback"));
     follow_playback_action_->setObjectName(QStringLiteral("action-follow-playback"));
     follow_playback_action_->setCheckable(true);

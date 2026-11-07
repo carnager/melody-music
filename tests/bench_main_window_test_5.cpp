@@ -916,16 +916,28 @@ void BenchMainWindowTest::locateFindsARemoteTracksAlbumInTheRemoteLibrary() {
     window.remoteLibrary()->refreshLibrary();
 
     auto* tree = window.remoteLibrary()->findChild<QTreeView*>();
+    tab->view->setCurrentIndex(tab->model->index(0, local_title_column));
+    tab->view->selectRow(0);
     for (const bool album : {true, false}) {
+        // These commands work before the context menu has ever been opened.
+        window.findChild<QAction*>(QStringLiteral("action-command-palette"))->trigger();
+        auto* palette = window.findChild<ui::CommandPalette*>();
+        palette->findChild<QLineEdit*>(QStringLiteral("command-filter"))
+            ->setText(album ? QStringLiteral("locate album") : QStringLiteral("locate artist"));
+        QCOMPARE(palette->findChild<QListWidget*>(QStringLiteral("command-results"))->count(), 1);
+        palette->findChild<QPushButton*>(QStringLiteral("command-run"))->click();
+        QTRY_VERIFY(
+            tree->currentIndex().data().toString().contains(album ? album_name : artist_name));
         const auto position =
             tab->view->visualRect(tab->model->index(0, local_title_column)).center();
         QVERIFY(QMetaObject::invokeMethod(tab->view, "customContextMenuRequested",
                                           Qt::DirectConnection, Q_ARG(QPoint, position)));
         auto* menu = window.findChild<QMenu*>(QStringLiteral("bench-track-context-menu"));
         auto* locate =
-            menu->findChild<QAction*>(album ? QStringLiteral("action-local-locate-album")
-                                            : QStringLiteral("action-local-locate-artist"));
+            window.findChild<QAction*>(album ? QStringLiteral("action-local-locate-album")
+                                             : QStringLiteral("action-local-locate-artist"));
         QVERIFY(locate != nullptr);
+        QVERIFY(menu->actions().contains(locate));
         QVERIFY2(locate->isEnabled(), "a remote tab's track is located in the remote's library");
         locate->trigger();
         menu->close();

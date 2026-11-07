@@ -592,6 +592,7 @@ class BenchMainWindow final : public QMainWindow, public WorkspaceView {
     void stopBackgroundWork();
     void refreshSelectionStatus() override;
     void refreshSelectionActions();
+    void locateSelectedTrack(bool album);
     [[nodiscard]] QTableView* activeTrackView();
     void showTrackViewHeaderMenu(QTableView* view, const QPoint& position);
 
@@ -780,6 +781,8 @@ class BenchMainWindow final : public QMainWindow, public WorkspaceView {
     QAction* rename_tab_action_{nullptr};
     QAction* close_tab_action_{nullptr};
     QAction* play_selected_action_{nullptr};
+    QAction* locate_album_action_{nullptr};
+    QAction* locate_artist_action_{nullptr};
     QAction* properties_action_{nullptr};
     QAction* convert_action_{nullptr};
     QAction* identify_action_{nullptr};
