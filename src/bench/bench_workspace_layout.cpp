@@ -643,6 +643,8 @@ void trackknife::bench::BenchMainWindow::chooseLibraryEngine(const QString& addr
 }
 
 void trackknife::bench::BenchMainWindow::showCommandPalette() {
+    // The cursor and connected engines may have changed since the last selection signal.
+    refreshSelectionActions();
     for (auto* existing : findChildren<ui::CommandPalette*>()) {
         if (existing->isVisible()) {
             existing->raise();

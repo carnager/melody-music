@@ -1446,8 +1446,14 @@ void BenchMainWindowTest::locateCommandsUseCurrentSelectionAndShortcuts() {
     auto* results = palette->findChild<QListWidget*>(QStringLiteral("command-results"));
     filter->setText(QStringLiteral("locate"));
     QCOMPARE(results->count(), 0);
-    tab->view->setCurrentIndex(tab->model->index(0, local_title_column));
-    tab->view->selectRow(0);
+    // A restored selection can arrive before its current index. Changing only
+    // that index must enable the commands without another selection signal.
+    const auto selected = tab->model->index(0, local_title_column);
+    tab->view->selectionModel()->select(selected, QItemSelectionModel::ClearAndSelect |
+                                                      QItemSelectionModel::Rows);
+    QVERIFY(!album->isEnabled() && !artist->isEnabled());
+    tab->view->selectionModel()->setCurrentIndex(selected, QItemSelectionModel::NoUpdate);
+    QVERIFY(album->isEnabled() && artist->isEnabled());
     QCOMPARE(results->count(), 2);
     filter->setText(QStringLiteral("locate album"));
     QCOMPARE(results->count(), 1);

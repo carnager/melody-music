@@ -383,6 +383,8 @@ void BenchMainWindow::listAdded(ListTab& added, const bool select) {
             [this](const QString& reason) { statusBar()->showMessage(reason, 5'000); });
     connect(view->selectionModel(), &QItemSelectionModel::selectionChanged, this,
             [this] { refreshSelectionStatus(); });
+    connect(view->selectionModel(), &QItemSelectionModel::currentChanged, this,
+            [this] { refreshSelectionActions(); });
     connect(model, &QAbstractItemModel::dataChanged, this, [this](const QModelIndex& first) {
         if (first.column() < local_play_count_column)
             refreshSelectionStatus();
