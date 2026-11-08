@@ -325,7 +325,12 @@ LibraryBrowser::LibraryBrowser(const CatalogueSource& catalogues, EngineKey engi
     // a folder they added does not appear. The source label keeps saying it
     // afterwards.
     if (catalogues_ != nullptr && !catalogues_->usingEngine()) {
-        QTimer::singleShot(0, this, [this] { setStatus(catalogues_->describe()); });
+        QTimer::singleShot(0, this, [this] {
+            if (!catalogues_->reachable()) {
+                unreachable_said_ = true;
+                setStatus(catalogues_->describe());
+            }
+        });
     }
 }
 
@@ -363,13 +368,29 @@ void LibraryBrowser::refreshSourceLabel() {
         catalogues_->usingEngine()
             ? tr("Folders, scanning, search and covers come from that engine.")
             : tr("Choose the engine holding the library in Settings → Engines. It is tried "
-                 "again on the next library action.");
+                 "again when it answers, and on the next library action.");
     if (described != source_ || shown != source_shown_ || tooltip != source_tooltip_) {
         source_ = described;
         source_shown_ = shown;
         source_tooltip_ = tooltip;
         emit sourceChanged();
     }
+    // Reached after all: the failure said in the status line is over.
+    if (!shown && std::exchange(unreachable_said_, false)) {
+        setStatus(QString{});
+    }
+}
+
+void LibraryBrowser::engineConnected() {
+    // A query on its way asks the engine itself, and says after.
+    if (stopped_ || querying_ || catalogues_ == nullptr || catalogues_->reachable()) {
+        return;
+    }
+    // What the last query ran into is in the status line until this one
+    // reaches the engine.
+    unreachable_said_ = true;
+    reload();
+    loadRoots();
 }
 
 void LibraryBrowser::stop() {

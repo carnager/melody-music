@@ -7,6 +7,7 @@
 // their library.
 
 #include "bench/catalogue_source.hpp"
+#include "bench/engine_playback.hpp"
 #include "bench/local_library_panel.hpp"
 #include "bench/search_dialog.hpp"
 #include "bench/settings_dialog.hpp"
@@ -48,6 +49,7 @@ class LibraryPanelEngineTest final : public QObject {
     void aConfiguredEngineServesThePanel();
     void everyPathReachesTheEngineNotTheDatabase();
     void anUnreachableEngineIsSaidAndThenReached();
+    void anEngineThatComesUpLaterIsReachedWithoutRefresh();
     void thePanelSaysWhichLibraryItIsShowing();
     void theSearchDialogAsksTheEngineToo();
     void aTcpEngineIsReachedWithItsToken();
@@ -580,6 +582,56 @@ void LibraryPanelEngineTest::anUnreachableEngineIsSaidAndThenReached() {
     panel.refreshLibrary();
     QTRY_VERIFY(source->text().contains(QStringLiteral("engine at")));
 
+    (*server)->stop();
+}
+
+// An engine that was not there when the window opened -- the network not up
+// yet at login, or the engine restarting for an update -- is asked again when
+// the window's connection to it comes back: nobody has to press Refresh,
+// which would scan.
+void LibraryPanelEngineTest::anEngineThatComesUpLaterIsReachedWithoutRefresh() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const std::filesystem::path database{
+        (directory.path() + QStringLiteral("/library.sqlite3")).toStdString()};
+    const auto socket_text = directory.path() + QStringLiteral("/later-engine.sock");
+
+    QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_socket_key), socket_text);
+
+    CatalogueSource catalogues{database, CatalogueSource::Role::remote};
+    LocalLibraryPanel panel{catalogues};
+    // The window's connection to the same engine, which reconnects by itself.
+    EnginePlayback playback{catalogues};
+    QObject::connect(&playback, &EnginePlayback::connected, &panel.browser(),
+                     &LibraryBrowser::engineConnected);
+    panel.show();
+    auto* status = panel.findChild<QLabel*>(QStringLiteral("local-library-status"));
+    QVERIFY(status != nullptr);
+    auto* source = panel.findChild<QLabel*>(QStringLiteral("local-library-source"));
+    QVERIFY(source != nullptr);
+    // The panel's own first queries have run into it, and said so.
+    QTRY_VERIFY(!catalogues.failure().isEmpty());
+    QTRY_VERIFY(source->text().contains(QStringLiteral("unreachable")));
+    QTRY_VERIFY(status->text().contains(QStringLiteral("unreachable")) ||
+                status->text().contains(QStringLiteral("no engine")));
+    QTest::qWait(300); // Nothing still on its way that would ask again.
+
+    engine::LocalCatalogue catalogue{database};
+    QVERIFY(catalogue.prepare().has_value());
+    protocol::Dispatcher dispatcher;
+    engine::register_catalogue_methods(dispatcher, catalogue);
+    auto server = engine::Server::listen(socket_text.toStdString(), dispatcher);
+    QVERIFY(server.has_value());
+    (*server)->start();
+
+    // Not "engine at": "the engine at ... is unreachable" has it too.
+    QTRY_VERIFY_WITH_TIMEOUT(source->text().startsWith(QStringLiteral("Library: ")), 10000);
+    QVERIFY(catalogues.usingEngine());
+    // The failure is no longer said once it is over.
+    QTRY_VERIFY(!status->text().contains(QStringLiteral("unreachable")) &&
+                !status->text().contains(QStringLiteral("no engine")));
+
+    playback.retire();
     (*server)->stop();
 }
 

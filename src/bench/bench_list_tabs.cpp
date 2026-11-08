@@ -97,6 +97,13 @@ void BenchMainWindow::workspaceRestored(const bool restored) {
                 [this] { showSettingsDialog(SettingsDialog::Page::engine); });
         source_stack_->addWidget(localLibrary());
         workspace_.attachLibrary(&localLibrary()->browser());
+        // An engine not answering when the window opened -- the network not
+        // up yet, or the engine restarting for an update -- is asked again
+        // when it connects, without a Refresh, which would scan.
+        if (localPlayback() != nullptr) {
+            connect(localPlayback(), &EnginePlayback::connected, &localLibrary()->browser(),
+                    &LibraryBrowser::engineConnected);
+        }
         // "Add to list": this computer's lists, in tab order.
         localLibrary()->setListTargets([this] { return listTargets(EngineKey::local()); });
         addLibraryPluginActions(localLibrary(), EngineKey::local());

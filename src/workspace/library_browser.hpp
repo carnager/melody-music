@@ -140,6 +140,10 @@ class LibraryBrowser final : public QObject {
     // what is open stays open, the current row and the scroll stay.
     void applyChanges(const std::vector<std::string>& albums, bool everything);
     Q_INVOKABLE void reload();
+    // The engine holding this library connected -- at startup, or again
+    // after it restarted or the network came back. One that could not be
+    // reached is asked again now, rather than on the next library action.
+    void engineConnected();
     Q_INVOKABLE void toggleScan();
     void startScan();
     void stop();
@@ -318,6 +322,9 @@ class LibraryBrowser final : public QObject {
     // How long the refresh after a change took, for --debug.
     QElapsedTimer elapsed_refresh_;
     QString status_;
+    // The status line says the engine could not be reached: taken back once
+    // it is.
+    bool unreachable_said_{false};
     QString query_error_;
     QString source_;
     QString source_tooltip_;
