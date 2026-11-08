@@ -134,9 +134,13 @@ int main(int argc, char** argv) {
     QApplication::setOrganizationName(QStringLiteral("melody"));
     QApplication::setApplicationName(QStringLiteral("melody"));
     QApplication::setApplicationDisplayName(QStringLiteral("Melody"));
-    // ADR-0287: the vinyl bird, the icon theme's when it has one.
+    // ADR-0287: the vinyl bird, the icon theme's when it has one. Not on
+    // macOS: there the window icon is the Dock's, and it would replace the
+    // app bundle's own icon for as long as Melody runs.
+#ifndef Q_OS_MACOS
     QApplication::setWindowIcon(
         QIcon::fromTheme(QStringLiteral("melody"), QIcon{QStringLiteral(":/melody/melody.svg")}));
+#endif
     QApplication::setDesktopFileName(QStringLiteral("melody"));
 
     // QA hook: --screenshot <file.png> renders the workspace, grabs it once
