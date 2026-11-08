@@ -1114,6 +1114,46 @@ void an_agents_sink_is_not_kept_as_this_machines(const std::filesystem::path& di
     std::filesystem::remove(database, ignored);
 }
 
+// A restart restores the queue paused where it was. An output chosen before
+// the one restored to has the track -- the server's own audio still opening
+// the file on a NAS when its UPnP speaker is found, or no output at all yet
+// -- takes it up there, not at the beginning of the song.
+void a_restored_place_survives_the_output_chosen_after_it() {
+    const std::vector<engine::QueueEntry> entries{entry("/music/long.flac")};
+    engine::Player::Persisted state;
+    state.queue = entries;
+    state.entry = entries[0].entry_id;
+    state.position_ms = 345'000;
+    state.revision = core::LocalSourceRevision{.device = 1U, .inode = 2U, .size = 3U};
+    {
+        auto player = engine::Player::create_without_audio();
+        require(!player->restore(state), "with no output, nothing is restored to");
+        RecordingAudition speaker;
+        require(player->set_output(&speaker).has_value(), "a speaker is chosen later");
+        require(speaker.snapshot().raw_path == "/music/long.flac" &&
+                    speaker.snapshot().position_sample == 345'000,
+                "and takes the track up where the restart left it");
+    }
+    {
+        auto player = engine::Player::create_without_audio();
+        RecordingAudition own;
+        own.defer_loads(true);
+        require(player->set_output(&own).has_value(), "this machine's own audio");
+        require(player->restore(state), "is restored to, and opens the file meanwhile");
+        RecordingAudition speaker;
+        require(player->set_output(&speaker).has_value(), "a speaker found meanwhile is chosen");
+        require(speaker.snapshot().position_sample == 345'000 &&
+                    speaker.snapshot().state == audio::LocalAuditionState::paused,
+                "and takes the track up there, paused");
+        require(player->set_output(&own).has_value(), "back to this machine's own audio");
+        own.take_up();
+        own.advance_to(400'000);
+        require(player->set_output(&speaker).has_value(), "and to the speaker");
+        require(speaker.snapshot().position_sample == 400'000,
+                "once an output holds the track, its own place is what moves");
+    }
+}
+
 // An output takes a volume or a seek on its own thread -- an agent over the
 // network -- so the state answering the command still showed the old one,
 // and a client put its slider back: a mute undone for a moment. The player
@@ -1283,6 +1323,7 @@ int main(int argc, char** argv) {
     // Needs no audio device, so it runs before the check for one.
     the_player_plays_on_the_output_it_is_given();
     what_the_output_was_told_shows_until_it_catches_up();
+    a_restored_place_survives_the_output_chosen_after_it();
     a_failure_to_play_says_why();
     clearing_the_queue_ends_what_plays();
     a_listen_is_stored(directory, audio);
