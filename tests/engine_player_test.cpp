@@ -1152,6 +1152,33 @@ void a_restored_place_survives_the_output_chosen_after_it() {
         require(speaker.snapshot().position_sample == 400'000,
                 "once an output holds the track, its own place is what moves");
     }
+    {
+        // A seek asked while the file is still opening is where it goes.
+        auto player = engine::Player::create_without_audio();
+        RecordingAudition own;
+        own.defer_loads(true);
+        require(player->set_output(&own).has_value(), "this machine's own audio, again");
+        require(player->restore(state), "restored to, still opening the file");
+        require(player->seek_ms(400'000).has_value(), "sought meanwhile");
+        RecordingAudition speaker;
+        require(player->set_output(&speaker).has_value(), "and a speaker chosen");
+        require(speaker.snapshot().position_sample == 400'000,
+                "takes the track up where it was sought, not where the restart left it");
+    }
+    {
+        // Started again from its beginning, the restart's place is past.
+        auto player = engine::Player::create_without_audio();
+        RecordingAudition own;
+        own.defer_loads(true);
+        require(player->set_output(&own).has_value(), "this machine's own audio, once more");
+        require(player->restore(state), "restored to, opening the file");
+        require(player->stop().has_value(), "stopped");
+        require(player->play_entry(entries[0].entry_id).has_value(), "and the entry played again");
+        RecordingAudition speaker;
+        require(player->set_output(&speaker).has_value(), "a speaker chosen while it opens");
+        require(speaker.snapshot().position_sample == 0,
+                "takes it up from the beginning it was started at");
+    }
 }
 
 // An output takes a volume or a seek on its own thread -- an agent over the

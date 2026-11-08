@@ -327,6 +327,8 @@ core::Result<void> Player::start_entry_locked(QueueEntry entry, const bool from_
                                       : core::StableId{};
     }
     const auto before = audition_->snapshot();
+    // Started afresh, from its beginning: where a restart left it is past.
+    restored_position_.reset();
     // A segment is optional, and the audition service spells the two cases as
     // separate calls rather than an optional parameter.
     auto started =
@@ -827,6 +829,7 @@ core::Result<void> Player::pause() {
 core::Result<void> Player::stop() {
     const std::lock_guard guard{mutex_};
     auto stopped = audition_->stop();
+    restored_position_.reset();
     anchors_.current = core::StableId{};
     anchors_.source = {};
     row_ = -1;
@@ -842,6 +845,11 @@ core::Result<void> Player::seek_ms(const std::int64_t position_ms) {
     }
     auto sought = audition_->seek_to_seconds(static_cast<double>(position_ms) / 1000.0);
     if (sought) {
+        // Asked while the restart's place is still being opened: an output
+        // chosen now takes it up where it was sent, not where it was left.
+        if (restored_position_) {
+            restored_position_->position_ms = position_ms;
+        }
         asked_place_ = AskedPlace{.output = audition_,
                                   .instance = audition_->snapshot().playback_instance,
                                   .position_ms = position_ms,
