@@ -1078,6 +1078,14 @@ void BenchMainWindowTest::interfaceSizeIsChosenForTheNextStart() {
     QTRY_VERIFY(lifetime.isNull());
     QSettings{}.sync();
     QCOMPARE(chosenInterfaceScale(), 1.5);
+    // Opened again, Settings shows the size chosen, not "As the system".
+    window.findChild<QAction*>(QStringLiteral("action-settings"))->trigger();
+    QTRY_VERIFY(window.findChild<SettingsDialog*>() != nullptr);
+    dialog = window.findChild<SettingsDialog*>();
+    combo = dialog->findChild<QComboBox*>(QStringLiteral("bench-settings-interface-scale"));
+    QVERIFY(combo != nullptr);
+    QCOMPARE(combo->currentData().toString(), QStringLiteral("1.5"));
+    dialog->reject();
     QSettings{}.setValue(QLatin1String(interface_scale_key), QStringLiteral("7"));
     QSettings{}.sync();
     QCOMPARE(chosenInterfaceScale(), 1.0);
