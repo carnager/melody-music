@@ -40,6 +40,7 @@ class PluginsTest final : public QObject {
     void providersAreReadAndTheirLyricsToo();
     void triggersAreReadAndTold();
     void theScriptsPluginRunsTheCommandsSet();
+    void theLocatePluginShowsTheFile();
     void theTogetherPluginAsksTheEngine();
 
   private:
@@ -1448,6 +1449,137 @@ void PluginsTest::triggersAreReadAndTold() {
                              .object();
     QCOMPARE(by_hand.value(QStringLiteral("on")).toString(), QStringLiteral("hand"));
     QVERIFY(!by_hand.contains(QStringLiteral("albums")));
+    // By hand, told what plays -- null with nothing playing -- on the engine
+    // playing it; started otherwise, not at all.
+    QVERIFY(by_hand.value(QStringLiteral("playing")).isNull());
+    QVERIFY(!told.contains(QStringLiteral("playing")));
+    const PluginPlaying playing{.track = PluginTrack{.path = "/srv/music/A/B/01.flac",
+                                                     .title = "One",
+                                                     .artist = "A",
+                                                     .album = "B",
+                                                     .album_artist = "A",
+                                                     .date = "1999",
+                                                     .track_number = "1"},
+                                .duration_ms = 250000,
+                                .engine = PluginEngine{.name = QStringLiteral("nas"),
+                                                       .address = QStringLiteral("nas:6601"),
+                                                       .here = false},
+                                .music_folders = {"/srv/music"}};
+    const auto while_playing =
+        QJsonDocument::fromJson(pluginTriggerInput(page, PluginTrigger::When::hand, PluginEngine{},
+                                                   {}, {}, {}, playing))
+            .object()
+            .value(QStringLiteral("playing"))
+            .toObject();
+    QCOMPARE(while_playing.value(QStringLiteral("path")).toString(),
+             QStringLiteral("/srv/music/A/B/01.flac"));
+    QCOMPARE(while_playing.value(QStringLiteral("relative_path")).toString(),
+             QStringLiteral("A/B/01.flac"));
+    QCOMPARE(while_playing.value(QStringLiteral("title")).toString(), QStringLiteral("One"));
+    QCOMPARE(while_playing.value(QStringLiteral("duration_ms")).toInteger(), 250000);
+    QCOMPARE(
+        while_playing.value(QStringLiteral("engine")).toObject().value(QStringLiteral("address")),
+        QJsonValue{QStringLiteral("nas:6601")});
+    QVERIFY(!QJsonDocument::fromJson(pluginTriggerInput(added, PluginTrigger::When::albums_added,
+                                                        PluginEngine{}, {}, {}, {}, playing))
+                 .object()
+                 .contains(QStringLiteral("playing")));
+}
+
+// The official Locate plugin: the chosen tracks' files -- the first of each
+// folder -- or, run by hand, the playing one, shown by the file manager set;
+// here a command of one's own that writes down what it was given. A path of
+// an engine elsewhere is mapped to where its music folder is here.
+void PluginsTest::theLocatePluginShowsTheFile() {
+    const QString folder = QStringLiteral(MELODY_SOURCE_DIR "/plugins/locate");
+    QFile manifest_file{folder + QStringLiteral("/plugin.json")};
+    QVERIFY(manifest_file.open(QIODevice::ReadOnly));
+    QString problem;
+    const auto locate = parsePluginManifest(manifest_file.readAll(), folder, &problem);
+    QVERIFY2(locate.has_value(), qPrintable(problem));
+    QCOMPARE(locate->actions.size(), std::size_t{1U});
+    QCOMPARE(locate->triggers.size(), std::size_t{1U});
+    const auto& action = locate->actions.front();
+    const auto& trigger = locate->triggers.front();
+
+    QTemporaryDir music;
+    QVERIFY(music.isValid());
+    const auto album = music.filePath(QStringLiteral("A/It's"));
+    writeFile(album + QStringLiteral("/01 One.flac"), {});
+    writeFile(album + QStringLiteral("/02 Two.flac"), {});
+    writeFile(music.filePath(QStringLiteral("C/D/01.flac")), {});
+    const auto said = music.filePath(QStringLiteral("said"));
+    const auto set = [&locate](const QString& key, const QString& value) {
+        QSettings{}.setValue(pluginSettingKey(locate->name, key), value);
+    };
+    set(QStringLiteral("manager"), QStringLiteral("My own command"));
+    set(QStringLiteral("command"),
+        QStringLiteral("printf '%s|%s\\n' {} {folder} >> '") + said + QStringLiteral("'"));
+    const auto saidLines = [&said] {
+        QFile lines{said};
+        const auto opened = lines.open(QIODevice::ReadOnly);
+        const auto text = opened ? QString::fromUtf8(lines.readAll()) : QString{};
+        lines.remove();
+        return text;
+    };
+    const auto track = [](const QString& path) {
+        return PluginTrack{.path = path.toStdString(),
+                           .title = {},
+                           .artist = {},
+                           .album = {},
+                           .album_artist = {},
+                           .date = {},
+                           .track_number = {}};
+    };
+
+    // Chosen: the first file of each folder.
+    const auto root = music.path().toStdString();
+    const auto chosen =
+        run(*locate, action,
+            pluginInput(action, PluginEngine{},
+                        pluginAlbums({track(album + QStringLiteral("/01 One.flac")),
+                                      track(album + QStringLiteral("/02 Two.flac")),
+                                      track(music.filePath(QStringLiteral("C/D/01.flac")))},
+                                     {root}),
+                        {root}, pluginSettings(*locate)));
+    QVERIFY2(chosen.succeeded, qPrintable(chosen.text));
+    QCOMPARE(saidLines().split(QLatin1Char('\n'), Qt::SkipEmptyParts),
+             (QStringList{album + QStringLiteral("/01 One.flac|") + album,
+                          music.filePath(QStringLiteral("C/D/01.flac|")) +
+                              music.filePath(QStringLiteral("C/D"))}));
+
+    // By hand: what plays, on an engine elsewhere, its folder mapped here.
+    set(QStringLiteral("folders"), QStringLiteral("/srv/music=") + music.path());
+    const PluginPlaying playing{.track = track(QStringLiteral("/srv/music/A/It's/02 Two.flac")),
+                                .duration_ms = {},
+                                .engine = PluginEngine{.name = QStringLiteral("nas"),
+                                                       .address = QStringLiteral("nas:6601"),
+                                                       .here = false},
+                                .music_folders = {"/srv/music"}};
+    const auto by_hand =
+        runTrigger(*locate, trigger,
+                   pluginTriggerInput(trigger, PluginTrigger::When::hand, PluginEngine{}, {}, {},
+                                      pluginSettings(*locate), playing));
+    QVERIFY2(by_hand.succeeded, qPrintable(by_hand.text));
+    QCOMPARE(saidLines(), album + QStringLiteral("/02 Two.flac|") + album + QStringLiteral("\n"));
+
+    // Nothing playing, or a file not here: it says so, and shows nothing.
+    const auto nothing =
+        runTrigger(*locate, trigger,
+                   pluginTriggerInput(trigger, PluginTrigger::When::hand, PluginEngine{}, {}, {},
+                                      pluginSettings(*locate)));
+    QVERIFY(!nothing.succeeded);
+    QCOMPARE(nothing.text, QStringLiteral("Nothing is playing"));
+    set(QStringLiteral("folders"), QString{});
+    const auto elsewhere =
+        runTrigger(*locate, trigger,
+                   pluginTriggerInput(trigger, PluginTrigger::When::hand, PluginEngine{}, {}, {},
+                                      pluginSettings(*locate), playing));
+    QVERIFY(!elsewhere.succeeded);
+    QVERIFY2(elsewhere.text.contains(QStringLiteral("on nas is not on this computer")),
+             qPrintable(elsewhere.text));
+    QVERIFY(!QFileInfo::exists(said));
+    QSettings{}.remove(QStringLiteral("plugins"));
 }
 
 // The official Scripts plugin: the command set for a trigger, run with sh,

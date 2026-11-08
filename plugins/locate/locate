@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+"""Melody plugin (ADR-0288, ADR-0295): a track's file, shown in a file manager.
+
+Run from a track list's menu, it shows the tracks chosen -- the first of each
+folder; from Workspace › Run, the playing track. The file manager is a
+setting: the system's (Finder on macOS, the file selected; elsewhere the
+desktop's, through org.freedesktop.FileManager1 where it answers), Tandem,
+or a command of the user's own, run with sh, {} the file and {folder} its
+folder. Paths are the engine's: for one on another computer, "folders" maps
+its music folder to where it is mounted here.
+"""
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+# At most so many folders shown for one choice: a window each.
+MOST_FOLDERS = 5
+
+
+class Refused(Exception):
+    pass
+
+
+def mapped(path, folders):
+    """The engine's path as it is on this computer."""
+    for pair in folders.split(";"):
+        there, sep, here = pair.partition("=")
+        there, here = there.strip().rstrip("/"), here.strip().rstrip("/")
+        if sep and there and here and (path == there or path.startswith(there + "/")):
+            return here + path[len(there):]
+    return path
+
+
+def run(argv):
+    """Starts a file manager; one that fails at once says why. One that
+    stays open is left to run when this exits."""
+    with tempfile.TemporaryFile() as said:
+        try:
+            started = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                       stderr=said, start_new_session=True)
+        except OSError as error:
+            raise Refused("%s: %s" % (argv[0], error.strerror)) from None
+        try:
+            code = started.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            return
+        if code != 0:
+            said.seek(0)
+            lines = said.read().decode(errors="replace").strip().splitlines()
+            name = (argv[2].split() or [""])[0] if argv[:2] == ["sh", "-c"] else argv[0]
+            raise Refused("%s exited %d%s" % (name, code, ": " + lines[-1] if lines else ""))
+
+
+def show(path, settings):
+    folder = os.path.dirname(path)
+    manager = settings.get("manager") or "System default"
+    if manager == "My own command":
+        command = str(settings.get("command") or "").strip()
+        if not command:
+            raise Refused("No command is set: Settings › Plugins › Locate the file › My own command")
+        if "{}" in command or "{folder}" in command:
+            command = command.replace("{folder}", shlex.quote(folder)).replace("{}", shlex.quote(path))
+        else:
+            command += " " + shlex.quote(folder)
+        run(["sh", "-c", command])
+    elif manager == "Tandem":
+        if sys.platform == "darwin":
+            # A folder opened as Tandem starts is lost: given it to start with.
+            running = subprocess.run(["pgrep", "-x", "tandem-fm"], capture_output=True).returncode == 0
+            run(["open", "-a", "Tandem", folder] if running else ["open", "-a", "Tandem", "--args", folder])
+        elif shutil.which("tandem-fm"):
+            run(["tandem-fm", folder])
+        else:
+            raise Refused("Tandem is not installed: tandem-fm is not in PATH")
+    elif sys.platform == "darwin":
+        run(["open", "-R", path])
+    else:
+        # The desktop's file manager, the file selected where it can.
+        uri = Path(path).as_uri()
+        if shutil.which("gdbus") and subprocess.run(
+                ["gdbus", "call", "--session", "--dest", "org.freedesktop.FileManager1",
+                 "--object-path", "/org/freedesktop/FileManager1",
+                 "--method", "org.freedesktop.FileManager1.ShowItems", "['%s']" % uri, ""],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=10).returncode == 0:
+            return
+        run(["xdg-open", folder])
+
+
+def main():
+    given = json.load(sys.stdin)
+    settings = given.get("settings") or {}
+    folders = str(settings.get("folders") or "")
+    if "trigger" in given:
+        if "playing" not in given:
+            raise Refused("This Melody does not say what plays to a plugin run from the menu")
+        playing = given.get("playing")
+        if not playing or not playing.get("path"):
+            raise Refused("Nothing is playing")
+        engine = playing.get("engine") or {}
+        paths = [playing["path"]]
+    else:
+        engine = given.get("engine") or {}
+        paths = [track.get("path", "") for album in given.get("albums") or []
+                 for track in album.get("tracks") or []]
+    # The first of each folder, in the order chosen.
+    seen = {}
+    for path in filter(None, paths):
+        seen.setdefault(os.path.dirname(path), path)
+    if not seen:
+        raise Refused("No file was chosen")
+    for path in list(seen.values())[:MOST_FOLDERS]:
+        here = mapped(path, folders)
+        if not os.path.exists(here):
+            where = "" if engine.get("here", True) else " on %s" % (engine.get("name") or engine.get("address") or "the engine")
+            hint = "" if engine.get("here", True) else \
+                ": mount its music folder, or set Music folder here in the plugin's settings"
+            raise Refused("%s%s is not on this computer%s" % (here, where, hint))
+        show(here, settings)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Refused as why:
+        print(why, file=sys.stderr)
+        sys.exit(1)

@@ -4,7 +4,8 @@ A plugin adds an entry to the context menu of track lists and of the library
 -- "Share album", "Send to …" -- a side panel, lyrics, or a program run on the
 library's news. A few official ones come with Melody
 ([`plugins/`](../plugins): the web search, a panel about the playing artist
-and album, lyrics from LRCLIB, and Scripts, your own commands); everything
+and album, lyrics from LRCLIB, Scripts, your own commands, and Locate the
+file, in your file manager); everything
 else is written and published apart. A plugin is a program of its
 own, in any language; Melody runs it, tells it what was chosen in JSON, and
 shows what it answers ([ADR-0288](adr/0288-plugin-actions.md)).
@@ -349,6 +350,19 @@ music folders -- and, for new albums, the albums, as an action gets them:
 {"schema": 1, "trigger": "page", "on": "library-changed", "engine": {…},
  "music_folders": ["/srv/music"], "settings": {…}}
 ```
+
+Run by hand, it is told what plays too, as a panel is -- `playing`, with the
+`engine` playing it, which need not be the library's -- or `"playing": null`
+with nothing playing:
+
+```json
+{"schema": 1, "trigger": "locate", "on": "hand", …,
+ "playing": {"path": "/srv/music/Low/01 Low.flac", "relative_path": "Low/01 Low.flac",
+             "title": "Low", …, "engine": {"name": "nas", "address": "nas:6601", "here": false}}}
+```
+
+An entry under Workspace › Run is a command in the palette too, so a
+command about what plays is a trigger run by hand.
 
 One run of a trigger at a time: started again while it runs, it runs once
 more after. Triggers run while Melody does; for the window closed, use

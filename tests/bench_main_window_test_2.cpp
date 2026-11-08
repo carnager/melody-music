@@ -4185,8 +4185,9 @@ void BenchMainWindowTest::manyPluginActionsGoInASubmenu() {
 }
 
 // ADR-0295: a plugin's triggers -- at start, by hand from Workspace › Run,
-// when the library has changed and been still, for new albums -- one run of
-// each at a time, asked again while it runs, once more after.
+// told what plays, when the library has changed and been still, for new
+// albums -- one run of each at a time, asked again while it runs, once more
+// after.
 void BenchMainWindowTest::pluginTriggersRunOnTheLibrarysNews() {
     QTemporaryDir out;
     QVERIFY(out.isValid());
@@ -4206,7 +4207,8 @@ void BenchMainWindowTest::pluginTriggersRunOnTheLibrarysNews() {
 input=$(cat)
 on=$(printf '%s' "$input" | grep -o '"on":"[^"]*"' | cut -d '"' -f 4)
 folders=$(printf '%s' "$input" | grep -o '"folder":"[^"]*"' | cut -d '"' -f 4 | tr '\n' ' ')
-echo "$on $folders" >> '%1'
+playing=$(printf '%s' "$input" | grep -o '"playing":{.*' | grep -o '"path":"[^"]*"' | head -n 1 | cut -d '"' -f 4)
+echo "$on $folders$playing" >> '%1'
 [ "$on" = library-changed ] && sleep 1
 exit 0
 )sh")
@@ -4241,19 +4243,35 @@ exit 0
     auto* page = window.findChild<QAction*>(QStringLiteral("action-run-plugin-hooks-page"));
     QVERIFY(page != nullptr && menu->actions().contains(page));
     QCOMPARE(page->text(), QStringLiteral("Write the page"));
+    // A command in the palette too, under the menu it is in.
+    const auto commands = ui::windowCommands(window);
+    const auto in_palette = std::ranges::find_if(
+        commands, [page](const ui::PaletteCommand& command) { return command.action == page; });
+    QVERIFY(in_palette != commands.end());
+    QCOMPARE(in_palette->path.join(QStringLiteral(" › ")), QStringLiteral("Workspace › Run"));
     page->trigger();
     QTRY_COMPARE(lines().size(), 2);
     QCOMPARE(lines().back(), QStringLiteral("hand"));
+    // By hand while a track plays: told it, as a panel is.
+    window.transport_timer_->stop();
+    EnginePlayback::State playing;
+    playing.status = QStringLiteral("playing");
+    playing.entry = QStringLiteral("e1");
+    playing.path = QStringLiteral("/srv/music/A/B/02.flac");
+    window.refreshPluginPanels(playing);
+    page->trigger();
+    QTRY_COMPARE(lines().size(), 3);
+    QCOMPARE(lines().back(), QStringLiteral("hand /srv/music/A/B/02.flac"));
 
     // The library changed, three times while it ran: once, and once after.
     window.libraryChanged();
-    QTRY_COMPARE(lines().size(), 3);
-    window.libraryChanged();
-    window.libraryChanged();
     QTRY_COMPARE(lines().size(), 4);
+    window.libraryChanged();
+    window.libraryChanged();
+    QTRY_COMPARE(lines().size(), 5);
     QTest::qWait(1'500);
-    QCOMPARE(lines().size(), 4);
-    QCOMPARE(lines().mid(2),
+    QCOMPARE(lines().size(), 5);
+    QCOMPARE(lines().mid(3),
              (QStringList{QStringLiteral("library-changed"), QStringLiteral("library-changed")}));
 
     // New albums, told with their folders.
@@ -4262,7 +4280,7 @@ exit 0
                                      .date = "1999",
                                      .folder = "/srv/music/A/B",
                                      .paths = {"/srv/music/A/B/01.flac"}}});
-    QTRY_COMPARE(lines().size(), 5);
+    QTRY_COMPARE(lines().size(), 6);
     QCOMPARE(lines().back(), QStringLiteral("albums-added /srv/music/A/B"));
 
     // Turned off: its entry goes, and the menu with it.
@@ -4272,7 +4290,7 @@ exit 0
     QVERIFY(!menu->menuAction()->isVisible());
     window.libraryChanged();
     QTest::qWait(300);
-    QCOMPARE(lines().size(), 5);
+    QCOMPARE(lines().size(), 6);
 
     qunsetenv("MELODY_LIBRARY_SETTLE_SECONDS");
     QSettings{}.remove(QStringLiteral("plugins"));

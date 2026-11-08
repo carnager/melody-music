@@ -175,10 +175,16 @@ void BenchMainWindow::runPluginTrigger(PluginTriggerRun& slot, const PluginTrigg
                                          .track_number = {}});
         }
     }
+    const bool by_hand = when == PluginTrigger::When::hand;
+    // Run by hand: told what plays, as a panel is.
+    std::optional<PluginPlaying> playing;
+    if (const auto& state = plugin_panel_state_;
+        by_hand && state.status != QStringLiteral("stopped") && !state.entry.isEmpty()) {
+        playing = pluginPlaying(state);
+    }
     const auto input =
         pluginTriggerInput(slot.trigger, when, told, pluginAlbums(std::move(tracks), music_folders),
-                           music_folders, pluginSettings(slot.plugin));
-    const bool by_hand = when == PluginTrigger::When::hand;
+                           music_folders, pluginSettings(slot.plugin), playing);
     const auto label = slot.trigger.label.isEmpty() ? slot.plugin.title : slot.trigger.label;
     if (by_hand) {
         showMessage(QStringLiteral("%1…").arg(label), 0);

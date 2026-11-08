@@ -437,7 +437,7 @@ void BenchMainWindow::showPluginPanelOutcome(PluginPanelDock& slot, QObject* con
     }
 }
 
-BenchMainWindow::PluginPlaying BenchMainWindow::pluginPlaying(const EnginePlayback::State& state) {
+PluginPlaying BenchMainWindow::pluginPlaying(const EnginePlayback::State& state) {
     PluginPlaying told{.track = PluginTrack{.path = state.path.toStdString(),
                                             .title = {},
                                             .artist = {},

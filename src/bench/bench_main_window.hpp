@@ -484,14 +484,7 @@ class BenchMainWindow final : public QMainWindow, public WorkspaceView {
     void tabOpenSidePanels();
     void refreshPluginPanels(const EnginePlayback::State& state);
     void askPluginPanel(PluginPanelDock& slot);
-    // What a plugin is told of what plays: the track, its length, the
-    // engine playing it and that engine's music folders.
-    struct PluginPlaying {
-        PluginTrack track;
-        std::optional<std::int64_t> duration_ms;
-        PluginEngine engine;
-        std::vector<std::string> music_folders;
-    };
+    // What a plugin is told of what plays.
     [[nodiscard]] PluginPlaying pluginPlaying(const EnginePlayback::State& state);
     void showPluginPanelSubject(PluginPanelDock& slot, const PluginTrack& playing);
     // Runs the panel's program on what plays; its answer drawn unless

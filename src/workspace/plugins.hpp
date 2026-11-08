@@ -180,6 +180,15 @@ struct PluginEngine {
     bool here{true};
 };
 
+// What plays: the track, its length, the engine playing it and that
+// engine's music folders.
+struct PluginPlaying {
+    PluginTrack track;
+    std::optional<std::int64_t> duration_ms;
+    PluginEngine engine;
+    std::vector<std::string> music_folders;
+};
+
 // The tracks as albums -- by album artist, album and date, else by folder --
 // each with its folder and that folder relative to the music folder it is
 // in. Pure, for tests.
@@ -202,13 +211,15 @@ struct PluginAlbum {
                                      const QJsonObject& settings = {});
 
 // The JSON a trigger's run is given: what started it, the engine holding the
-// library, its music folders, the plugin's settings -- and, for albums come
-// in, the albums, as an action is given them.
+// library, its music folders, the plugin's settings -- for albums come in,
+// the albums, as an action is given them; run by hand, what plays, null
+// when nothing does.
 [[nodiscard]] QByteArray pluginTriggerInput(const PluginTrigger& trigger, PluginTrigger::When when,
                                             const PluginEngine& engine,
                                             const std::vector<PluginAlbum>& albums,
                                             const std::vector<std::string>& music_folders,
-                                            const QJsonObject& settings);
+                                            const QJsonObject& settings,
+                                            const std::optional<PluginPlaying>& playing = {});
 
 // What a `list` action answers: a heading and rows, each of text, a detail
 // and a link -- the parts Melody draws, none of the plugin's own.

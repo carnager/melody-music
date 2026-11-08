@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "name": "Locate the file",
+  "description": "Shows the playing track's file, or the tracks chosen, in Finder, Tandem or your own file manager",
+  "actions": [
+    {"id": "chosen", "label": "Locate the file", "for": "tracks", "run": ["./locate"],
+     "result": "none", "timeout": 30}
+  ],
+  "triggers": [
+    {"id": "playing", "label": "Locate the playing file", "on": "hand", "run": ["./locate"],
+     "timeout": 30}
+  ],
+  "settings": [
+    {"key": "manager", "label": "Open in", "kind": "choice",
+     "choices": ["System default", "Tandem", "My own command"],
+     "help": "System default: Finder on macOS, the file chosen; elsewhere the desktop's file manager. Tandem: its folder in Tandem."},
+    {"key": "command", "label": "My own command",
+     "help": "Run with sh when Open in is My own command: {} is the file, {folder} its folder, and without either the folder is added at the end, as open -a ForkLift {folder}"},
+    {"key": "folders", "label": "Music folder here",
+     "help": "Only for an engine on another computer whose music folder is somewhere else here: its folder = this computer's, as /srv/music=/Volumes/music; several separated by ;"}
+  ]
+}

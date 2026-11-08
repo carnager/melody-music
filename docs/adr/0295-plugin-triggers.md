@@ -69,3 +69,29 @@ ADR-0288's actions, ADR-0291's panels and ADR-0293's providers.
 - `bench-main-window`: a plugin's triggers run at start, from Workspace ›
   Run, once the library changed and was still -- asked again while running,
   once more after -- and for new albums; turned off, its entry goes.
+
+## Amendment, 2026-11-08: by hand, told what plays
+
+A trigger run by hand is asked for from the menu or the command palette,
+where "the playing track's file", "send what plays to …" are what one wants
+a command for -- and until now it knew nothing of what plays.
+
+- **Run by hand, a trigger is told `playing`** as a panel is (ADR-0291):
+  the track, its path within its music folder, its length, and the `engine`
+  playing it, which need not be the one holding the library; `null` with
+  nothing playing. Started any other way, it is told nothing of it: what
+  plays when a scan ends is happenstance.
+- **An official Locate the file plugin** comes with Melody, off until
+  enabled: the playing track's file, from Workspace › Run, or the tracks
+  chosen, from the context menu, shown in the system's file manager (Finder
+  on macOS, the file selected; elsewhere `org.freedesktop.FileManager1`,
+  else `xdg-open` on the folder), Tandem, or a shell command of one's own
+  (`{}` the file, `{folder}` its folder). Paths are the engine's: a setting
+  maps an engine's music folder to where it is mounted here, and a file not
+  here is said to be so rather than a folder opened.
+
+Verification: `plugins` -- a hand-run trigger is told what plays, null with
+nothing, and other triggers not; Locate shows the first file of each folder
+chosen and, by hand, the playing one through a mapped folder, and says when
+nothing plays or the file is not here. `bench-main-window` -- Workspace ›
+Run's entry, run while a track plays, is told its path.

@@ -1092,26 +1092,6 @@ QByteArray pluginInput(const PluginAction& action, const PluginEngine& engine,
     return QJsonDocument{input}.toJson(QJsonDocument::Compact);
 }
 
-QByteArray pluginTriggerInput(const PluginTrigger& trigger, const PluginTrigger::When when,
-                              const PluginEngine& engine, const std::vector<PluginAlbum>& albums,
-                              const std::vector<std::string>& music_folders,
-                              const QJsonObject& settings) {
-    QJsonArray folders;
-    for (const auto& folder : music_folders) {
-        folders.push_back(text(folder));
-    }
-    QJsonObject input{{QStringLiteral("schema"), input_schema},
-                      {QStringLiteral("trigger"), trigger.id},
-                      {QStringLiteral("on"), pluginTriggerWhenName(when)},
-                      {QStringLiteral("engine"), engineOf(engine)},
-                      {QStringLiteral("music_folders"), folders},
-                      {QStringLiteral("settings"), settings}};
-    if (when == PluginTrigger::When::albums_added) {
-        input.insert(QStringLiteral("albums"), albumsJson(albums, music_folders));
-    }
-    return QJsonDocument{input}.toJson(QJsonDocument::Compact);
-}
-
 namespace {
 
 [[nodiscard]] QJsonObject playingJson(const PluginTrack& playing,
@@ -1139,6 +1119,38 @@ namespace {
 }
 
 } // namespace
+
+QByteArray pluginTriggerInput(const PluginTrigger& trigger, const PluginTrigger::When when,
+                              const PluginEngine& engine, const std::vector<PluginAlbum>& albums,
+                              const std::vector<std::string>& music_folders,
+                              const QJsonObject& settings,
+                              const std::optional<PluginPlaying>& playing) {
+    QJsonArray folders;
+    for (const auto& folder : music_folders) {
+        folders.push_back(text(folder));
+    }
+    QJsonObject input{{QStringLiteral("schema"), input_schema},
+                      {QStringLiteral("trigger"), trigger.id},
+                      {QStringLiteral("on"), pluginTriggerWhenName(when)},
+                      {QStringLiteral("engine"), engineOf(engine)},
+                      {QStringLiteral("music_folders"), folders},
+                      {QStringLiteral("settings"), settings}};
+    if (when == PluginTrigger::When::albums_added) {
+        input.insert(QStringLiteral("albums"), albumsJson(albums, music_folders));
+    }
+    // Asked from the menu, it may be about what plays -- on the engine
+    // playing it, which need not be the library's.
+    if (when == PluginTrigger::When::hand) {
+        QJsonValue told{QJsonValue::Null};
+        if (playing) {
+            auto object = playingJson(playing->track, playing->duration_ms, playing->music_folders);
+            object.insert(QStringLiteral("engine"), engineJson(playing->engine));
+            told = object;
+        }
+        input.insert(QStringLiteral("playing"), told);
+    }
+    return QJsonDocument{input}.toJson(QJsonDocument::Compact);
+}
 
 namespace {
 
