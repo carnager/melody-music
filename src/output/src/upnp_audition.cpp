@@ -20,6 +20,10 @@ std::string value(const Values& values, const std::string& key) {
     auto it = values.find(key);
     return it == values.end() ? std::string{} : it->second;
 }
+// A KEF resumed in place that has not moved on by then is reloaded, through
+// the one recovery ADR-0290 allows: long enough for a slow start, short
+// enough that a resume that did not take is not a long silence.
+constexpr std::chrono::seconds kef_resume_window{5};
 bool kef_renderer(const discovery::UpnpRenderer& renderer) {
     return renderer.manufacturer == "KEF" && renderer.model == "LS50 Wireless II";
 }
@@ -245,6 +249,13 @@ core::Result<RendererTrack> UpnpAudition::prepare(StreamRequest request) {
 bool UpnpAudition::current_generation(const std::uint64_t generation) const {
     const std::lock_guard lock{state_mutex_};
     return generation == generation_ && playing_requested_ && !stopping_;
+}
+bool UpnpAudition::kef_paused_here() {
+    auto transport = call("GetTransportInfo");
+    auto position = call("GetPositionInfo");
+    return transport && position &&
+           value(*transport, "CurrentTransportState") == "PAUSED_PLAYBACK" &&
+           value(*position, "TrackURI") == current_->url;
 }
 void UpnpAudition::reset_kef_start() {
     kef_stage_ = KefStage::idle;
@@ -793,6 +804,19 @@ core::Result<void> UpnpAudition::play() {
         saw_playing_ = false;
         stopped_while_starting_ = 0;
         startup_rejected_ = false;
+        // A KEF still paused on this track resumes where it is (ADR-0290):
+        // reloading it played the song's first seconds before the seek.
+        if (!deferred_ && current_ && kef_compatibility_ && !expiring(*current_) &&
+            kef_stage_ == KefStage::idle && kef_paused_here()) {
+            kef_generation_ = generation;
+            kef_recovery_used_ = false;
+            kef_deadline_ = clock_() + kef_resume_window;
+            auto started = start_now(generation);
+            if (started || !transition_unavailable(started.error())) {
+                return started;
+            }
+            reset_kef_start(); // Refused mid-transition: reload, as before.
+        }
         // A restored track goes to the speaker now, or a stale ticket is
         // renewed, where it was left.
         if (deferred_ || (current_ && (kef_compatibility_ || expiring(*current_)))) {

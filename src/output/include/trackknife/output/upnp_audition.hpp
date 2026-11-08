@@ -124,6 +124,8 @@ class UpnpAudition final : public audio::Audition {
     bool poll_kef(const discovery::UpnpValues& transport, const discovery::UpnpValues& position,
                   std::uint64_t generation);
     void reset_kef_start();
+    // Whether the KEF reports PAUSED_PLAYBACK on the current track's URI.
+    bool kef_paused_here();
     std::shared_ptr<discovery::UpnpControl> control_;
     Prepare prepare_;
     const bool background_;

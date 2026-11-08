@@ -293,6 +293,103 @@ void kef_recovery_tests(discovery::UpnpRenderer device) {
                     output->snapshot().raw_path == "/new.flac",
                 "new track supersedes old recovery");
     }
+    // ADR-0290: a KEF paused on the track resumes where it is. Reloading it
+    // played the song's first seconds before the seek took.
+    const auto paused_kef = [&make](const std::shared_ptr<Renderer>& renderer,
+                                    std::chrono::steady_clock::time_point& now, unsigned& tickets) {
+        auto output = make(renderer, now, tickets);
+        require(output->load_selected_and_play("/long.flac", {}, {}).has_value(), "KEF load");
+        output->poll(); // Stop confirmed: the URI is set.
+        output->poll(); // URI confirmed: Play.
+        output->poll(); // PLAYING.
+        require(output->snapshot().state == audio::LocalAuditionState::playing, "KEF plays");
+        renderer->position = "0:01:32";
+        output->poll();
+        require(output->pause().has_value(), "KEF pause");
+        output->poll();
+        require(renderer->state == "PAUSED_PLAYBACK" && output->snapshot().position_sample == 92000,
+                "paused at 1:32");
+        renderer->actions.clear();
+        return output;
+    };
+    {
+        auto renderer = std::make_shared<Renderer>();
+        auto now = std::chrono::steady_clock::time_point{};
+        unsigned tickets = 0;
+        auto output = paused_kef(renderer, now, tickets);
+        require(output->play().has_value(), "KEF resume");
+        require(count(*renderer, "Play") == 1 && count(*renderer, "Stop") == 0 &&
+                    count(*renderer, "SetAVTransportURI") == 0 && count(*renderer, "Seek") == 0,
+                "a paused KEF is sent Play, not stopped, reloaded and sought");
+        renderer->position = "0:01:33";
+        output->poll();
+        require(output->snapshot().state == audio::LocalAuditionState::playing &&
+                    output->snapshot().position_sample == 93000 && tickets == 1,
+                "it plays on from where it was paused");
+        now += std::chrono::seconds{60};
+        output->poll();
+        require(count(*renderer, "Stop") == 0, "progress ends the resume's watchdog");
+    }
+    {
+        auto renderer = std::make_shared<Renderer>();
+        auto now = std::chrono::steady_clock::time_point{};
+        unsigned tickets = 0;
+        auto output = paused_kef(renderer, now, tickets);
+        renderer->state = "STOPPED"; // As after the speaker's own standby.
+        require(output->play().has_value(), "resume a KEF that let go of the track");
+        require(count(*renderer, "Stop") == 1 && count(*renderer, "Play") == 0,
+                "one no longer paused on the track is reloaded, as before");
+        renderer->position = "0:00:00"; // A reloaded track starts at its beginning.
+        output->poll();
+        output->poll();
+        output->poll();
+        require(renderer->position == "0:01:32" && count(*renderer, "Seek") == 1 && tickets == 2 &&
+                    output->snapshot().state == audio::LocalAuditionState::playing,
+                "the reload restores the paused position");
+    }
+    {
+        auto renderer = std::make_shared<Renderer>();
+        auto now = std::chrono::steady_clock::time_point{};
+        unsigned tickets = 0;
+        auto output = paused_kef(renderer, now, tickets);
+        renderer->ignore_play = true; // Acknowledged, and nothing happens.
+        require(output->play().has_value(), "resume that does not take");
+        output->poll();
+        now += std::chrono::seconds{4};
+        output->poll();
+        require(count(*renderer, "Stop") == 0, "a slow start is given its five seconds");
+        now += std::chrono::seconds{1};
+        renderer->ignore_play = false;
+        output->poll(); // Fresh ticket and Stop: the one recovery.
+        require(count(*renderer, "Stop") == 1 && tickets == 2,
+                "a resume that did not take is reloaded after five seconds");
+        renderer->position = "0:00:00";
+        output->poll();
+        output->poll();
+        output->poll();
+        output->poll();
+        require(renderer->uri == "http://engine/stream?ticket=2" &&
+                    renderer->position == "0:01:32" && count(*renderer, "Seek") == 1 &&
+                    output->snapshot().state == audio::LocalAuditionState::playing,
+                "and plays from the paused position");
+    }
+    {
+        auto renderer = std::make_shared<Renderer>();
+        auto now = std::chrono::steady_clock::time_point{};
+        unsigned tickets = 0;
+        auto output = paused_kef(renderer, now, tickets);
+        renderer->reject_play = 1; // 701, and TRANSITIONING for two polls.
+        require(output->play().has_value(), "resume refused mid-transition");
+        require(count(*renderer, "Play") == 1 && count(*renderer, "Stop") == 1,
+                "a refused resume reloads at once");
+        renderer->position = "0:00:00";
+        for (int i = 0; i < 6; ++i) {
+            output->poll();
+        }
+        require(renderer->position == "0:01:32" && count(*renderer, "Seek") == 1 &&
+                    output->snapshot().state == audio::LocalAuditionState::playing,
+                "and still plays from the paused position");
+    }
 }
 } // namespace
 int main() {
