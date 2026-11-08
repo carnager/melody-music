@@ -64,3 +64,24 @@ successful retry. That delay is not evidence of a KEF transport failure.
 **Unknown:** whether this reduces long-running failures on the physical KEF.
 An extended listening trial is required before claiming that the recurring
 problem is fixed.
+
+## Amendment, 2026-11-08: resume in place
+
+**Evidence.** On the same LS50 Wireless II (model SP4025), each resume after a
+pause reloaded the track: Stop, set the URI, Play, then Seek once the KEF
+reported PLAYING. The KEF's own GetPositionInfo, polled every 250 ms, showed
+STOPPED at 0:00 for 1.6 s, then PLAYING from 0:00 to 0:01 for about 1.4 s, and
+only then the paused position. The listener heard the song's first seconds
+before every resume.
+
+**Decision.** A KEF that reports PAUSED_PLAYBACK on the current track's URI,
+with a ticket that is not about to expire, is resumed with `Play`. The
+watchdog above watches it with a five-second window: a resume that has not
+advanced by then gets the one stop/clear/reload recovery, from the paused
+position. A `Play` refused mid-transition (701) reloads at once. A KEF that
+is not paused on the track, a deferred (restored) track and an expiring
+ticket are reloaded as before.
+
+**Validation.** The simulated renderer covers resume in place, a KEF no
+longer paused on the track, a resume that does not take within five seconds,
+and a 701 on resume; the reload cases check that the position is sought.
