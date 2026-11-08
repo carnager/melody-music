@@ -144,13 +144,17 @@ core::Result<void> Player::set_output(audio::Audition* output) {
     const auto before = audition_->snapshot();
     const bool was_playing = sounding(before.state);
     std::int64_t position_ms = 0;
-    if (before.format && before.format->sample_rate > 0) {
+    if (before.format && before.format->sample_rate > 0 && !before.raw_path.empty()) {
         const auto rate = static_cast<std::int64_t>(before.format->sample_rate);
         position_ms =
             before.position_sample / rate * 1000 + before.position_sample % rate * 1000 / rate;
+        restored_position_.reset();
     } else if (pending_resume_) {
         // Nothing loaded where it was: whatever was waiting to resume still is.
         position_ms = pending_resume_->position_ms;
+    } else if (restored_position_ && restored_position_->entry == anchors_.current) {
+        // Still being restored where it was: where the restart left it.
+        position_ms = restored_position_->position_ms;
     }
     // One output at a time: the old one falls silent before the new one
     // speaks.
@@ -215,6 +219,7 @@ core::Result<void> Player::take_up_locked(const std::int64_t position_ms, const 
         return std::unexpected(std::move(restored.error()));
     }
     pending_resume_.reset();
+    restored_position_.reset();
     seen_transitions_ = audition_->snapshot().chain_transitions;
     if (playing) {
         return audition_->play();
@@ -1028,12 +1033,17 @@ bool Player::restore(Persisted state) {
         // revision to check. The queue is restored and nothing is loaded.
         return false;
     }
+    restored_position_ =
+        RestoredPosition{.entry = entry.entry_id, .position_ms = state.position_ms};
     // Paused rather than playing: coming back from a restart and starting to
     // make noise unasked is not a restore, it is a surprise.
     auto restored =
         audition_->restore_paused(entry.source.raw_path, *state.revision, entry.source.selection,
                                   entry.source.segment, state.position_ms, entry.replay_gain);
     if (!restored) {
+        // No output yet, or one that cannot take it: the place waits for the
+        // output that can, as resume_output() and set_output() expect.
+        pending_resume_ = PendingResume{.position_ms = state.position_ms, .playing = false};
         return false;
     }
     seen_transitions_ = audition_->snapshot().chain_transitions;

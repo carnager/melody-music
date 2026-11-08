@@ -447,6 +447,15 @@ class Player final {
         bool playing{false};
     };
     std::optional<PendingResume> pending_resume_;
+    // Where a restart left the anchored entry, until an output holds it: an
+    // output restores in the background (a file on a NAS takes a moment to
+    // open), and one chosen meanwhile -- a speaker found on the network just
+    // after the restart -- takes it up there, not at its beginning.
+    struct RestoredPosition final {
+        core::StableId entry;
+        std::int64_t position_ms{0};
+    };
+    std::optional<RestoredPosition> restored_position_;
     core::ListenAccounting listening_;
     std::vector<QueueEntry> queue_;
     std::string queue_list_;

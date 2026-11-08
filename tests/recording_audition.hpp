@@ -62,6 +62,10 @@ class RecordingAudition final : public audio::Audition {
                    std::optional<trackknife::formats::SampleRange>, const std::int64_t position_ms,
                    std::optional<trackknife::formats::ReplayGainInfo>) override {
         const std::lock_guard guard{mutex_};
+        if (deferred_) {
+            pending_restore_ = std::pair{std::move(raw_path), position_ms};
+            return {};
+        }
         loaded_ = std::move(raw_path);
         position_ms_ = position_ms;
         state_ = audio::LocalAuditionState::paused;
@@ -156,6 +160,12 @@ class RecordingAudition final : public audio::Audition {
         if (pending_) {
             load_locked(*std::exchange(pending_, std::nullopt));
         }
+        if (pending_restore_) {
+            auto [path, position] = *std::exchange(pending_restore_, std::nullopt);
+            loaded_ = std::move(path);
+            position_ms_ = position;
+            state_ = audio::LocalAuditionState::paused;
+        }
     }
 
   private:
@@ -180,6 +190,7 @@ class RecordingAudition final : public audio::Audition {
     mutable std::mutex mutex_;
     bool deferred_{false};
     std::optional<std::string> pending_;
+    std::optional<std::pair<std::string, std::int64_t>> pending_restore_;
     std::optional<std::string> failing_;
     std::optional<core::Error> error_;
     std::uint64_t instance_{0U};
