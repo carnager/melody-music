@@ -14,12 +14,14 @@ QList<double> interfaceScales() { return {1.0, 0.75, 0.9, 1.1, 1.25, 1.5, 1.75, 
 
 double chosenInterfaceScale() {
     // The application's own settings file: as it names itself once it
-    // exists, and before then as the window will name it.
+    // exists, and before then as the window will name it -- "melody" in
+    // main.cpp and pick_main.cpp (ADR-0287). Read under the old name, the
+    // size chosen in Settings was never used at the next start.
     const bool named =
         QCoreApplication::instance() != nullptr && !QCoreApplication::organizationName().isEmpty();
     QSettings settings{QSettings::defaultFormat(), QSettings::UserScope,
-                       named ? QCoreApplication::organizationName() : QStringLiteral("trackknife"),
-                       named ? QCoreApplication::applicationName() : QStringLiteral("trackknife")};
+                       named ? QCoreApplication::organizationName() : QStringLiteral("melody"),
+                       named ? QCoreApplication::applicationName() : QStringLiteral("melody")};
     bool ok = false;
     const auto value = settings.value(QLatin1String{interface_scale_key}, 1.0).toDouble(&ok);
     for (const auto offered : interfaceScales()) {

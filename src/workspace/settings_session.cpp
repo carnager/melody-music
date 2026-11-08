@@ -64,6 +64,9 @@ SettingsSession::SettingsSession(QObject* parent) : QObject(parent) {
     read(panel_animations_key, true);
     read(coloured_initials_key, false);
     read(QLatin1String(color_scheme_key), QStringLiteral("system"));
+    // As its choices hold it, so the combo shows what is chosen: unread, it
+    // showed "As the system" whatever the next start would use.
+    values_.insert(QLatin1String(interface_scale_key), QString::number(chosenInterfaceScale()));
     read(lists_display_key, QStringLiteral("tabs"));
     auto profile = settings.value(buffer_profile_key, QStringLiteral("balanced")).toString();
     const auto capacity = settings.value(buffer_capacity_key, 750).toInt();
