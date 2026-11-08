@@ -257,6 +257,16 @@ LibraryBrowser::LibraryBrowser(const CatalogueSource& catalogues, EngineKey engi
     search_timer_.setSingleShot(true);
     search_timer_.setInterval(200);
     connect(&search_timer_, &QTimer::timeout, this, &LibraryBrowser::reload);
+    reconnect_timer_.setSingleShot(true);
+    connect(&reconnect_timer_, &QTimer::timeout, this, [this] {
+        // A query on its way tries the engine itself, and says after.
+        if (stopped_ || querying_ || scanning_ || catalogues_ == nullptr ||
+            catalogues_->reachable()) {
+            return;
+        }
+        reload();
+        loadRoots();
+    });
     connect(&query_watcher_, &QFutureWatcherBase::finished, this, [this] {
         querying_ = false;
         auto outcome = query_watcher_.result();
@@ -370,6 +380,37 @@ void LibraryBrowser::refreshSourceLabel() {
         source_tooltip_ = tooltip;
         emit sourceChanged();
     }
+    scheduleReconnect();
+}
+
+void LibraryBrowser::scheduleReconnect() {
+    // Only an engine elsewhere: this computer's is started, not reached,
+    // and one that will not start is not started again every few seconds.
+    // Nor one that answered and refused -- the password, or another protocol
+    // (ADR-0260): that is tried again when asked, not in a loop.
+    if (stopped_ || catalogues_ == nullptr || !catalogues_->configured() ||
+        catalogues_->startsOwnEngine() || catalogues_->refused()) {
+        reconnect_timer_.stop();
+        return;
+    }
+    if (catalogues_->reachable()) {
+        reconnect_timer_.stop();
+        reconnect_delay_ = 0;
+        if (std::exchange(reconnecting_, false)) {
+            // The failure said in the status line is over.
+            setStatus(QString{});
+        }
+        return;
+    }
+    // Not yet asked at all: the first query, from a worker, asks.
+    if (catalogues_->failure().isEmpty() && !reconnecting_ && querying_) {
+        return;
+    }
+    reconnecting_ = true;
+    if (!reconnect_timer_.isActive()) {
+        reconnect_delay_ = reconnect_delay_ == 0 ? 1000 : std::min(reconnect_delay_ * 2, 30000);
+        reconnect_timer_.start(reconnect_delay_);
+    }
 }
 
 void LibraryBrowser::stop() {
@@ -384,6 +425,7 @@ void LibraryBrowser::stop() {
     search_timer_.stop();
     poll_timer_.stop();
     change_timer_.stop();
+    reconnect_timer_.stop();
     tasks_.clear();
     pool_.waitForDone();
     artwork_pool_.waitForDone();

@@ -111,6 +111,9 @@ class CatalogueSource final {
     [[nodiscard]] QString describe() const;
     // Whether the library can be reached now; describe() says why not.
     [[nodiscard]] bool reachable() const;
+    // Whether the engine answered and turned this client away: the password,
+    // or another protocol (ADR-0260) -- not to be retried until asked.
+    [[nodiscard]] bool refused() const;
 
   private:
     // The address and password of an engine elsewhere; false, said why.

@@ -73,7 +73,9 @@ constexpr std::size_t max_finished_early = 64U;
         return ::connect(descriptor, address, length) == 0;
     }
     bool connected = ::connect(descriptor, address, length) == 0;
+    auto failure = connected ? 0 : errno;
     if (!connected && errno == EINPROGRESS) {
+        failure = ETIMEDOUT;
         const auto deadline = std::chrono::steady_clock::now() + connect_timeout;
         pollfd watched{.fd = descriptor, .events = POLLOUT, .revents = 0};
         while (true) {
@@ -91,11 +93,14 @@ constexpr std::size_t max_finished_early = 64U;
                 socklen_t size = sizeof(error);
                 connected = ::getsockopt(descriptor, SOL_SOCKET, SO_ERROR, &error, &size) == 0 &&
                             error == 0;
+                failure = error;
             }
             break;
         }
     }
     static_cast<void>(::fcntl(descriptor, F_SETFL, flags));
+    // Why not, for the caller to say: refused, no route, timed out.
+    errno = connected ? 0 : failure;
     return connected;
 }
 
@@ -157,6 +162,7 @@ core::Result<int> open_connection(const Endpoint& endpoint) {
                                     {.key = "reason", .value = ::gai_strerror(resolved)}}});
     }
     int descriptor = -1;
+    int failure = 0;
     for (auto* candidate = found; candidate != nullptr; candidate = candidate->ai_next) {
         descriptor = core::socket_cloexec(
             candidate->ai_family, candidate->ai_socktype | SOCK_CLOEXEC, candidate->ai_protocol);
@@ -166,12 +172,19 @@ core::Result<int> open_connection(const Endpoint& endpoint) {
         if (connect_within(descriptor, candidate->ai_addr, candidate->ai_addrlen)) {
             break;
         }
+        failure = errno;
         ::close(descriptor);
         descriptor = -1;
     }
     ::freeaddrinfo(found);
     if (descriptor < 0) {
-        return std::unexpected(transport_error("could not reach the engine"));
+        // The reason in the message itself: it is what the library panel
+        // shows, and "could not reach" alone does not say where to look.
+        errno = failure;
+        return std::unexpected(transport_error(
+            failure == 0 ? std::string{"could not reach the engine"}
+                         : "could not reach the engine (" +
+                               std::error_code{failure, std::generic_category()}.message() + ")"));
     }
     return descriptor;
 }

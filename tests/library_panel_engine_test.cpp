@@ -48,6 +48,8 @@ class LibraryPanelEngineTest final : public QObject {
     void aConfiguredEngineServesThePanel();
     void everyPathReachesTheEngineNotTheDatabase();
     void anUnreachableEngineIsSaidAndThenReached();
+    void anEngineThatComesUpLaterIsReachedWithoutRefresh();
+    void anEngineThatRefusesIsNotAskedAgainAndAgain();
     void thePanelSaysWhichLibraryItIsShowing();
     void theSearchDialogAsksTheEngineToo();
     void aTcpEngineIsReachedWithItsToken();
@@ -579,6 +581,81 @@ void LibraryPanelEngineTest::anUnreachableEngineIsSaidAndThenReached() {
     QVERIFY(catalogues.usingEngine());
     panel.refreshLibrary();
     QTRY_VERIFY(source->text().contains(QStringLiteral("engine at")));
+
+    (*server)->stop();
+}
+
+// An engine that was not there when the window opened -- the network not up
+// yet at login, or the engine restarting for an update -- is tried again by
+// the panel itself: nobody has to press Refresh, which would rescan.
+void LibraryPanelEngineTest::anEngineThatComesUpLaterIsReachedWithoutRefresh() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const std::filesystem::path database{
+        (directory.path() + QStringLiteral("/library.sqlite3")).toStdString()};
+    const auto socket_text = directory.path() + QStringLiteral("/later-engine.sock");
+
+    QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_socket_key), socket_text);
+
+    CatalogueSource catalogues{database, CatalogueSource::Role::remote};
+    LocalLibraryPanel panel{catalogues};
+    panel.show();
+    auto* status = panel.findChild<QLabel*>(QStringLiteral("local-library-status"));
+    QVERIFY(status != nullptr);
+    auto* source = panel.findChild<QLabel*>(QStringLiteral("local-library-source"));
+    QVERIFY(source != nullptr);
+    QTRY_VERIFY(source->text().contains(QStringLiteral("unreachable")));
+    QTRY_VERIFY(status->text().contains(QStringLiteral("no engine")));
+
+    engine::LocalCatalogue catalogue{database};
+    QVERIFY(catalogue.prepare().has_value());
+    protocol::Dispatcher dispatcher;
+    engine::register_catalogue_methods(dispatcher, catalogue);
+    auto server = engine::Server::listen(socket_text.toStdString(), dispatcher);
+    QVERIFY(server.has_value());
+    (*server)->start();
+
+    // Not "engine at": "the engine at ... is unreachable" has it too.
+    QTRY_VERIFY_WITH_TIMEOUT(source->text().startsWith(QStringLiteral("Library: ")), 10000);
+    QVERIFY(catalogues.usingEngine());
+    // The failure is no longer said once it is over.
+    QTRY_VERIFY(!status->text().contains(QStringLiteral("no engine")));
+
+    (*server)->stop();
+}
+
+// ADR-0260: an engine that answers and turns the client away -- another
+// protocol here, a wrong password the same -- is tried again when asked, not
+// in a loop. Only an engine that could not be reached is retried by itself.
+void LibraryPanelEngineTest::anEngineThatRefusesIsNotAskedAgainAndAgain() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const std::filesystem::path database{
+        (directory.path() + QStringLiteral("/library.sqlite3")).toStdString()};
+    const auto socket_text = directory.path() + QStringLiteral("/other-protocol.sock");
+
+    std::atomic<int> asked{0};
+    protocol::Dispatcher dispatcher;
+    dispatcher.on("engine.info", [&asked](const protocol::Json&) {
+        ++asked;
+        return core::Result<protocol::Json>{protocol::Json{{"name", "elsewhere"}, {"protocol", 2}}};
+    });
+    auto server = engine::Server::listen(socket_text.toStdString(), dispatcher);
+    QVERIFY(server.has_value());
+    (*server)->start();
+    QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_socket_key), socket_text);
+
+    CatalogueSource catalogues{database, CatalogueSource::Role::remote};
+    LocalLibraryPanel panel{catalogues};
+    panel.show();
+    QTRY_VERIFY(catalogues.refused());
+    // What opening the panel asks -- the library and its roots -- settled.
+    QTest::qWait(300);
+    const auto opening = asked.load();
+    QVERIFY(opening >= 1);
+    // Retries of an unreachable engine come after 1 s and 2 s more.
+    QTest::qWait(3500);
+    QCOMPARE(asked.load(), opening);
 
     (*server)->stop();
 }

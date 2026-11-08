@@ -281,6 +281,7 @@ class LibraryBrowser final : public QObject {
     void loadFilterChildren(const QPersistentModelIndex& parent,
                             std::shared_ptr<const query::CompiledTkq> compiled);
     void refreshSourceLabel();
+    void scheduleReconnect();
     void updateProgress();
     void pumpCovers();
     void setStatus(const QString& status);
@@ -315,6 +316,13 @@ class LibraryBrowser final : public QObject {
     QTimer search_timer_;
     QTimer poll_timer_;
     QTimer change_timer_;
+    // An engine that could not be reached is tried again by itself -- after
+    // 1 s, then twice as long each time up to 30 s -- rather than waiting
+    // for the next library action: at startup the network may not be up
+    // yet, and an engine restarted for an update comes back on its own.
+    QTimer reconnect_timer_;
+    int reconnect_delay_{0};
+    bool reconnecting_{false};
     // How long the refresh after a change took, for --debug.
     QElapsedTimer elapsed_refresh_;
     QString status_;

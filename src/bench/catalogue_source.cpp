@@ -438,6 +438,11 @@ bool CatalogueSource::reachable() const {
     return link_->client && link_->client->connected();
 }
 
+bool CatalogueSource::refused() const {
+    const std::lock_guard guard{link_->mutex};
+    return link_->refused;
+}
+
 QString CatalogueSource::describe() const {
     const std::lock_guard guard{link_->mutex};
     const auto& failure = link_->failure;
