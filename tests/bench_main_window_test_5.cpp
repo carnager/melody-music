@@ -936,6 +936,32 @@ void BenchMainWindowTest::locateFindsARemoteTracksAlbumInTheRemoteLibrary() {
         QTRY_VERIFY(
             tree->currentIndex().data().toString().contains(album ? album_name : artist_name));
     }
+    // The same from the menu bar, and so the command palette: the open
+    // list's current track.
+    const auto commands = ui::windowCommands(window);
+    for (const bool album : {true, false}) {
+        const auto name =
+            album ? QStringLiteral("action-locate-album") : QStringLiteral("action-locate-artist");
+        QVERIFY2(std::ranges::any_of(commands,
+                                     [&name](const ui::PaletteCommand& command) {
+                                         return command.action->objectName() == name;
+                                     }),
+                 "the command palette offers Locate");
+        window.local_source_tabs_->setCurrentIndex(window.playlists_tab_);
+        tab->view->selectionModel()->setCurrentIndex(tab->model->index(0, local_title_column),
+                                                     QItemSelectionModel::ClearAndSelect |
+                                                         QItemSelectionModel::Rows);
+        window.refreshSelectionStatus();
+        auto* locate = window.findChild<QAction*>(name);
+        QVERIFY(locate != nullptr);
+        QVERIFY(locate->isEnabled());
+        locate->trigger();
+        QTRY_COMPARE(window.local_source_tabs_->tabData(window.local_source_tabs_->currentIndex())
+                         .toString(),
+                     window.remoteEngine()->key.text());
+        QTRY_VERIFY(
+            tree->currentIndex().data().toString().contains(album ? album_name : artist_name));
+    }
     window.remotePlayback()->stop();
     QSettings{}.remove(QLatin1String(SettingsDialog::library_show_local_key));
 }

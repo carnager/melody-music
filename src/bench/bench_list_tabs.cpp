@@ -691,6 +691,48 @@ void BenchMainWindow::refreshActiveContext() {
     }
 }
 
+// Found in the library of the engine the tab plays on: a remote tab's file
+// is in the remote's library, which also shows it.
+bool BenchMainWindow::canLocate(const EngineKey& engine) const {
+    return libraryOf(engine) != nullptr && (!engine.isLocal() || localLibraryShown());
+}
+
+void BenchMainWindow::locateInLibrary(const EngineKey& engine, std::string raw_path,
+                                      const bool album) {
+    if (!canLocate(engine)) {
+        return;
+    }
+    // The sidebar's tab for that engine's library.
+    int source = 1;
+    for (int index = 0; !engine.isLocal() && index < local_source_tabs_->count(); ++index) {
+        if (local_source_tabs_->tabData(index).toString() == engine.text()) {
+            source = index;
+        }
+    }
+    local_source_tabs_->setCurrentIndex(source);
+    refreshActiveContext();
+    libraryOf(engine)->locatePath(std::move(raw_path), album);
+}
+
+// The menu bar's Locate, and so the command palette's: the open list's
+// current track, or the first one chosen.
+void BenchMainWindow::locateCurrentRow(const bool album) {
+    auto* tab = currentListTab();
+    if (tab == nullptr || tab->view->selectionModel() == nullptr) {
+        return;
+    }
+    auto row = tab->view->currentIndex().row();
+    if (const auto chosen = tab->view->selectionModel()->selectedRows();
+        !tab->view->currentIndex().isValid() && !chosen.isEmpty()) {
+        row = chosen.front().row();
+    }
+    if (row < 0 || row >= tab->model->rowCount()) {
+        return;
+    }
+    locateInLibrary(EngineKey::of(tab->document),
+                    tab->model->rows()[static_cast<std::size_t>(row)].raw_path, album);
+}
+
 bool BenchMainWindow::transferRows(QTableView* source, const QVariantList& rows,
                                    const QString& target_id, const bool move,
                                    const int insertion_row) {
@@ -1174,36 +1216,19 @@ void BenchMainWindow::showTrackContextMenu(QTableView* view, const QPoint& posit
             });
     }
     if (source_tab != nullptr && target.row() < source_tab->model->rowCount()) {
+        track_context_menu_->addSeparator();
+        const auto engine = EngineKey::of(source_tab->document);
         const auto path =
             source_tab->model->rows()[static_cast<std::size_t>(target.row())].raw_path;
-        track_context_menu_->addSeparator();
-        // Found in the library of the engine the tab plays on: a remote
-        // tab's file is in the remote's library, which also shows it.
-        const auto engine = EngineKey::of(source_tab->document);
-        auto* library = libraryOf(engine);
-        const bool available = library != nullptr && (!engine.isLocal() || localLibraryShown());
+        const bool available = canLocate(engine);
         for (const bool album : {false, true}) {
             auto* locate = track_context_menu_->addAction(album ? QStringLiteral("Locate album")
                                                                 : QStringLiteral("Locate artist"));
             locate->setObjectName(album ? QStringLiteral("action-local-locate-album")
                                         : QStringLiteral("action-local-locate-artist"));
             locate->setEnabled(available);
-            connect(locate, &QAction::triggered, this, [this, path, album, engine] {
-                auto* finder = libraryOf(engine);
-                if (finder == nullptr)
-                    return;
-                // The sidebar's tab for that engine's library.
-                int source = 1;
-                for (int index = 0; !engine.isLocal() && index < local_source_tabs_->count();
-                     ++index) {
-                    if (local_source_tabs_->tabData(index).toString() == engine.text()) {
-                        source = index;
-                    }
-                }
-                local_source_tabs_->setCurrentIndex(source);
-                refreshActiveContext();
-                finder->locatePath(path, album);
-            });
+            connect(locate, &QAction::triggered, this,
+                    [this, engine, path, album] { locateInLibrary(engine, path, album); });
         }
     }
     addLocalRateMenus(view, source_tab);

@@ -31,7 +31,9 @@ Insert next follows the playing row in that list, otherwise the selected row or
 the beginning of an unselected list.
 
 Right-click a local track and choose **Locate artist** or **Locate album** to
-open its indexed entry in the Library sidebar. Navigation uses the exact file
+open its indexed entry in the Library sidebar. The same two commands are in
+**Edit** and so in the command palette, where they act on the open list's
+current track. Navigation uses the exact file
 path and album identity, clears the current search, and loads additional tree
 pages when needed. It does not scan folders or change the track list. Files not
 in the index show a message explaining how to add their folder.

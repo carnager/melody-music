@@ -415,6 +415,17 @@ void BenchMainWindow::buildWorkspace() {
     convert_action_->setEnabled(false);
     connect(convert_action_, &QAction::triggered, this, &BenchMainWindow::showConvertDialog);
     edit_menu->addSeparator();
+    locate_artist_action_ = edit_menu->addAction(tr("Locate artist"));
+    locate_artist_action_->setObjectName(QStringLiteral("action-locate-artist"));
+    locate_artist_action_->setToolTip(tr("Show the current track's artist in the library"));
+    locate_artist_action_->setEnabled(false);
+    connect(locate_artist_action_, &QAction::triggered, this, [this] { locateCurrentRow(false); });
+    locate_album_action_ = edit_menu->addAction(tr("Locate album"));
+    locate_album_action_->setObjectName(QStringLiteral("action-locate-album"));
+    locate_album_action_->setToolTip(tr("Show the current track's album in the library"));
+    locate_album_action_->setEnabled(false);
+    connect(locate_album_action_, &QAction::triggered, this, [this] { locateCurrentRow(true); });
+    edit_menu->addSeparator();
     auto* settings_action = edit_menu->addAction(QStringLiteral("Settings…"));
     settings_action->setObjectName(QStringLiteral("action-settings"));
     settings_action->setShortcut(QKeySequence(QStringLiteral("Ctrl+,")));
@@ -641,6 +652,7 @@ void trackknife::bench::BenchMainWindow::showCommandPalette() {
     // ADR-0345: every command the menus hold, and the window's keys; the
     // engines the library can be on as they are now.
     rebuildLibraryMenu();
+    refreshSelectionStatus();
     auto* palette = new ui::CommandPalette(ui::windowCommands(*this), this);
     palette->setAttribute(Qt::WA_DeleteOnClose);
     palette->open();

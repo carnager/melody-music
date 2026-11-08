@@ -529,6 +529,10 @@ class BenchMainWindow final : public QMainWindow, public WorkspaceView {
                             const QString& otherwise);
     QPointer<QObject> lyrics_provider_run_;
     void playCurrentRow();
+    // A tab's track found in the library of the engine the tab plays on.
+    [[nodiscard]] bool canLocate(const EngineKey& engine) const;
+    void locateInLibrary(const EngineKey& engine, std::string raw_path, bool album);
+    void locateCurrentRow(bool album);
     void showMetadataProperties();
     // ADR-0237: `work` is the engine that does the file work, or null for
     // this process.
@@ -783,6 +787,8 @@ class BenchMainWindow final : public QMainWindow, public WorkspaceView {
     QAction* properties_action_{nullptr};
     QAction* convert_action_{nullptr};
     QAction* identify_action_{nullptr};
+    QAction* locate_artist_action_{nullptr};
+    QAction* locate_album_action_{nullptr};
     QAction* remove_selected_action_{nullptr};
     QAction* undo_list_action_{nullptr};
     QAction* redo_list_action_{nullptr};

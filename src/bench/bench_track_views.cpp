@@ -692,6 +692,13 @@ void BenchMainWindow::refreshSelectionStatus() {
     if (identify_action_ != nullptr) {
         identify_action_->setEnabled(viewed && tab->model->rowCount() > 0);
     }
+    const bool locatable = viewed && (tab->view->currentIndex().isValid() || !rows.empty()) &&
+                           canLocate(EngineKey::of(tab->document));
+    for (auto* locate : {locate_artist_action_, locate_album_action_}) {
+        if (locate != nullptr) {
+            locate->setEnabled(locatable);
+        }
+    }
     const auto summary = workspace_.selectionSummary(viewed ? tab : nullptr, rows);
     selection_status_->setText(summary.text);
     selection_status_->setToolTip(summary.tooltip);
