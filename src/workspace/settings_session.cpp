@@ -83,6 +83,7 @@ SettingsSession::SettingsSession(QObject* parent) : QObject(parent) {
     values_.insert(buffer_capacity_key, std::clamp(capacity, 10, 10000));
     values_.insert(buffer_threshold_key, std::clamp(threshold, 1, 10000));
     setValue(buffer_profile_key, profile);
+    read(QStringLiteral("playback/pause-on-close"), false);
     read(preamp_with_key, 0.0);
     read(preamp_without_key, 0.0);
     read(QLatin1String(SettingsKeys::ratings_in_tags_key), false);

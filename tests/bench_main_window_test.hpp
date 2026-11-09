@@ -322,6 +322,7 @@ class BenchMainWindowTest final : public QObject {
     void libraryDragsIntoUpNextWithCovers();
     void quickAlbumFindsByWordsAndPutsItAway();
     void quickAlbumShiftEnterReplacesAndPlays();
+    void closingPausesWhatPlaysWhenAsked();
     void quickTrackFindsATrackByItsTitle();
     void settingsListEnginesFoundOnTheNetwork();
     void recentlyAddedComesFirstWhereAskedFor();

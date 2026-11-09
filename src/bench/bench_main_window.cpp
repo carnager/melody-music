@@ -22,6 +22,7 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPointer>
+#include <QSettings>
 #include <QSplitter>
 #include <QTabBar>
 #include <QTabWidget>
@@ -105,6 +106,17 @@ void BenchMainWindow::closeEvent(QCloseEvent* event) {
         if (properties != nullptr && !properties->close()) {
             event->ignore();
             return;
+        }
+    }
+    // ADR-0349: asked to, what plays on any engine this window follows --
+    // this computer's or a server's -- pauses as the window closes. Sent
+    // now; each connection waits for its commands as it goes.
+    if (QSettings{}.value(QStringLiteral("playback/pause-on-close"), false).toBool()) {
+        for (const auto& engine : engines_) {
+            if (engine->playback != nullptr && engine->playback->active() &&
+                engine->playback->state().status == QStringLiteral("playing")) {
+                engine->playback->pause();
+            }
         }
     }
     stopBackgroundWork();

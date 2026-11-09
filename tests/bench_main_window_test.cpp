@@ -1071,6 +1071,46 @@ void BenchMainWindowTest::quickAlbumShiftEnterReplacesAndPlays() {
     window.localPlayback()->stop();
 }
 
+// ADR-0349: closing the window leaves the music playing, unless Settings ask
+// it to pause what plays as it closes.
+void BenchMainWindowTest::closingPausesWhatPlaysWhenAsked() {
+    MELODY_REQUIRE_REALTIME_AUDIO();
+    QTemporaryDir media;
+    QVERIFY(media.isValid());
+    const auto music = media.filePath(QStringLiteral("music"));
+    QVERIFY(QDir{}.mkpath(music));
+    const auto file = music + QStringLiteral("/long.wav");
+    write_wave(file, wave_sample_rate * 60U);
+    for (const bool pause : {false, true}) {
+        QSettings{}.setValue(QStringLiteral("playback/pause-on-close"), pause);
+        BenchMainWindow window;
+        window.show();
+        QTRY_VERIFY(window.lists_restored_ && window.playingOnEngine());
+        window.openLocalPaths({QFile::encodeName(file).toStdString()});
+        QTRY_VERIFY(window.currentListTab() != nullptr &&
+                    window.currentListTab()->model->rowCount() == 1);
+        window.playRow(*window.currentListTab(), 0);
+        QTRY_COMPARE_WITH_TIMEOUT(window.localPlayback()->state().status, QStringLiteral("playing"),
+                                  10'000);
+        QVERIFY(window.close());
+        if (pause) {
+            QTRY_COMPARE(window.localPlayback()->state().status, QStringLiteral("paused"));
+        } else {
+            QTest::qWait(500);
+            QCOMPARE(window.localPlayback()->state().status, QStringLiteral("playing"));
+        }
+        window.localPlayback()->stop();
+        QTRY_COMPARE(window.localPlayback()->state().status, QStringLiteral("stopped"));
+    }
+    // Settings › Playback shows it as set.
+    {
+        SettingsDialog dialog;
+        auto* box = dialog.findChild<QCheckBox*>(QStringLiteral("bench-settings-pause-on-close"));
+        QVERIFY(box != nullptr && box->isChecked());
+    }
+    QSettings{}.remove(QStringLiteral("playback/pause-on-close"));
+}
+
 void BenchMainWindowTest::quickAlbumFindsByWordsAndPutsItAway() {
     QTemporaryDir media;
     QVERIFY(media.isValid());
