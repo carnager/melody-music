@@ -62,6 +62,7 @@ SettingsSession::SettingsSession(QObject* parent) : QObject(parent) {
     read(notifications_key, false);
     read(notifications_background_key, false);
     read(panel_animations_key, true);
+    read(QStringLiteral("panels/start"), QString{});
     read(coloured_initials_key, false);
     read(QLatin1String(color_scheme_key), QStringLiteral("system"));
     // As its choices hold it, so the combo shows what is chosen: unread, it

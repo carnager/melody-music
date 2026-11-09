@@ -48,11 +48,27 @@ void BenchMainWindow::buildLyrics() {
     connect(panels, &QAction::triggered, this, &BenchMainWindow::togglePanels);
     addAction(panels);
     watchSidePanel(lyrics_dock_);
+
+    // The one in front kept, for the next window -- not those brought there
+    // while the panels are made and tabbed.
+    const QSettings settings;
+    side_panel_front_ = settings.value(QStringLiteral("panels/start")).toString();
+    if (side_panel_front_.isEmpty()) {
+        side_panel_front_ = settings.value(QStringLiteral("panels/front")).toString();
+    }
+    connect(this, &QMainWindow::tabifiedDockWidgetActivated, this, [this](QDockWidget* dock) {
+        if (!arranging_side_panels_ && side_panel_front_.isEmpty() &&
+            dynamic_cast<AnimatedPanelDock*>(dock) != nullptr) {
+            QSettings{}.setValue(QStringLiteral("panels/front"), dock->objectName());
+        }
+    });
 }
 
 void BenchMainWindow::watchSidePanel(QDockWidget* dock) {
-    connect(dock, &QDockWidget::visibilityChanged, this,
-            [this] { QTimer::singleShot(0, this, &BenchMainWindow::refreshPanelsButton); });
+    connect(dock, &QDockWidget::visibilityChanged, this, [this] {
+        QTimer::singleShot(0, this, &BenchMainWindow::refreshPanelsButton);
+        QTimer::singleShot(0, this, &BenchMainWindow::arrangeSidePanelTabs);
+    });
 }
 
 void BenchMainWindow::refreshPanelsButton() {
@@ -84,12 +100,21 @@ void BenchMainWindow::togglePanels() {
     const bool shown = std::ranges::any_of(
         panels, [](const AnimatedPanelDock* panel) { return panel->isVisible(); });
     QSettings{}.setValue(QStringLiteral("panels/shown"), !shown);
+    // Tabs going one after another bring the rest to the front in turn:
+    // not the one in front, kept.
+    arranging_side_panels_ = true;
     for (auto* panel : panels) {
         if (panel->isVisible() == shown) {
             panel->setVisible(!shown);
         }
     }
+    arranging_side_panels_ = false;
     if (!shown) {
+        // Each comes to the front as it shows: the one in front before is
+        // brought back once they all have.
+        if (side_panel_front_.isEmpty()) {
+            side_panel_front_ = QSettings{}.value(QStringLiteral("panels/front")).toString();
+        }
         QTimer::singleShot(0, this, &BenchMainWindow::tabOpenSidePanels);
         // In sight again: each asked about what plays now.
         refreshLyrics(plugin_panel_state_);

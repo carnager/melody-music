@@ -482,6 +482,17 @@ class BenchMainWindow final : public QMainWindow, public WorkspaceView {
     // after the window opens with those open before, and after the
     // plugins' are made again.
     void tabOpenSidePanels();
+    // The side panels' tabs in the order they were dragged to
+    // (`panels/order`), and in front the one Settings chose
+    // (`panels/start`), else the one in front when the window closed
+    // (`panels/front`) -- after the window opens, Panels shows them again,
+    // or the plugins' are made again.
+    void arrangeSidePanelTabs();
+    void keepSidePanelOrder(const QTabBar* bar);
+    bool arranging_side_panels_{false};
+    // The panel to bring to the front once the panels show; until then
+    // which comes to the front is not kept.
+    QString side_panel_front_;
     void refreshPluginPanels(const EnginePlayback::State& state);
     void askPluginPanel(PluginPanelDock& slot);
     // What a plugin is told of what plays: the track, its length, the

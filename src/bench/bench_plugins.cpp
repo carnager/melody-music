@@ -20,8 +20,10 @@
 #include <QPointer>
 #include <QSettings>
 #include <QStatusBar>
+#include <QTabBar>
 #include <QTimer>
 
+#include <algorithm>
 #include <memory>
 
 namespace trackknife::bench {
@@ -180,6 +182,11 @@ void BenchMainWindow::addLibraryPluginActions(LocalLibraryPanel* panel, const En
 }
 
 void BenchMainWindow::buildPluginPanels() {
+    // Gone and made again, each brings another to the front: the one in
+    // front before is brought back once they all are there.
+    if (side_panel_front_.isEmpty()) {
+        side_panel_front_ = QSettings{}.value(QStringLiteral("panels/front")).toString();
+    }
     // Open before, open after: a panel made again is not one closed.
     QSet<QString> open;
     for (auto& slot : plugin_panels_) {
@@ -267,6 +274,105 @@ void BenchMainWindow::tabOpenSidePanels() {
             }
         }
     }
+    arrangeSidePanelTabs();
+}
+
+namespace {
+
+// The side panels a tab bar of the window's shows, in its order: Qt keeps a
+// tab bar for each group of docks tabbed together, each tab's data the dock
+// it stands for. Empty for any other tab bar, and for one left over.
+QList<QDockWidget*> sidePanelTabs(const QMainWindow* window, const QTabBar* bar) {
+    QList<QDockWidget*> tabs;
+    const auto docks = window->findChildren<QDockWidget*>(Qt::FindDirectChildrenOnly);
+    for (int index = 0; index < bar->count(); ++index) {
+        const auto id = bar->tabData(index).value<quintptr>();
+        const auto dock = std::ranges::find_if(docks, [id](const QDockWidget* dock) {
+            return reinterpret_cast<quintptr>(dock) == id &&
+                   dynamic_cast<const AnimatedPanelDock*>(dock) != nullptr;
+        });
+        if (dock == docks.end()) {
+            return {};
+        }
+        tabs.push_back(*dock);
+    }
+    return tabs;
+}
+
+} // namespace
+
+void BenchMainWindow::arrangeSidePanelTabs() {
+    // A tab bar Qt makes when the window is next laid out.
+    if (auto* layout = this->layout(); layout != nullptr) {
+        layout->activate();
+    }
+    arranging_side_panels_ = true;
+    const auto order = QSettings{}.value(QStringLiteral("panels/order")).toStringList();
+    const auto rank = [&order](const QDockWidget* dock) {
+        const auto at = order.indexOf(dock->objectName());
+        return at < 0 ? order.size() : at;
+    };
+    for (auto* bar : findChildren<QTabBar*>(Qt::FindDirectChildrenOnly)) {
+        auto tabs = sidePanelTabs(this, bar);
+        if (tabs.isEmpty()) {
+            continue;
+        }
+        if (!bar->property("bench-side-panels").toBool()) {
+            bar->setProperty("bench-side-panels", true);
+            connect(bar, &QTabBar::tabMoved, this, [this, bar] {
+                if (!arranging_side_panels_) {
+                    keepSidePanelOrder(bar);
+                }
+            });
+        }
+        // Moved on the bar, as a drag moves them: Qt's layout follows.
+        auto wanted = tabs;
+        std::ranges::stable_sort(wanted, {}, rank);
+        for (qsizetype index = 0; index < wanted.size(); ++index) {
+            const auto at = sidePanelTabs(this, bar).indexOf(wanted[index]);
+            if (at >= 0 && at != index) {
+                bar->moveTab(static_cast<int>(at), static_cast<int>(index));
+            }
+        }
+    }
+    if (!side_panel_front_.isEmpty()) {
+        const auto docks = findChildren<QDockWidget*>(Qt::FindDirectChildrenOnly);
+        if (std::ranges::any_of(docks, [](const QDockWidget* dock) {
+                return dynamic_cast<const AnimatedPanelDock*>(dock) != nullptr && dock->isVisible();
+            })) {
+            if (auto* front = findChild<QDockWidget*>(side_panel_front_);
+                front != nullptr && front->isVisible()) {
+                // And again once what is queued has run: a panel joining
+                // the tabs comes to the front then too.
+                front->raise();
+                QTimer::singleShot(0, front, [front] { front->raise(); });
+            }
+            side_panel_front_.clear();
+        }
+    }
+    arranging_side_panels_ = false;
+}
+
+void BenchMainWindow::keepSidePanelOrder(const QTabBar* bar) {
+    QStringList shown;
+    for (const auto* dock : sidePanelTabs(this, bar)) {
+        shown << dock->objectName();
+    }
+    if (shown.isEmpty()) {
+        return;
+    }
+    // The tabs on this bar take the places they had among all the panels
+    // ever ordered, in their new order; those not on it keep theirs.
+    QSettings settings;
+    QStringList order;
+    qsizetype next = 0;
+    for (const auto& name : settings.value(QStringLiteral("panels/order")).toStringList()) {
+        order << (shown.contains(name) ? shown.at(next++) : name);
+    }
+    for (; next < shown.size(); ++next) {
+        order << shown.at(next);
+    }
+    settings.setValue(QStringLiteral("panels/order"), order);
 }
 
 void BenchMainWindow::refreshPluginPanels(const EnginePlayback::State& state) {

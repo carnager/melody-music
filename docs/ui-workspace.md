@@ -216,6 +216,9 @@ right, the divider kept where it was left. Up Next is a section under the
 lists, its height kept (ADR-0294). The side panels -- Lyrics, a plugin's --
 are docks beside it; open together on one side they share it as tabs, the
 last opened in front, and Panels in the header hides or brings them all.
+Tabs dragged into another order keep it, and the one in front is in front
+again in the next window -- or the one Settings › General › Panel in front
+names.
 There is no layout editor: ADR-0026's composed layouts are gone.
 
 Every panel has:
