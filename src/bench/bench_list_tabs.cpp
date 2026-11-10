@@ -1119,7 +1119,7 @@ void BenchMainWindow::fillContinueMenu() {
     nothing->setChecked(!current);
     group->addAction(nothing);
     connect(nothing, &QAction::triggered, this, [choose] { choose({}); });
-    const auto choices = workspace_.continuationChoices();
+    const auto choices = workspace_.continuationChoices(*tab);
     if (!choices.empty()) {
         continue_menu_->addSeparator();
     }

@@ -29,8 +29,11 @@ EnginePlayback::EnginePlayback(const CatalogueSource& catalogues, QObject* paren
     }
     if (endpoint_.tcp()) {
         connectInBackground();
-    } else {
-        static_cast<void>(open());
+    } else if (open()) {
+        // Answered later, on this thread: whoever connects to this object
+        // once it is made hears them.
+        refreshDynamicRules();
+        refreshContinuations();
     }
 
     // An engine is a separate process with its own lifetime: it can be
@@ -214,6 +217,20 @@ std::unique_ptr<protocol::Client> EnginePlayback::handshake() {
             }
             return;
         }
+        if (event.name == "dynamic.rules") {
+            auto rules = dynamicRulesOf(event.data);
+            if (self) {
+                QMetaObject::invokeMethod(
+                    self,
+                    [self, rules = std::move(rules)]() mutable {
+                        if (self) {
+                            self->adoptDynamicRules(std::move(rules));
+                        }
+                    },
+                    Qt::QueuedConnection);
+            }
+            return;
+        }
         if (event.name == "list.continuations") {
             auto continuations = continuationsOf(event.data);
             if (self) {
@@ -309,6 +326,7 @@ void EnginePlayback::takeArrived() {
         return;
     }
     client_ = std::move(client);
+    refreshDynamicRules();
     refreshContinuations();
     emit connected();
     emit changed();
@@ -337,6 +355,7 @@ void EnginePlayback::maintain() {
     if (!open() && !(revive_ && revive_() && open())) {
         return;
     }
+    refreshDynamicRules();
     refreshContinuations();
     emit connected();
     emit changed();
@@ -1119,8 +1138,7 @@ EnginePlayback::continuationsOf(const protocol::Json& data) {
                              .groups = count("groups", 0),
                              .per_group = count("per_group", 0),
                              .limit = count("limit", 100),
-                             .shuffle = value.value("shuffle", false),
-                             .selection_told = value.contains("groups")});
+                             .shuffle = value.value("shuffle", false)});
         }
     }
     return found;
@@ -1143,23 +1161,94 @@ void EnginePlayback::refreshContinuations() {
             });
 }
 
-void EnginePlayback::setContinuation(const QString& list, const std::optional<Continuation>& rule) {
+void EnginePlayback::setContinuation(const QString& list, const std::optional<QString>& rule_id) {
     protocol::Json params{{"list", list.toStdString()}};
-    if (rule) {
-        params["rule"] = protocol::Json{{"id", rule->rule_id.toStdString()},
-                                        {"name", rule->name.toStdString()},
-                                        {"query", rule->query.toStdString()},
-                                        {"group_by", rule->group_by.toStdString()},
-                                        {"groups", rule->groups},
-                                        {"per_group", rule->per_group},
-                                        {"limit", rule->limit},
-                                        {"shuffle", rule->shuffle}};
+    if (rule_id) {
+        params["rule"] = rule_id->toStdString();
     }
     request(QStringLiteral("list.continuation.set"), std::move(params),
             [this](const core::Result<protocol::Json>& answer) {
                 if (!answer) {
                     emit failed(QString::fromStdString(answer.error().message));
                 }
+            });
+}
+
+QVector<DynamicPlaylistDefinition> EnginePlayback::dynamicRulesOf(const protocol::Json& data) {
+    QVector<DynamicPlaylistDefinition> rules;
+    const auto told = data.find("rules");
+    if (told == data.end() || !told->is_array()) {
+        return rules;
+    }
+    for (const auto& value : *told) {
+        auto rule = dynamicRuleOf(value);
+        if (!rule.id.isEmpty()) {
+            rules.push_back(std::move(rule));
+        }
+    }
+    return rules;
+}
+
+void EnginePlayback::adoptDynamicRules(QVector<DynamicPlaylistDefinition> rules) {
+    const bool first = !dynamic_rules_known_;
+    dynamic_rules_known_ = true;
+    if (!first && rules.size() == dynamic_rules_.size() &&
+        std::equal(rules.begin(), rules.end(), dynamic_rules_.begin(),
+                   [](const auto& a, const auto& b) {
+                       return dynamicRuleJson(a) == dynamicRuleJson(b);
+                   })) {
+        return;
+    }
+    dynamic_rules_ = std::move(rules);
+    emit dynamicRulesChanged();
+}
+
+void EnginePlayback::refreshDynamicRules() {
+    request(QStringLiteral("dynamic.rules"), protocol::Json::object(),
+            [this](const core::Result<protocol::Json>& answer) {
+                if (answer) {
+                    adoptDynamicRules(dynamicRulesOf(*answer));
+                }
+            });
+}
+
+void EnginePlayback::saveDynamicRule(const DynamicPlaylistDefinition& rule, RuleAnswer answer) {
+    request(QStringLiteral("dynamic.save"), protocol::Json{{"rule", dynamicRuleJson(rule)}},
+            [answer = std::move(answer)](const core::Result<protocol::Json>& saved) {
+                if (!saved) {
+                    answer(std::unexpected(saved.error()));
+                    return;
+                }
+                const auto kept = saved->find("rule");
+                answer(kept == saved->end() ? DynamicPlaylistDefinition{} : dynamicRuleOf(*kept));
+            });
+}
+
+void EnginePlayback::deleteDynamicRule(const QString& id,
+                                       std::function<void(core::Result<void>)> answer) {
+    request(QStringLiteral("dynamic.delete"), protocol::Json{{"id", id.toStdString()}},
+            [answer = std::move(answer)](const core::Result<protocol::Json>& deleted) {
+                if (!deleted) {
+                    answer(std::unexpected(deleted.error()));
+                    return;
+                }
+                answer({});
+            });
+}
+
+void EnginePlayback::handDynamicRules(const QVector<DynamicPlaylistDefinition>& rules,
+                                      std::function<void(core::Result<int>)> answer) {
+    auto handed = protocol::Json::array();
+    for (const auto& rule : rules) {
+        handed.push_back(dynamicRuleJson(rule));
+    }
+    request(QStringLiteral("dynamic.adopt"), protocol::Json{{"rules", std::move(handed)}},
+            [answer = std::move(answer)](const core::Result<protocol::Json>& adopted) {
+                if (!adopted) {
+                    answer(std::unexpected(adopted.error()));
+                    return;
+                }
+                answer(adopted->value("adopted", 0));
             });
 }
 

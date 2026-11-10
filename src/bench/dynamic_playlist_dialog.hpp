@@ -25,9 +25,10 @@ class DynamicPlaylistDialog final : public QDialog {
   public:
     using LibrarySearch = DynamicPlaylistSession::LibrarySearch;
     using Library = DynamicPlaylistSession::Library;
+    using Rules = DynamicPlaylistSession::Rules;
     // `libraries`: the engines to search, this computer's first; none, only
-    // this computer's.
-    DynamicPlaylistDialog(QString profile, std::vector<Library> libraries, LibrarySearch search,
+    // this computer's. `rules`: each engine's dynamic playlists (ADR-0349).
+    DynamicPlaylistDialog(std::vector<Library> libraries, Rules rules, LibrarySearch search,
                           QWidget* parent = nullptr);
     ~DynamicPlaylistDialog() override;
     ui::QueueTableView* view() const { return view_; }
@@ -35,6 +36,7 @@ class DynamicPlaylistDialog final : public QDialog {
     EngineKey engine() const { return session_->engine(); }
     void followLibrary(const EngineKey& engine) { session_->followLibrary(engine); }
     void libraryChanged() { session_->libraryChanged(); }
+    void rulesChanged(const EngineKey& engine) { session_->rulesChanged(engine); }
     void invalidateAuthority() { session_->invalidateAuthority(); }
     bool authorityValid() const { return session_->authorityValid(); }
     const DynamicPlaylistService::Tracks& tracks() const { return session_->tracks(); }

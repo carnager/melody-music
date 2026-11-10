@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include "bench/dynamic_playlist_definition.hpp"
 #include "bench/local_list_model.hpp"
 #include "trackknife/core/cancellation.hpp"
 #include "trackknife/core/result.hpp"
@@ -18,30 +19,6 @@ class QNetworkReply;
 
 namespace trackknife::bench {
 
-struct DynamicPlaylistDefinition {
-    QString id{};
-    QString name{};
-    QString profile{};
-    QString source{QStringLiteral("rules")};
-    QString query{QStringLiteral("rating GREATER 6")};
-    QString artist{};
-    QString track{};
-    QString user{};
-    QString tag{};
-    int limit{100};
-    bool shuffle{false};
-    // ADR-0258: rules may pick `groups` groups of their matches by this
-    // tkfmt-1 expression, `per_group` tracks from each (0: all).
-    QString group_by{};
-    int groups{0};
-    int per_group{0};
-
-    // ADR-0258: shipped with Trackknife, used and copied but not changed.
-    [[nodiscard]] bool shipped() const { return id.startsWith(QStringLiteral("shipped:")); }
-    // What the engine is asked for, for a rule.
-    [[nodiscard]] engine::DynamicSelection selection() const;
-};
-
 inline constexpr int lastfm_candidate_limit = 500;
 
 struct RecommendationTrack {
@@ -50,15 +27,13 @@ struct RecommendationTrack {
     QString mbid;
 };
 
-// Profile-bound definitions, independently versioned from ordinary playlists.
-// No key or password is stored in a definition, and no shipped one.
+// The definitions the window kept in its settings before ADR-0349, by
+// profile, independently versioned from ordinary playlists. No key or
+// password is stored in a definition, and no shipped one. They are handed to
+// each engine once; the engines keep the rules now.
 core::Result<QVector<DynamicPlaylistDefinition>> loadDynamicPlaylists(const QString& profile);
 core::Result<void> saveDynamicPlaylists(const QString& profile,
                                         const QVector<DynamicPlaylistDefinition>& definitions);
-// ADR-0258: the rules that ship, under `profile`.
-QVector<DynamicPlaylistDefinition> shippedDynamicPlaylists(const QString& profile);
-// The shipped rules, then those saved.
-core::Result<QVector<DynamicPlaylistDefinition>> dynamicPlaylistCatalog(const QString& profile);
 // ADR-0258: moves definitions saved under any other profile -- the retired
 // MPD backend kept its own -- into `profile`, once.
 void adoptDynamicPlaylists(const QString& profile);

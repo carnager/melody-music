@@ -1,10 +1,12 @@
 # Dynamic playlists
 
-Choose **File → Dynamic playlists**. The dropdown at the top picks the
-library: one per engine, by its name. It starts on the library of the tab
-you opened it from, like Search. Saved definitions are shared, so the same rule
-can run against either library, and what it finds plays on that library's
-engine.
+Choose **File → Dynamic playlists**. It works on the library engine's
+rules: the engine keeps them, so every client sees the same ones -- the
+phone, melody-cli and Home Assistant included -- and what a rule finds
+plays on that engine. Rules belong to one engine, as lists do: a rule made
+on the home server is not on the laptop's own engine. The first time Melody
+reaches an engine it hands over the rules it kept itself before, so each
+engine starts with the same set (ADR-0349).
 
 Choose **Library rules**, enter a name and a `tkq-1` rule, then **Refresh**:
 
@@ -90,8 +92,9 @@ in single mode. Added tracks are ordinary entries: remove, move or rate them
 as usual. Choose **Nothing — the list ends** to stop. The tracks already added
 stay.
 
-Editing a rule updates every list that continues with it, and removing the
-rule ends their continuation. Last.fm sources are not offered, because the
+Editing a rule updates every list that continues with it at once, and
+removing the rule ends their continuation -- the engine looks the rule up
+by its id as the list ends. Last.fm sources are not offered, because the
 engine cannot query Last.fm on its own. See ADR-0253 and ADR-0258.
 
 History rules may also order results, for example
@@ -119,6 +122,24 @@ definition and library.
 fresh selection keeps Last.fm’s ranking order. If your library has too few
 matches to vary the selection, the result reports that all available matches
 are included. Missing matches can leave fewer tracks than requested.
+
+## Playing a rule from elsewhere
+
+The engine plays a rule itself: `dynamic.play` replaces its queue with what
+the rule picks and starts it. Home Assistant shows the rules under **Browse
+media** as *Dynamic playlists*, and an automation can play one by name:
+
+```yaml
+action: media_player.play_media
+target:
+  entity_id: media_player.gemenon
+data:
+  media_content_type: playlist
+  media_content_id: Random album
+```
+
+Last.fm rules are not offered there: Melody fetches Last.fm, not the
+engine.
 
 Results come entirely from the chosen engine's library. Use Library Refresh
 first if new files are not indexed. Closing the dynamic editor leaves saved

@@ -3,17 +3,17 @@
 
 #include "bench/local_list_model.hpp"
 
+#include <QPointer>
 #include <QSettings>
-#include <QUuid>
 
 #include <algorithm>
 #include <utility>
 
 namespace trackknife::bench {
 
-DynamicPlaylistSession::DynamicPlaylistSession(QString profile, std::vector<Library> libraries,
+DynamicPlaylistSession::DynamicPlaylistSession(std::vector<Library> libraries, Rules rules,
                                                LibrarySearch search, QObject* parent)
-    : QObject(parent), profile_(std::move(profile)), libraries_(std::move(libraries)),
+    : QObject(parent), libraries_(std::move(libraries)), rules_(std::move(rules)),
       service_(new DynamicPlaylistService(
           [this, search = std::move(search)](engine::DynamicSelection selection,
                                              core::CancellationToken cancellation,
@@ -44,14 +44,41 @@ DynamicPlaylistSession::DynamicPlaylistSession(QString profile, std::vector<Libr
         emit changed();
     });
     connect(service_, &DynamicPlaylistService::finished, this, &DynamicPlaylistSession::finished);
-    const auto loaded = dynamicPlaylistCatalog(profile_);
-    if (loaded)
-        definitions_ = *loaded;
-    else
-        catalog_writable_ = false;
+    loadCatalog();
     loadSelection();
-    if (!loaded)
-        status_ = QString::fromStdString(loaded.error().message);
+}
+
+void DynamicPlaylistSession::loadCatalog() {
+    auto told = rules_.of ? rules_.of(engine()) : std::nullopt;
+    catalog_writable_ = told.has_value();
+    definitions_ = told ? std::move(*told) : QVector<DynamicPlaylistDefinition>{};
+}
+
+void DynamicPlaylistSession::rulesChanged(const EngineKey& told) {
+    if (told != engine()) {
+        return;
+    }
+    const auto shown = catalog_index_ > 0
+                           ? definitions_[static_cast<qsizetype>(catalog_index_ - 1)].id
+                           : QString{};
+    loadCatalog();
+    const auto found = std::ranges::find(definitions_, shown, &DynamicPlaylistDefinition::id);
+    if (!shown.isEmpty() && found == definitions_.end()) {
+        // Removed, here or by another client.
+        catalog_index_ = 0;
+        loadSelection();
+        return;
+    }
+    // What is shown, and perhaps edited, stays as it is.
+    catalog_index_ = shown.isEmpty() ? 0 : static_cast<int>(found - definitions_.begin()) + 1;
+    emit catalogChanged();
+    emit changed();
+}
+
+void DynamicPlaylistSession::selectId(const QString& id) {
+    const auto found = std::ranges::find(definitions_, id, &DynamicPlaylistDefinition::id);
+    catalog_index_ =
+        found == definitions_.end() ? 0 : static_cast<int>(found - definitions_.begin()) + 1;
 }
 
 DynamicPlaylistSession::~DynamicPlaylistSession() { service_->cancel(); }
@@ -112,7 +139,6 @@ DynamicPlaylistDefinition DynamicPlaylistSession::definition() const {
     definition.id = catalog_index_ > 0 ? definitions_[static_cast<qsizetype>(catalog_index_ - 1)].id
                                        : QString{};
     definition.name = draft_.name.trimmed();
-    definition.profile = profile_;
     return definition;
 }
 
@@ -122,9 +148,15 @@ void DynamicPlaylistSession::chooseLibrary(int index) {
     if (index >= static_cast<int>(libraries_.size()) || index == library_) {
         return;
     }
+    const auto shown = catalog_index_ > 0
+                           ? definitions_[static_cast<qsizetype>(catalog_index_ - 1)].id
+                           : QString{};
     library_ = index;
     emit libraryChosen(engine());
-    // The same definition, run against the other library.
+    // The same definition, run against the other library, if it has it.
+    loadCatalog();
+    selectId(shown);
+    emit catalogChanged();
     const bool saved_rules = catalog_index_ > 0 && draft_.source == QStringLiteral("rules");
     discardResults();
     status_ = QStringLiteral("Choose Refresh to evaluate this definition.");
@@ -224,16 +256,10 @@ void DynamicPlaylistSession::setPerGroup(const int per_group) {
     edited();
 }
 
-namespace {
-// What is written: never the shipped definitions.
-[[nodiscard]] QVector<DynamicPlaylistDefinition>
-saved_only(QVector<DynamicPlaylistDefinition> definitions) {
-    definitions.removeIf([](const auto& definition) { return definition.shipped(); });
-    return definitions;
-}
-} // namespace
-
 void DynamicPlaylistSession::save() {
+    if (!catalog_writable_ || writing_) {
+        return;
+    }
     auto saved_definition = definition();
     if (saved_definition.shipped()) {
         // A shipped rule is kept as it ships; what is saved is a copy.
@@ -256,47 +282,70 @@ void DynamicPlaylistSession::save() {
             return;
         }
     }
-    auto next = definitions_;
-    if (saved_definition.id.isEmpty()) {
-        saved_definition.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
-        next.push_back(saved_definition);
-    } else
-        for (auto& entry : next)
-            if (entry.id == saved_definition.id)
-                entry = saved_definition;
-    const auto saved = saveDynamicPlaylists(profile_, saved_only(next));
-    if (!saved) {
-        status_ = QString::fromStdString(saved.error().message);
-        emit changed();
-        return;
-    }
-    definitions_ = std::move(next);
-    const auto found =
-        std::ranges::find(definitions_, saved_definition.id, &DynamicPlaylistDefinition::id);
-    catalog_index_ =
-        found == definitions_.end() ? 0 : static_cast<int>(found - definitions_.begin()) + 1;
-    status_ = QStringLiteral("Definition saved");
-    emit definitionsSaved();
-    emit catalogChanged();
+    writing_ = true;
+    status_ = QStringLiteral("Saving…");
     emit changed();
+    const QPointer self{this};
+    const auto asked = engine();
+    rules_.save(asked, std::move(saved_definition),
+                [self, asked](core::Result<DynamicPlaylistDefinition> saved) {
+                    if (!self) {
+                        return;
+                    }
+                    self->writing_ = false;
+                    if (!saved || saved->id.isEmpty()) {
+                        self->status_ = saved ? QStringLiteral("The engine kept no rule")
+                                              : QString::fromStdString(saved.error().message);
+                        emit self->changed();
+                        return;
+                    }
+                    if (asked != self->engine()) {
+                        emit self->changed();
+                        return;
+                    }
+                    // Shown at once; the engine's own word follows.
+                    auto& definitions = self->definitions_;
+                    const auto found =
+                        std::ranges::find(definitions, saved->id, &DynamicPlaylistDefinition::id);
+                    if (found == definitions.end()) {
+                        definitions.push_back(*saved);
+                    } else {
+                        *found = *saved;
+                    }
+                    self->selectId(saved->id);
+                    self->draft_ = *saved;
+                    self->status_ = QStringLiteral("Definition saved");
+                    emit self->definitionsSaved();
+                    emit self->catalogChanged();
+                    emit self->changed();
+                });
 }
 
 void DynamicPlaylistSession::remove() {
-    if (catalog_index_ <= 0 || definitionShipped())
+    if (catalog_index_ <= 0 || definitionShipped() || !catalog_writable_ || writing_)
         return;
     const auto id = definitions_[static_cast<qsizetype>(catalog_index_ - 1)].id;
-    auto next = definitions_;
-    next.removeIf([&id](const auto& entry) { return entry.id == id; });
-    const auto saved = saveDynamicPlaylists(profile_, saved_only(next));
-    if (!saved) {
-        status_ = QString::fromStdString(saved.error().message);
-        emit changed();
-        return;
-    }
-    definitions_ = std::move(next);
-    catalog_index_ = 0;
-    emit definitionsSaved();
-    loadSelection();
+    writing_ = true;
+    const QPointer self{this};
+    const auto asked = engine();
+    rules_.remove(asked, id, [self, asked, id](core::Result<void> removed) {
+        if (!self) {
+            return;
+        }
+        self->writing_ = false;
+        if (!removed) {
+            self->status_ = QString::fromStdString(removed.error().message);
+            emit self->changed();
+            return;
+        }
+        if (asked != self->engine()) {
+            return;
+        }
+        self->definitions_.removeIf([&id](const auto& entry) { return entry.id == id; });
+        self->catalog_index_ = 0;
+        emit self->definitionsSaved();
+        self->loadSelection();
+    });
 }
 
 void DynamicPlaylistSession::discardResults() {

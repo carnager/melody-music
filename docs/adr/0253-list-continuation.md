@@ -4,7 +4,9 @@
 
 Accepted, 2026-10-02. Builds on ADR-0195 (dynamic playlists), ADR-0215
 (listening-history queries) and ADR-0220 (the engine owns playback). Fills the
-queue replenishment ADR-0195 left as a follow-up.
+queue replenishment ADR-0195 left as a follow-up. Amended by ADR-0349: the
+rules are the engine's, and a list continues with one by its id rather than
+with a copy the window keeps in step.
 
 ## Context
 

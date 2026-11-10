@@ -9,6 +9,7 @@
 #include <QTimer>
 
 #include <functional>
+#include <optional>
 #include <vector>
 
 namespace trackknife::bench {
@@ -19,6 +20,8 @@ class LocalListModel;
 // Last.fm source -- refreshed into a list of matching tracks, in the library
 // of the engine chosen. Rules follow that library's changes while open; a
 // snapshot keeps a result stable. The window's Dynamic playlists dialog draws it.
+// ADR-0349: the definitions are the chosen engine's; saving and removing one
+// asks that engine.
 class DynamicPlaylistSession final : public QObject {
     Q_OBJECT
 
@@ -36,10 +39,20 @@ class DynamicPlaylistSession final : public QObject {
         QString label;
         QString value;
     };
+    // ADR-0349: an engine's rules -- none until it has told them -- and
+    // saving or removing one there, answered on this object's thread.
+    struct Rules {
+        std::function<std::optional<QVector<DynamicPlaylistDefinition>>(const EngineKey&)> of;
+        std::function<void(const EngineKey&, DynamicPlaylistDefinition,
+                           std::function<void(core::Result<DynamicPlaylistDefinition>)>)>
+            save;
+        std::function<void(const EngineKey&, QString, std::function<void(core::Result<void>)>)>
+            remove;
+    };
 
     // `libraries`: the engines to search, this computer's first; none, only
     // this computer's.
-    DynamicPlaylistSession(QString profile, std::vector<Library> libraries, LibrarySearch search,
+    DynamicPlaylistSession(std::vector<Library> libraries, Rules rules, LibrarySearch search,
                            QObject* parent = nullptr);
     ~DynamicPlaylistSession() override;
 
@@ -99,6 +112,8 @@ class DynamicPlaylistSession final : public QObject {
     void setPerGroup(int per_group);
     void save();
     void remove();
+    // `engine`'s rules changed, or were first told.
+    void rulesChanged(const EngineKey& engine);
     void refresh();
     void stop();
     // The library searched changed: rules refresh.
@@ -119,18 +134,24 @@ class DynamicPlaylistSession final : public QObject {
 
   private:
     [[nodiscard]] DynamicPlaylistDefinition definition() const;
+    // The chosen engine's rules, as it told them.
+    void loadCatalog();
+    // Shows the rule of `id`, or with none "New".
+    void selectId(const QString& id);
     void loadSelection();
     void discardResults();
     void edited();
     void finished(const DynamicPlaylistService::Tracks& tracks, int unmatched,
                   const QString& error);
 
-    QString profile_;
     std::vector<Library> libraries_;
+    Rules rules_;
     int library_{0};
     QVector<DynamicPlaylistDefinition> definitions_;
     int catalog_index_{0};
-    bool catalog_writable_{true};
+    bool catalog_writable_{false};
+    // A save or removal on its way to the engine.
+    bool writing_{false};
     DynamicPlaylistDefinition draft_;
     QString status_;
     bool auto_refresh_{false};

@@ -65,55 +65,6 @@ bool validSelection(const DynamicPlaylistDefinition& d) {
 }
 } // namespace
 
-engine::DynamicSelection DynamicPlaylistDefinition::selection() const {
-    const bool grouped = groups > 0 && !group_by.trimmed().isEmpty();
-    return engine::DynamicSelection{
-        .query = query.toStdString(),
-        .limit = static_cast<std::size_t>(std::clamp(limit, 1, 500)),
-        .shuffle = shuffle,
-        .group_by = grouped ? group_by.toStdString() : std::string{},
-        .groups = grouped ? static_cast<std::size_t>(groups) : 0U,
-        .per_group = grouped ? static_cast<std::size_t>(std::max(per_group, 0)) : 0U};
-}
-
-QVector<DynamicPlaylistDefinition> shippedDynamicPlaylists(const QString& profile) {
-    const auto rule = [&profile](const char* id, const char* name, const char* query,
-                                 const int limit, const bool shuffle, const char* group_by = "",
-                                 const int groups = 0, const int per_group = 0) {
-        return DynamicPlaylistDefinition{.id = QStringLiteral("shipped:") + QLatin1String(id),
-                                         .name = QString::fromUtf8(name),
-                                         .profile = profile,
-                                         .source = QStringLiteral("rules"),
-                                         .query = QString::fromUtf8(query),
-                                         .limit = limit,
-                                         .shuffle = shuffle,
-                                         .group_by = QString::fromUtf8(group_by),
-                                         .groups = groups,
-                                         .per_group = per_group};
-    };
-    return {
-        rule("random-tracks", "Random tracks", "ALL", 50, true),
-        rule("random-album", "Random album", "ALL", 500, false,
-             "%albumartist% \u2014 %album% %date%", 1, 0),
-        rule("random-artists", "Random artists", "ALL", 30, true, "%albumartist%", 10, 3),
-        rule("rated-8", "Rated 8 and higher", "rating GREATER 7", 100, true),
-        rule("unrated", "Unrated", "rating MISSING", 100, true),
-        rule("recently-added", "Recently added",
-             "dayssinceadded LESS 31 SORT BY $num($info(dayssinceadded),6)", 100, false),
-        rule("not-heard-in-a-year", "Not heard in a year",
-             "HISTORY(dayssinceplayed) GREATER 365 OR HISTORY(dayssinceplayed) MISSING", 100, true),
-    };
-}
-
-core::Result<QVector<DynamicPlaylistDefinition>> dynamicPlaylistCatalog(const QString& profile) {
-    auto saved = loadDynamicPlaylists(profile);
-    if (!saved)
-        return std::unexpected(saved.error());
-    auto catalog = shippedDynamicPlaylists(profile);
-    catalog.append(*saved);
-    return catalog;
-}
-
 void adoptDynamicPlaylists(const QString& profile) {
     const auto done = QStringLiteral("dynamic-playlists/adopted-v1");
     QSettings settings;

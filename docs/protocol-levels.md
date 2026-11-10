@@ -7,6 +7,29 @@ engine's level with its own and says once when the engine is older.
 
 ## Protocol 1
 
+### Level 29 (2026-11-10)
+
+ADR-0349: the dynamic playlist rules are the engine's.
+
+- `dynamic.rules` answers `{rules}`, the shipped ones first. A rule is
+  `{id, name, shipped, source, query, artist, track, user, tag, limit,
+  shuffle, group_by, groups, per_group}`; `source` is `rules` (a tkq-1
+  query the engine runs) or a Last.fm source (`similar`, `loved`, `top`,
+  `tag`) that Melody fetches.
+- `dynamic.save {rule}` answers `{rule}` as kept: without an id a new rule,
+  named by the engine; with one, that rule replaced. A shipped rule is not
+  changed.
+- `dynamic.delete {id}`; a list continuing with the rule ends.
+- `dynamic.adopt {rules}` answers `{adopted}`: the rules whose ids the
+  engine does not know yet are kept, the others left as they are.
+- `dynamic.play {id}`: the queue replaced with the rule's selection from the
+  engine's library, of no list, playing from its first track; answers
+  `{playing, tracks}`. A Last.fm rule, or one that finds nothing, is
+  refused.
+- The `dynamic.rules` event, with every rule, as one changes.
+- `list.continuation.set` takes `rule` as the rule's id, not a copy of it.
+  An engine of an older level is not given rules by a newer window.
+
 ### Level 28 (2026-10-28)
 
 ADR-0344: the queue, Up Next and a list, shown as lines.
