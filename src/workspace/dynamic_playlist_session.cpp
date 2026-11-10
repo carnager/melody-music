@@ -4,7 +4,6 @@
 #include "bench/local_list_model.hpp"
 
 #include <QPointer>
-#include <QSettings>
 
 #include <algorithm>
 #include <utility>
@@ -12,14 +11,21 @@
 namespace trackknife::bench {
 
 DynamicPlaylistSession::DynamicPlaylistSession(std::vector<Library> libraries, Rules rules,
-                                               LibrarySearch search, QObject* parent)
+                                               Picker pick, QObject* parent)
     : QObject(parent), libraries_(std::move(libraries)), rules_(std::move(rules)),
       service_(new DynamicPlaylistService(
-          [this, search = std::move(search)](engine::DynamicSelection selection,
-                                             core::CancellationToken cancellation,
-                                             DynamicPlaylistService::Completion completion) {
-              search(engine(), std::move(selection), std::move(cancellation),
-                     std::move(completion));
+          [this, pick = std::move(pick)](DynamicPlaylistDefinition rule,
+                                         core::CancellationToken cancellation,
+                                         DynamicPlaylistService::Progress progress,
+                                         DynamicPlaylistService::Completion completion) {
+              if (!pick) {
+                  completion(std::unexpected(core::Error{.code = core::ErrorCode::unsupported,
+                                                         .message = "No engine to ask",
+                                                         .context = {}}));
+                  return;
+              }
+              pick(engine(), std::move(rule), std::move(cancellation), std::move(progress),
+                   std::move(completion));
           },
           this)),
       results_(new LocalListModel(this)) {
@@ -374,7 +380,7 @@ void DynamicPlaylistSession::refresh() {
     refresh_pending_ = false;
     busy_ = true;
     emit changed();
-    service_->refresh(definition(), QSettings{}.value(QStringLiteral("lastfm/api-key")).toString());
+    service_->refresh(definition());
 }
 
 void DynamicPlaylistSession::stop() {

@@ -317,9 +317,9 @@ class MelodyPlayer(MediaPlayerEntity):
         await self._refresh_outputs()
 
     async def _rules(self) -> list[dict[str, Any]]:
-        """The engine's dynamic playlists it plays itself -- not Last.fm's."""
+        """The engine's dynamic playlists, Last.fm's too (ADR-0350)."""
         answer = await self._connection.call("dynamic.rules")
-        return [rule for rule in answer.get("rules", []) if rule.get("source") == "rules"]
+        return list(answer.get("rules", []))
 
     async def async_browse_media(
         self, media_content_type: MediaType | str | None = None, media_content_id: str | None = None
@@ -370,4 +370,6 @@ class MelodyPlayer(MediaPlayerEntity):
             if found is None:
                 raise HomeAssistantError(f"melodyd has no dynamic playlist called {media_id}")
             rule = found["id"]
+        # A Last.fm one is a job: the engine answers at once and plays once
+        # Last.fm has, which the player shows as it does.
         await self._command("dynamic.play", {"id": rule})

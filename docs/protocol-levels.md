@@ -7,6 +7,19 @@ engine's level with its own and says once when the engine is older.
 
 ## Protocol 1
 
+### Level 30 (2026-11-10)
+
+ADR-0350: Last.fm dynamic playlists are the engine's.
+
+- The job `dynamic.pick {rule}`: what a rule, saved or not, picks from the
+  engine's library -- for a Last.fm rule, what Last.fm suggests that the
+  library has, asked with the account given by `lastfm.set_session`.
+  Reports `{done, of}` while matching; its outcome is `{paths, matched,
+  unmatched}` (paths encoded), `{cancelled}` or `{error}`.
+- `dynamic.play {id}` plays a Last.fm rule as a job and answers `{job_id}`;
+  its outcome is `{playing, tracks}` or `{error}`. A tkq-1 rule is answered
+  at once, as before.
+
 ### Level 29 (2026-11-10)
 
 ADR-0349: the dynamic playlist rules are the engine's.
@@ -15,7 +28,7 @@ ADR-0349: the dynamic playlist rules are the engine's.
   `{id, name, shipped, source, query, artist, track, user, tag, limit,
   shuffle, group_by, groups, per_group}`; `source` is `rules` (a tkq-1
   query the engine runs) or a Last.fm source (`similar`, `loved`, `top`,
-  `tag`) that Melody fetches.
+  `tag`) that Melody fetches (the engine, from level 30).
 - `dynamic.save {rule}` answers `{rule}` as kept: without an id a new rule,
   named by the engine; with one, that rule replaced. A shipped rule is not
   changed.

@@ -7,15 +7,14 @@ tell each engine to use it.
 1. Open **Settings → Last.fm** and follow the link to register a Last.fm API
    application. Any name will do; no callback URL is needed. Paste the API key
    and shared secret. No credentials ship with Melody.
-2. Leave **Use this API key for dynamic playlists too** ticked unless you want
-   to enter a different key under Metadata services.
-3. Choose **Connect to Last.fm…** and approve access in your browser. Melody
+2. Choose **Connect to Last.fm…** and approve access in your browser. Melody
    notices the approval by itself and shows the account. You never type your
    Last.fm password into Melody.
-4. Under **Engines scrobble what they play**, press **Use this account** for
+3. Under **Engines scrobble what they play**, press **Use this account** for
    **This computer**, and for any server with **Another engine…**. Each engine
    keeps its own copy of the session and its own queue of scrobbles waiting to
-   be sent, in `lastfm.json` in its state directory.
+   be sent, in `lastfm.json` in its state directory. The account also lets
+   the engine run Last.fm dynamic playlists (ADR-0350).
 
 While Melody waits for your approval, **Cancel** stops asking. It doesn't
 undo an approval Last.fm already has. Waiting gives up after five minutes.
@@ -53,9 +52,10 @@ not alter ratings or tags. Network failures are visible and Love/Unlove is not
 automatically retried.
 
 To use those changes in a dynamic playlist, select **Loved tracks**, enter the
-same Last.fm username, and **Refresh**. The setup checkbox also supplies the read API key for these playlists. You can
-change it separately in **Metadata services**; public lookups need only the key,
-not browser authorization. The existing library matching and 500-candidate boundary
-still apply; there is no automatic refresh or manual rewriting of the result.
+same Last.fm username, and **Refresh**. The engine asks Last.fm with the API
+key of the account it was given, so a Last.fm dynamic playlist works on the
+engines that use the account. The library matching and 500-suggestion
+boundary of [dynamic playlists](dynamic-playlists.md) apply; there is no
+automatic refresh or manual rewriting of the result.
 
 Implementation decisions and validation: [ADR-0197](adr/0197-authority-owned-lastfm.md).

@@ -23,12 +23,12 @@ namespace trackknife::bench {
 class DynamicPlaylistDialog final : public QDialog {
     Q_OBJECT
   public:
-    using LibrarySearch = DynamicPlaylistSession::LibrarySearch;
+    using Picker = DynamicPlaylistSession::Picker;
     using Library = DynamicPlaylistSession::Library;
     using Rules = DynamicPlaylistSession::Rules;
     // `libraries`: the engines to search, this computer's first; none, only
     // this computer's. `rules`: each engine's dynamic playlists (ADR-0349).
-    DynamicPlaylistDialog(std::vector<Library> libraries, Rules rules, LibrarySearch search,
+    DynamicPlaylistDialog(std::vector<Library> libraries, Rules rules, Picker pick,
                           QWidget* parent = nullptr);
     ~DynamicPlaylistDialog() override;
     ui::QueueTableView* view() const { return view_; }

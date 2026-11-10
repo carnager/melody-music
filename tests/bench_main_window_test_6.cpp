@@ -613,9 +613,6 @@ void BenchMainWindowTest::metadataServiceSettingsAndCompactPages() {
     QVERIFY(dialog->findChild<QLineEdit*>(QStringLiteral("bench-settings-engine-token")) ==
             nullptr);
 
-    auto* lastfm = dialog->findChild<QLineEdit*>(QStringLiteral("bench-settings-lastfm-key"));
-    QVERIFY(lastfm);
-    QCOMPARE(lastfm->echoMode(), QLineEdit::Password);
     QCOMPARE(key->echoMode(), QLineEdit::Password);
     key->setText(QStringLiteral("  test-client-key  "));
     reveal->setChecked(true);

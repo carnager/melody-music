@@ -5,17 +5,6 @@
 
 namespace trackknife::bench {
 
-engine::DynamicSelection DynamicPlaylistDefinition::selection() const {
-    const bool grouped = groups > 0 && !group_by.trimmed().isEmpty();
-    return engine::DynamicSelection{
-        .query = query.toStdString(),
-        .limit = static_cast<std::size_t>(std::clamp(limit, 1, 500)),
-        .shuffle = shuffle,
-        .group_by = grouped ? group_by.toStdString() : std::string{},
-        .groups = grouped ? static_cast<std::size_t>(groups) : 0U,
-        .per_group = grouped ? static_cast<std::size_t>(std::max(per_group, 0)) : 0U};
-}
-
 DynamicPlaylistDefinition dynamicRuleOf(const protocol::Json& value) {
     if (!value.is_object()) {
         return {};

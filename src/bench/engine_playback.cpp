@@ -1252,6 +1252,75 @@ void EnginePlayback::handDynamicRules(const QVector<DynamicPlaylistDefinition>& 
             });
 }
 
+void EnginePlayback::pickDynamic(const DynamicPlaylistDefinition& rule,
+                                 core::CancellationToken cancellation,
+                                 std::function<void(std::size_t, std::size_t)> progress,
+                                 std::function<void(core::Result<DynamicPicked>)> answer) {
+    if (!client_) {
+        answer(std::unexpected(core::Error{
+            .code = core::ErrorCode::io, .message = "no engine is connected", .context = {}}));
+        return;
+    }
+    const QPointer self{this};
+    static_cast<void>(QtConcurrent::run(
+        &pool_, [self, this, params = protocol::Json{{"rule", dynamicRuleJson(rule)}},
+                 cancellation = std::move(cancellation), progress = std::move(progress),
+                 answer = std::move(answer)] {
+            if (!self || client_ == nullptr) {
+                return;
+            }
+            auto outcome = client_->run_job(
+                "dynamic.pick", params,
+                [self, progress](const protocol::Json& reported) {
+                    const auto done = reported.value("done", std::size_t{0});
+                    const auto of = reported.value("of", std::size_t{0});
+                    QMetaObject::invokeMethod(
+                        self,
+                        [self, progress, done, of] {
+                            if (self && progress) {
+                                progress(done, of);
+                            }
+                        },
+                        Qt::QueuedConnection);
+                },
+                cancellation);
+            core::Result<DynamicPicked> picked = std::unexpected(core::Error{});
+            if (!outcome) {
+                picked = std::unexpected(std::move(outcome.error()));
+            } else if (const auto failed = outcome->find("error"); failed != outcome->end()) {
+                picked = std::unexpected(
+                    core::Error{.code = core::ErrorCode::backend,
+                                .message = failed->is_string() ? failed->get<std::string>()
+                                                               : std::string{"the pick failed"},
+                                .context = {}});
+            } else if (outcome->value("cancelled", false)) {
+                picked = std::unexpected(core::Error{
+                    .code = core::ErrorCode::cancelled, .message = "cancelled", .context = {}});
+            } else {
+                DynamicPicked found{.paths = {},
+                                    .matched = outcome->value("matched", std::size_t{0}),
+                                    .unmatched = outcome->value("unmatched", std::size_t{0})};
+                for (const auto& encoded : outcome->value("paths", protocol::Json::array())) {
+                    if (!encoded.is_string()) {
+                        continue;
+                    }
+                    if (auto path = protocol::decode_raw_path(encoded.get<std::string>())) {
+                        found.paths.push_back(std::move(*path));
+                    }
+                }
+                picked = std::move(found);
+            }
+            QMetaObject::invokeMethod(
+                self,
+                [self, answer, picked = std::move(picked)] {
+                    if (self) {
+                        answer(picked);
+                    }
+                },
+                Qt::QueuedConnection);
+        }));
+}
+
 void EnginePlayback::play(const std::vector<LocalTrackRow>& rows,
                           const std::vector<std::optional<formats::ReplayGainInfo>>& overrides,
                           const core::StableId& entry, const QString& list) {

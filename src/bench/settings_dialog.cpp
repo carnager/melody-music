@@ -902,28 +902,6 @@ SettingsDialog::SettingsDialog(QWidget* parent, OutputProfileStore profile_store
     acoustid_link->setTextInteractionFlags(Qt::TextBrowserInteraction);
     acoustid_link->setWordWrap(true);
     metadata_layout->addWidget(acoustid_link);
-    auto* lastfm_form = new QFormLayout;
-    lastfm_key_ = new QLineEdit(metadata_services);
-    lastfm_key_->setObjectName(QStringLiteral("bench-settings-lastfm-key"));
-    lastfm_key_->setEchoMode(QLineEdit::Password);
-    bind(lastfm_key_, "lastfm/api-key");
-    lastfm_form->addRow(QStringLiteral("Last.fm API key:"), lastfm_key_);
-    metadata_layout->addLayout(lastfm_form);
-    auto* lastfm_note = new QLabel(
-        QStringLiteral(
-            "Dynamic playlists can match Last.fm recommendations, loved tracks, top tracks, or "
-            "tags "
-            "to your library. Requests send the seed artist/track, username, or tag when you "
-            "choose Refresh. "
-            "The key is stored locally. Account authorization and scrobbling are separate under "
-            "Last.fm settings. "
-            "<a href=\"https://www.last.fm/api/account/create\">Get a Last.fm API key</a>"),
-        metadata_services);
-    lastfm_note->setWordWrap(true);
-    lastfm_note->setForegroundRole(QPalette::PlaceholderText);
-    lastfm_note->setOpenExternalLinks(true);
-    lastfm_note->setTextInteractionFlags(Qt::TextBrowserInteraction);
-    metadata_layout->addWidget(lastfm_note);
     metadata_layout->addStretch(1);
     add_page(QStringLiteral("Metadata services"), metadata_services);
 

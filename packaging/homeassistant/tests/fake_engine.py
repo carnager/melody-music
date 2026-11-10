@@ -140,6 +140,10 @@ class FakeEngine:
             return {"rules": self.rules}
         if method == "dynamic.play":
             self.play("/music/rule.flac", "entry-rule", {"title": "From " + params["id"]})
+            rule = next(r for r in self.rules if r["id"] == params["id"])
+            # ADR-0350: a Last.fm rule plays as a job.
+            if rule["source"] != "rules":
+                return {"job_id": "job-" + params["id"]}
             return {"playing": "entry-rule", "tracks": 1}
         if method == "outputs.list":
             return {"outputs": self.outputs}

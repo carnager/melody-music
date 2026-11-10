@@ -1576,29 +1576,24 @@ void BenchMainWindowTest::lastFmSettingsAndTrackActions() {
     QCOMPARE(secret->echoMode(), QLineEdit::Password);
     QTRY_VERIFY(status->text().contains(QStringLiteral("Not connected")));
     auto* key = dialog->findChild<QLineEdit*>(QStringLiteral("lastfm-account-key"));
-    auto* reuse = dialog->findChild<QCheckBox*>(QStringLiteral("lastfm-reuse-key"));
     auto* begin = dialog->findChild<QPushButton*>(QStringLiteral("lastfm-authorize"));
     auto* cancel = dialog->findChild<QPushButton*>(QStringLiteral("lastfm-cancel"));
     auto* poll = dialog->findChild<QTimer*>(QStringLiteral("lastfm-auth-poll"));
     auto* deadline = dialog->findChild<QTimer*>(QStringLiteral("lastfm-auth-deadline"));
-    QVERIFY(key && reuse && begin && cancel && poll && deadline);
+    QVERIFY(key && begin && cancel && poll && deadline);
+    // ADR-0350: Last.fm dynamic playlists use the account an engine is
+    // given; there is no key of the window's own to share.
+    QVERIFY(!dialog->findChild<QCheckBox*>(QStringLiteral("lastfm-reuse-key")));
+    QVERIFY(!dialog->findChild<QLineEdit*>(QStringLiteral("bench-settings-lastfm-key")));
     QVERIFY(!dialog->findChild<QPushButton*>(QStringLiteral("lastfm-finish")));
-    QVERIFY(reuse->isChecked());
     QVERIFY(cancel->isHidden());
     key->setText(QStringLiteral("invalid"));
     begin->click();
     QVERIFY(status->text().contains(QStringLiteral("32-character")));
-    // Sharing the key with dynamic playlists is an explicit local setting.
     key->setText(QString(32, 'a'));
     secret->setText(QString(32, 'b'));
     begin->click();
-    QCOMPARE(QSettings{}.value(QStringLiteral("lastfm/api-key")).toString(), QString(32, 'a'));
-    auto* read_key = dialog->findChild<QLineEdit*>(QStringLiteral("bench-settings-lastfm-key"));
-    QCOMPARE(read_key->text(), QString(32, 'a'));
-    reuse->setChecked(false);
-    key->setText(QString(32, 'c'));
-    begin->click();
-    QCOMPARE(QSettings{}.value(QStringLiteral("lastfm/api-key")).toString(), QString(32, 'a'));
+    QVERIFY(!QSettings{}.contains(QStringLiteral("lastfm/api-key")));
     reply(QStringLiteral("status"),
           QByteArray(R"({"credentials_saved":true,"authorization_pending":true})"));
     QVERIFY(dialog->findChild<QWidget*>(QStringLiteral("lastfm-credentials"))->isHidden());

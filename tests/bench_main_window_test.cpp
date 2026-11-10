@@ -337,7 +337,7 @@ void BenchMainWindowTest::dynamicPlaylistRetainsChangesDuringRefresh() {
     std::vector<Service::Completion> pending;
     DynamicPlaylistDialog dialog(
         {}, {},
-        [&](const EngineKey&, engine::DynamicSelection, core::CancellationToken,
+        [&](const EngineKey&, DynamicPlaylistDefinition, core::CancellationToken, Service::Progress,
             Service::Completion done) { pending.push_back(std::move(done)); });
     dialog.setAttribute(Qt::WA_DeleteOnClose, false);
     auto* refresh = dialog.findChild<QPushButton*>(QStringLiteral("dynamic-refresh"));
@@ -349,13 +349,13 @@ void BenchMainWindowTest::dynamicPlaylistRetainsChangesDuringRefresh() {
     LocalTrackRow stale;
     stale.raw_path = "/stale.flac";
     auto complete = std::move(pending.front());
-    complete(Service::Tracks{std::vector<LocalTrackRow>{stale}});
+    complete(Service::Picked{.tracks = {stale}, .matched = 1U, .unmatched = 0U});
     QCOMPARE(dialog.view()->model()->rowCount(), 0);
     QTRY_COMPARE(pending.size(), 2U);
     LocalTrackRow fresh;
     fresh.raw_path = "/fresh.flac";
     complete = std::move(pending.back());
-    complete(Service::Tracks{std::vector<LocalTrackRow>{fresh}});
+    complete(Service::Picked{.tracks = {fresh}, .matched = 1U, .unmatched = 0U});
     QTRY_COMPARE(dialog.view()->model()->rowCount(), 1);
     QCOMPARE(qobject_cast<LocalListModel*>(dialog.view()->model())->rows().front().raw_path,
              fresh.raw_path);
@@ -370,8 +370,8 @@ void BenchMainWindowTest::dynamicResultSelectionSurvivesRefresh() {
     {
         Service::Completion pending;
         DynamicPlaylistDialog dialog({}, {},
-                                     [&](const EngineKey&, engine::DynamicSelection,
-                                         core::CancellationToken,
+                                     [&](const EngineKey&, DynamicPlaylistDefinition,
+                                         core::CancellationToken, Service::Progress,
                                          Service::Completion done) { pending = std::move(done); });
         dialog.setAttribute(Qt::WA_DeleteOnClose, false);
         dialog.show();
@@ -383,7 +383,8 @@ void BenchMainWindowTest::dynamicResultSelectionSurvivesRefresh() {
                 row.raw_path = path;
                 rows.push_back(row);
             }
-            pending(Service::Tracks{std::move(rows)});
+            const auto count = rows.size();
+            pending(Service::Picked{.tracks = std::move(rows), .matched = count, .unmatched = 0U});
         };
         refresh->click();
         QVERIFY(pending);

@@ -36,7 +36,8 @@ QWidget* BenchMainWindow::buildLastFmSettings(QWidget* parent) {
     auto* layout = new QVBoxLayout(page);
     auto* note = new QLabel(
         QStringLiteral("Sign in here once. Hand the account to an engine below and it scrobbles "
-                       "what it plays itself, with Melody closed; until then, playback is "
+                       "what it plays itself, with Melody closed, and plays Last.fm dynamic "
+                       "playlists -- similar, loved, top or tag tracks; until then, playback is "
                        "scrobbled while Melody is open. Account actions take effect "
                        "immediately."),
         page);
@@ -76,10 +77,6 @@ QWidget* BenchMainWindow::buildLastFmSettings(QWidget* parent) {
     link->setOpenExternalLinks(true);
     link->setWordWrap(true);
     credentials_layout->addWidget(link);
-    auto* reuse =
-        new QCheckBox(QStringLiteral("Use this API key for dynamic playlists too"), credentials);
-    reuse->setObjectName(QStringLiteral("lastfm-reuse-key"));
-    credentials_layout->addWidget(reuse);
     layout->addWidget(credentials);
     auto* security =
         new QLabel(QStringLiteral("Credentials are saved privately on this computer."), page);
@@ -126,8 +123,8 @@ QWidget* BenchMainWindow::buildLastFmSettings(QWidget* parent) {
     layout->addWidget(engines);
     layout->addStretch();
 
-    const auto sync = [session, key, secret, reuse, credentials, begin, cancel, enabled,
-                       library_only, status] {
+    const auto sync = [session, key, secret, credentials, begin, cancel, enabled, library_only,
+                       status] {
         const auto show = [](QLineEdit* field, const QString& text) {
             if (field->text() != text) {
                 const QSignalBlocker blocker{field};
@@ -136,10 +133,6 @@ QWidget* BenchMainWindow::buildLastFmSettings(QWidget* parent) {
         };
         show(key, session->key());
         show(secret, session->secret());
-        {
-            const QSignalBlocker blocker{reuse};
-            reuse->setChecked(session->reuseKey());
-        }
         credentials->setVisible(!session->credentialsSaved());
         begin->setText(session->connectText());
         begin->setProperty("credentials-saved", session->credentialsSaved());
@@ -187,15 +180,8 @@ QWidget* BenchMainWindow::buildLastFmSettings(QWidget* parent) {
     };
     connect(session, &LastFmSettingsSession::changed, page, sync);
     connect(session, &LastFmSettingsSession::enginesChanged, page, sync_engines);
-    // Settings shows the reused key too, so its Save cannot overwrite it.
-    connect(session, &LastFmSettingsSession::keyReused, page, [parent](const QString& reused) {
-        if (auto* field =
-                parent->findChild<QLineEdit*>(QStringLiteral("bench-settings-lastfm-key")))
-            field->setText(reused);
-    });
     connect(key, &QLineEdit::textChanged, session, &LastFmSettingsSession::setKey);
     connect(secret, &QLineEdit::textChanged, session, &LastFmSettingsSession::setSecret);
-    connect(reuse, &QCheckBox::toggled, session, &LastFmSettingsSession::setReuseKey);
     connect(begin, &QPushButton::clicked, session, &LastFmSettingsSession::connectAccount);
     connect(cancel, &QPushButton::clicked, session, &LastFmSettingsSession::stopWaiting);
     connect(disconnect, &QPushButton::clicked, session, &LastFmSettingsSession::disconnectAccount);

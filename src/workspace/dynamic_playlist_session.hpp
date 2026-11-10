@@ -18,18 +18,18 @@ class LocalListModel;
 
 // Dynamic playlists (ADR-0145): saved definitions -- library rules or a
 // Last.fm source -- refreshed into a list of matching tracks, in the library
-// of the engine chosen. Rules follow that library's changes while open; a
-// snapshot keeps a result stable. The window's Dynamic playlists dialog draws it.
-// ADR-0349: the definitions are the chosen engine's; saving and removing one
-// asks that engine.
+// of the engine chosen, which picks them (ADR-0350). Rules follow that library's changes while
+// open; a snapshot keeps a result stable. The window's Dynamic playlists dialog draws it. ADR-0349:
+// the definitions are the chosen engine's; saving and removing one asks that engine.
 class DynamicPlaylistSession final : public QObject {
     Q_OBJECT
 
   public:
-    // Which library a refresh searches: that of the engine chosen.
-    using LibrarySearch =
-        std::function<void(const EngineKey& engine, engine::DynamicSelection,
-                           core::CancellationToken, DynamicPlaylistService::Completion)>;
+    // ADR-0350: what a rule picks, asked of the engine chosen -- from its
+    // library, or what Last.fm suggests that its library has.
+    using Picker = std::function<void(const EngineKey& engine, DynamicPlaylistDefinition,
+                                      core::CancellationToken, DynamicPlaylistService::Progress,
+                                      DynamicPlaylistService::Completion)>;
     // A library to choose, by its engine and the name it is shown by.
     struct Library {
         EngineKey engine;
@@ -52,7 +52,7 @@ class DynamicPlaylistSession final : public QObject {
 
     // `libraries`: the engines to search, this computer's first; none, only
     // this computer's.
-    DynamicPlaylistSession(std::vector<Library> libraries, Rules rules, LibrarySearch search,
+    DynamicPlaylistSession(std::vector<Library> libraries, Rules rules, Picker pick,
                            QObject* parent = nullptr);
     ~DynamicPlaylistSession() override;
 

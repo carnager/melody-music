@@ -10,6 +10,8 @@
 #include "test_engine.hpp"
 #include "trackknife/core/local_sources.hpp"
 #include "trackknife/core/sha256.hpp"
+#include "trackknife/engine/dynamic_rules.hpp"
+#include "trackknife/engine/workspace.hpp"
 #include "trackknife/metadata/local_reader.hpp"
 #include "trackknife/persistence/list_repository.hpp"
 #include "trackknife/persistence/local_library.hpp"
@@ -1613,15 +1615,31 @@ void LocalLibraryTest::dynamicRulesFollowIndexedTagsAndKeepRawPaths() {
     QVERIFY(library && library->add_root(root.native()));
     persistence::LibraryScanProgress progress;
     QVERIFY(library->scan({}, progress));
-    DynamicPlaylistDialog dialog{{},
-                                 {},
-                                 [database](const EngineKey&, engine::DynamicSelection selection,
-                                            core::CancellationToken cancellation,
-                                            DynamicPlaylistService::Completion completion) {
-                                     const engine::LocalCatalogue catalogue{database};
-                                     completion(
-                                         selectDynamicLibrary(catalogue, selection, cancellation));
-                                 }};
+    // ADR-0350: as the engine picks, here in this process on this database.
+    DynamicPlaylistDialog dialog{
+        {},
+        {},
+        [database](const EngineKey&, const DynamicPlaylistDefinition& definition,
+                   const core::CancellationToken& cancellation, DynamicPlaylistService::Progress,
+                   const DynamicPlaylistService::Completion& completion) {
+            const engine::LocalCatalogue catalogue{database};
+            auto store = engine::Workspace::open(database);
+            QVERIFY(store.has_value());
+            engine::DynamicPicker picker{*store, catalogue, {}};
+            auto picked = picker.pick(engine::dynamic_rule_from_json(dynamicRuleJson(definition)),
+                                      cancellation);
+            if (!picked) {
+                completion(std::unexpected(picked.error()));
+                return;
+            }
+            auto rows = dynamicRows(catalogue, picked->paths, cancellation);
+            if (!rows) {
+                completion(std::unexpected(rows.error()));
+                return;
+            }
+            completion(DynamicPlaylistService::Picked{
+                .tracks = std::move(*rows), .matched = picked->matched, .unmatched = 0U});
+        }};
     dialog.setAttribute(Qt::WA_DeleteOnClose, false);
     // ADR-0226: the catalogue is an engine's, here one on this database.
     testing::TestEngine catalogues_engine;
@@ -1667,9 +1685,7 @@ void LocalLibraryTest::dynamicRulesFollowIndexedTagsAndKeepRawPaths() {
     auto cancelled = core::CancellationSource{};
     cancelled.request_cancellation();
     const engine::LocalCatalogue catalogue{database};
-    engine::DynamicSelection everything;
-    everything.query = "ALL";
-    QVERIFY(!selectDynamicLibrary(catalogue, everything, cancelled.token()));
+    QVERIFY(!dynamicRows(catalogue, {alpha}, cancelled.token()));
 }
 
 void LocalLibraryTest::databaseSearchOpensCachedRowsWithoutFiles() {

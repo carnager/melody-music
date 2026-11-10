@@ -40,10 +40,8 @@ class LastFmSettingsSession final : public QObject {
     // The draft credentials.
     [[nodiscard]] QString key() const { return key_; }
     [[nodiscard]] QString secret() const { return secret_; }
-    [[nodiscard]] bool reuseKey() const { return reuse_key_; }
     void setKey(const QString& key);
     void setSecret(const QString& secret);
-    void setReuseKey(bool on);
 
     // What is shown.
     [[nodiscard]] bool credentialsSaved() const { return credentials_saved_; }
@@ -74,8 +72,6 @@ class LastFmSettingsSession final : public QObject {
   signals:
     void changed();
     void enginesChanged();
-    // The key was kept for dynamic playlists too: Settings shows it.
-    void keyReused(const QString& key);
 
   private:
     friend class BenchMainWindowTest;
@@ -90,7 +86,6 @@ class LastFmSettingsSession final : public QObject {
     Workspace& work_;
     QString key_;
     QString secret_;
-    bool reuse_key_{true};
     bool credentials_saved_{false};
     bool waiting_{false};
     bool request_pending_{false};
