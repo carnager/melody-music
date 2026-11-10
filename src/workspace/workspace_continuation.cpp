@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-// ADR-0253: a list continues with a dynamic playlist's rule. The engine keeps
-// a copy of the rule and does the continuing; the window chooses it and keeps
-// the copies in step with the definitions.
+// ADR-0253: a list continues with a dynamic playlist's rule. ADR-0349: the
+// rules are the engine's; the window chooses one by its id, and hands each
+// engine the rules it kept itself before, once.
 
 #include "workspace/workspace.hpp"
 
 #include "bench/dynamic_playlist_service.hpp"
 #include "workspace/workspace_view.hpp"
 
+#include <QSettings>
+
 namespace trackknife::bench {
 namespace {
-
-const QString definitions_profile = QStringLiteral("local");
 
 // A list can continue only with a tkq-1 rule, which the engine runs itself:
 // a Last.fm source would stop with the window.
@@ -21,38 +21,20 @@ const QString definitions_profile = QStringLiteral("local");
            !definition.query.trimmed().isEmpty();
 }
 
-[[nodiscard]] QHash<QString, EnginePlayback::Continuation> continuableRules() {
-    QHash<QString, EnginePlayback::Continuation> rules;
-    const auto definitions = dynamicPlaylistCatalog(definitions_profile);
-    if (!definitions) {
-        return rules;
-    }
-    for (const auto& definition : *definitions) {
-        if (continuable(definition)) {
-            const auto selection = definition.selection();
-            rules.insert(definition.id, EnginePlayback::Continuation{
-                                            .rule_id = definition.id,
-                                            .name = definition.name,
-                                            .query = definition.query,
-                                            .group_by = QString::fromStdString(selection.group_by),
-                                            .groups = static_cast<int>(selection.groups),
-                                            .per_group = static_cast<int>(selection.per_group),
-                                            .limit = static_cast<int>(selection.limit),
-                                            .shuffle = selection.shuffle});
-        }
-    }
-    return rules;
+[[nodiscard]] QString handedKey(const EngineKey& engine) {
+    return QStringLiteral("dynamic-playlists/handed-v1/") + engine.text();
 }
 
 } // namespace
 
-std::vector<Workspace::ContinuationChoice> Workspace::continuationChoices() const {
+std::vector<Workspace::ContinuationChoice>
+Workspace::continuationChoices(const ListTab& tab) const {
     std::vector<ContinuationChoice> choices;
-    const auto definitions = dynamicPlaylistCatalog(definitions_profile);
-    if (!definitions) {
+    const auto* playback = playbackOf(EngineKey::of(tab.document));
+    if (playback == nullptr) {
         return choices;
     }
-    for (const auto& definition : *definitions) {
+    for (const auto& definition : playback->dynamicRules()) {
         if (continuable(definition)) {
             choices.push_back({.rule_id = definition.id,
                                .name = definition.name,
@@ -80,74 +62,54 @@ void Workspace::setContinuation(const ListTab& tab, const QString& rule_id) {
         view_->showMessage(tr("The list's engine is not connected"), 5'000);
         return;
     }
-    std::optional<EnginePlayback::Continuation> rule;
-    if (!rule_id.isEmpty()) {
-        const auto rules = continuableRules();
-        const auto found = rules.constFind(rule_id);
-        if (found == rules.constEnd()) {
-            view_->showMessage(tr("That dynamic playlist is gone"), 5'000);
-            return;
-        }
-        rule = *found;
+    if (rule_id.isEmpty()) {
+        playback->setContinuation(document_text(tab.document.id), std::nullopt);
+        return;
     }
-    playback->setContinuation(document_text(tab.document.id), rule);
-}
-
-void Workspace::rememberContinuationRules() {
-    QSet<QString> known;
-    for (const auto& rule : continuableRules()) {
-        known.insert(rule.rule_id);
+    const auto& rules = playback->dynamicRules();
+    if (std::ranges::none_of(rules, [&rule_id](const auto& definition) {
+            return definition.id == rule_id && continuable(definition);
+        })) {
+        view_->showMessage(tr("That dynamic playlist is gone"), 5'000);
+        return;
     }
-    known_rules_ = std::move(known);
-}
-
-void Workspace::refreshContinuations() {
-    if (!known_rules_) {
-        rememberContinuationRules();
-    }
-    // Against the rules known before the save, so a deleted one is told.
-    for (const auto& engine : engines_) {
-        syncContinuations(*engine);
-    }
-    rememberContinuationRules();
+    playback->setContinuation(document_text(tab.document.id), rule_id);
 }
 
 void Workspace::followContinuations(EngineLink& engine) {
-    // A rule edited while the engine was away is brought in step as it is
-    // back: connecting asks for its continuations.
     connect(engine.playback, &EnginePlayback::continuationsChanged, this, [this, link = &engine] {
-        syncContinuations(*link);
         for (const auto& tab : list_tabs_) {
             if (EngineKey::of(tab->document) == link->key) {
                 view_->refreshTabChrome(*tab);
             }
         }
     });
+    connect(engine.playback, &EnginePlayback::dynamicRulesChanged, this,
+            [this, link = &engine] { handOldDynamicRules(*link); });
 }
 
-void Workspace::syncContinuations(EngineLink& engine) {
-    if (engine.playback == nullptr || !engine.playback->active() ||
-        engine.playback->continuations().isEmpty()) {
+void Workspace::handOldDynamicRules(EngineLink& engine) {
+    // ADR-0349: the rules the window kept before go to each engine once, so
+    // every engine starts with the same set. The settings stay, for an
+    // engine reached later.
+    if (engine.playback == nullptr || !engine.playback->dynamicRulesKnown() ||
+        QSettings{}.value(handedKey(engine.key)).toBool() ||
+        handing_rules_.contains(engine.key.text())) {
         return;
     }
-    if (!known_rules_) {
-        rememberContinuationRules();
+    const auto old = loadDynamicPlaylists(QStringLiteral("local"));
+    if (!old || old->isEmpty()) {
+        QSettings{}.setValue(handedKey(engine.key), true);
+        return;
     }
-    const auto rules = continuableRules();
-    // Copied, as setting one is answered with a new set.
-    const auto continuations = engine.playback->continuations();
-    for (auto entry = continuations.constBegin(); entry != continuations.constEnd(); ++entry) {
-        const auto found = rules.constFind(entry->rule_id);
-        if (found != rules.constEnd()) {
-            if (!found->sameAs(*entry)) {
-                engine.playback->setContinuation(entry.key(), *found);
-            }
-        } else if (known_rules_->contains(entry->rule_id)) {
-            // A rule this window had, deleted or no longer tkq-1. One it never
-            // knew is another window's to keep.
-            engine.playback->setContinuation(entry.key(), std::nullopt);
-        }
-    }
+    handing_rules_.insert(engine.key.text());
+    engine.playback->handDynamicRules(*old,
+                                      [this, key = engine.key](const core::Result<int>& adopted) {
+                                          handing_rules_.remove(key.text());
+                                          if (adopted) {
+                                              QSettings{}.setValue(handedKey(key), true);
+                                          }
+                                      });
 }
 
 } // namespace trackknife::bench

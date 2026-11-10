@@ -3,6 +3,7 @@
 #pragma once
 
 #include "bench/catalogue_source.hpp"
+#include "bench/dynamic_playlist_definition.hpp"
 #include "bench/local_list_model.hpp"
 #include "trackknife/audio/local_playback.hpp"
 #include "trackknife/audio/playback_modes.hpp"
@@ -17,6 +18,7 @@
 #include <QStringList>
 #include <QThreadPool>
 #include <QTimer>
+#include <QVector>
 
 #include <atomic>
 #include <filesystem>
@@ -186,9 +188,9 @@ class EnginePlayback final : public QObject {
                       const std::vector<std::optional<formats::ReplayGainInfo>>& overrides,
                       const QString& list = {});
 
-    // ADR-0253: the lists that continue on this engine, and with what -- its
-    // copy of each dynamic playlist rule. Asked for on connecting and told
-    // again whenever any client changes one.
+    // ADR-0253: the lists that continue on this engine, and with what rule,
+    // as it tells it. Asked for on connecting and told again whenever any
+    // client changes one.
     struct Continuation {
         QString rule_id;
         QString name;
@@ -199,25 +201,33 @@ class EnginePlayback final : public QObject {
         int per_group{0};
         int limit{100};
         bool shuffle{false};
-        // Whether the engine told how it selects; one older than ADR-0258
-        // keeps only the query.
-        bool selection_told{true};
         friend bool operator==(const Continuation&, const Continuation&) = default;
-        // The rule the window has against what `kept` tells the engine
-        // keeps: the same, as far as the engine tells.
-        [[nodiscard]] bool sameAs(const Continuation& kept) const {
-            return rule_id == kept.rule_id && name == kept.name && query == kept.query &&
-                   (!kept.selection_told || (group_by == kept.group_by && groups == kept.groups &&
-                                             per_group == kept.per_group && limit == kept.limit &&
-                                             shuffle == kept.shuffle));
-        }
     };
     [[nodiscard]] const QHash<QString, Continuation>& continuations() const noexcept {
         return continuations_;
     }
-    // Sets a list's continuation, or with nothing ends it.
-    void setContinuation(const QString& list, const std::optional<Continuation>& rule);
+    // ADR-0349: continues a list with the engine's rule `rule_id`, or with
+    // nothing ends it.
+    void setContinuation(const QString& list, const std::optional<QString>& rule_id);
     void refreshContinuations();
+
+    // ADR-0349: this engine's dynamic playlist rules, the shipped ones first.
+    // Asked for on connecting and told again whenever any client changes
+    // one; empty and not known until the engine has answered.
+    [[nodiscard]] const QVector<DynamicPlaylistDefinition>& dynamicRules() const noexcept {
+        return dynamic_rules_;
+    }
+    [[nodiscard]] bool dynamicRulesKnown() const noexcept { return dynamic_rules_known_; }
+    void refreshDynamicRules();
+    // Saves a rule -- without an id, a new one the engine names -- answered
+    // with the rule as kept.
+    using RuleAnswer = std::function<void(core::Result<DynamicPlaylistDefinition>)>;
+    void saveDynamicRule(const DynamicPlaylistDefinition& rule, RuleAnswer answer);
+    void deleteDynamicRule(const QString& id, std::function<void(core::Result<void>)> answer);
+    // Hands the engine rules it does not have yet; answered with how many
+    // it took.
+    void handDynamicRules(const QVector<DynamicPlaylistDefinition>& rules,
+                          std::function<void(core::Result<int>)> answer);
 
     // Hands the engine a queue and starts one of its entries. The rows carry
     // their own identities (ADR-0221), so the engine's queue and the model
@@ -317,6 +327,9 @@ class EnginePlayback final : public QObject {
                           const std::vector<std::string>& albums, bool everything);
     // The lists that continue changed, by any client (ADR-0253).
     void continuationsChanged();
+    // Its dynamic playlist rules changed, by any client (ADR-0349), or were
+    // first told.
+    void dynamicRulesChanged();
     // Albums new to its library, each once it is whole
     // (catalogue.albums_added, level 18).
     void albumsAdded(const std::vector<AlbumArrival>& albums);
@@ -326,6 +339,12 @@ class EnginePlayback final : public QObject {
     [[nodiscard]] static QHash<QString, Continuation> continuationsOf(const protocol::Json& data);
     void adoptContinuations(QHash<QString, Continuation> continuations);
     QHash<QString, Continuation> continuations_;
+    // Parsed from dynamic.rules' answer or event.
+    [[nodiscard]] static QVector<DynamicPlaylistDefinition>
+    dynamicRulesOf(const protocol::Json& data);
+    void adoptDynamicRules(QVector<DynamicPlaylistDefinition> rules);
+    QVector<DynamicPlaylistDefinition> dynamic_rules_;
+    bool dynamic_rules_known_{false};
     // `playback.queue`'s answer as rows.
     [[nodiscard]] static std::vector<LocalTrackRow> queueRows(const protocol::Json& answer);
     // Connects if one is configured. Answers whether a connection now exists.

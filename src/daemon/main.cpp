@@ -25,6 +25,7 @@
 #ifdef MELODY_ENABLE_LIBRARY_WATCH
 #include "trackknife/engine/library_watch.hpp"
 #endif
+#include "trackknife/engine/dynamic_rules.hpp"
 #include "trackknife/engine/favorites.hpp"
 #include "trackknife/engine/file_work_methods.hpp"
 #include "trackknife/engine/job_methods.hpp"
@@ -729,7 +730,12 @@ int main(int argc, char** argv) {
     playlist_folder.start(std::chrono::seconds{5});
     // ADR-0253: a list that ends continues with its rule, from this engine's
     // library, whether or not a window is open.
-    trackknife::engine::ListContinuation continuation{*workspace, catalogue, sink};
+    // ADR-0349: the dynamic playlist rules are the engine's, for every
+    // client -- the window, the phone, Home Assistant.
+    trackknife::engine::DynamicRules dynamic_rules{*workspace, sink};
+    trackknife::engine::register_dynamic_rule_methods(dispatcher, dynamic_rules, catalogue,
+                                                      *player);
+    trackknife::engine::ListContinuation continuation{*workspace, catalogue, dynamic_rules, sink};
     trackknife::engine::register_list_continuation_methods(dispatcher, continuation);
     // ADR-0237: naming layouts (Trackknife's, copied here) and this engine's
     // move destinations.

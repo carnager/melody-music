@@ -2,7 +2,8 @@
 
 Date: 2026-09-20
 
-Status: accepted
+Status: accepted. Amended by ADR-0349: the definitions are kept by each
+engine, not in the window's settings.
 
 ## Decision
 

@@ -30,8 +30,6 @@ void BenchMainWindow::showDynamicPlaylists() {
         }
         existing->close();
     }
-    // One set of definitions: a rule reads the same on either library.
-    const auto profile = QStringLiteral("local");
     // ADR-0220: through the catalogue source, like every other library read.
     // Opening the database directly here meant that with an engine
     // configured, dynamic playlists quietly queried this process's library
@@ -67,11 +65,51 @@ void BenchMainWindow::showDynamicPlaylists() {
                        ? QStringLiteral("Library")
                        : QStringLiteral("Library on %1").arg(holder->catalogue->name())});
     }
+    // ADR-0349: the rules are each engine's, asked of it.
+    DynamicPlaylistDialog::Rules rules{
+        .of = [this](const EngineKey& engine) -> std::optional<QVector<DynamicPlaylistDefinition>> {
+            const auto* link = workspace_.link(engine);
+            if (link == nullptr || link->playback == nullptr ||
+                !link->playback->dynamicRulesKnown()) {
+                return std::nullopt;
+            }
+            return link->playback->dynamicRules();
+        },
+        .save =
+            [this](const EngineKey& engine, DynamicPlaylistDefinition rule,
+                   std::function<void(core::Result<DynamicPlaylistDefinition>)> answer) {
+                const auto* link = workspace_.link(engine);
+                if (link == nullptr || link->playback == nullptr) {
+                    answer(std::unexpected(core::Error{.code = core::ErrorCode::io,
+                                                       .message = "That engine is not connected",
+                                                       .context = {}}));
+                    return;
+                }
+                link->playback->saveDynamicRule(rule, std::move(answer));
+            },
+        .remove =
+            [this](const EngineKey& engine, const QString& id,
+                   std::function<void(core::Result<void>)> answer) {
+                const auto* link = workspace_.link(engine);
+                if (link == nullptr || link->playback == nullptr) {
+                    answer(std::unexpected(core::Error{.code = core::ErrorCode::io,
+                                                       .message = "That engine is not connected",
+                                                       .context = {}}));
+                    return;
+                }
+                link->playback->deleteDynamicRule(id, std::move(answer));
+            }};
     auto* dialog =
-        new DynamicPlaylistDialog(profile, std::move(libraries), std::move(search), this);
-    // ADR-0253: the lists continuing with a rule follow its edits.
-    connect(dialog, &DynamicPlaylistDialog::definitionsSaved, this,
-            [this] { workspace_.refreshContinuations(); });
+        new DynamicPlaylistDialog(std::move(libraries), std::move(rules), std::move(search), this);
+    for (const auto& engine : engines_) {
+        if (engine->playback != nullptr) {
+            connect(engine->playback, &EnginePlayback::dynamicRulesChanged, dialog,
+                    [dialog, key = engine->key] { dialog->rulesChanged(key); });
+            if (engine->playback->active() && !engine->playback->dynamicRulesKnown()) {
+                engine->playback->refreshDynamicRules();
+            }
+        }
+    }
     auto layout = defaultTrackViewLayout(ui::TrackViewPresentation::plain_columns);
     applyTrackViewLayout(dialog->view(), layout, layout);
     auto* result_view = dialog->view();

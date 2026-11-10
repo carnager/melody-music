@@ -38,6 +38,14 @@ class FakeEngine:
             {"id": "local", "name": "This computer", "online": True, "selected": True},
             {"id": "agent:bedside", "name": "bedside", "online": True, "selected": False},
         ]
+        self.rules = [
+            {"id": "shipped:random-album", "name": "Random album", "shipped": True,
+             "source": "rules", "query": "ALL"},
+            {"id": "jazz", "name": "Late jazz", "shipped": False, "source": "rules",
+             "query": "genre HAS jazz"},
+            {"id": "loved", "name": "Loved", "shipped": False, "source": "loved",
+             "query": ""},
+        ]
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self._writers: set[asyncio.StreamWriter] = set()
         self._server: asyncio.Server | None = None
@@ -128,6 +136,11 @@ class FakeEngine:
             return {"track": self.track}
         if method == "catalogue.artwork":
             return {"image": base64.b64encode(COVER).decode()}
+        if method == "dynamic.rules":
+            return {"rules": self.rules}
+        if method == "dynamic.play":
+            self.play("/music/rule.flac", "entry-rule", {"title": "From " + params["id"]})
+            return {"playing": "entry-rule", "tracks": 1}
         if method == "outputs.list":
             return {"outputs": self.outputs}
         if method == "outputs.select":

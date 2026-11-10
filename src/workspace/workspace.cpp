@@ -76,7 +76,6 @@ void Workspace::start() {
     }
     // ADR-0258: one set of dynamic playlists, whichever backend saved them.
     adoptDynamicPlaylists(QStringLiteral("local"));
-    rememberContinuationRules();
     connectLocalEngine();
     persistence_ = new ui::ListPersistenceService(database_path_, this);
     persistence_timer_ = new QTimer(this);

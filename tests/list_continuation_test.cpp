@@ -8,6 +8,7 @@
 #include "trackknife/core/local_sources.hpp"
 #include "trackknife/core/stable_id.hpp"
 #include "trackknife/engine/catalogue.hpp"
+#include "trackknife/engine/dynamic_rules.hpp"
 #include "trackknife/engine/list_continuation.hpp"
 #include "trackknife/engine/player.hpp"
 #include "trackknife/engine/workspace.hpp"
@@ -91,31 +92,28 @@ int main(const int argc, char** argv) {
     require(player->queue_list() == list, "the queue knows its list");
     require(player->ends_after_current(), "and the list ends after it");
 
+    // ADR-0349: the rules are the engine's; a list names one by its id.
+    engine::DynamicRules rules{*workspace, {}};
+    const auto rule = [](std::string id, std::string name, std::string query) {
+        engine::DynamicRule made;
+        made.id = std::move(id);
+        made.name = std::move(name);
+        made.query = std::move(query);
+        return made;
+    };
+    require(rules.save(rule("r", "Everything", "codec PRESENT")).has_value(), "a rule is saved");
+    auto lastfm = rule("loved", "Loved", "");
+    lastfm.source = "loved";
+    require(rules.save(lastfm).has_value(), "a Last.fm rule is saved");
     {
-        engine::ListContinuation continuation{*workspace, catalogue, {}};
+        engine::ListContinuation continuation{*workspace, catalogue, rules, {}};
         require(continuation.continue_if_ending(*player) == 0U,
                 "a list without a continuation ends");
-        require(!continuation
-                     .set(list, engine::ContinuationRule{.rule_id = "r",
-                                                         .name = "Broken",
-                                                         .query = "codec (((",
-                                                         .group_by = {},
-                                                         .groups = 0U,
-                                                         .per_group = 0U,
-                                                         .limit = 100U,
-                                                         .shuffle = false})
-                     .has_value(),
-                "a rule that does not compile is refused");
-        require(continuation
-                    .set(list, engine::ContinuationRule{.rule_id = "r",
-                                                        .name = "Everything",
-                                                        .query = "codec PRESENT",
-                                                        .group_by = {},
-                                                        .groups = 0U,
-                                                        .per_group = 0U,
-                                                        .limit = 100U,
-                                                        .shuffle = false})
-                    .has_value(),
+        require(!continuation.set(list, std::string{"missing"}).has_value(),
+                "a rule the engine does not have is refused");
+        require(!continuation.set(list, std::string{"loved"}).has_value(),
+                "a Last.fm rule is refused: the engine cannot run it");
+        require(continuation.set(list, std::string{"r"}).has_value(),
                 "the list continues with a rule");
 
         const auto appended = continuation.continue_if_ending(*player);
@@ -169,7 +167,7 @@ int main(const int argc, char** argv) {
         };
         listened(files[1]);
         listened(files[2]);
-        engine::ListContinuation continuation{*workspace, catalogue, {}};
+        engine::ListContinuation continuation{*workspace, catalogue, rules, {}};
         const auto replay = [&player, &files, &list] {
             engine::QueueEntry only;
             only.source.raw_path = files.front();
@@ -195,23 +193,80 @@ int main(const int argc, char** argv) {
 
     // Kept by the engine: another start finds it.
     {
-        engine::ListContinuation restarted{*workspace, catalogue, {}};
+        engine::DynamicRules restarted_rules{*workspace, {}};
+        engine::ListContinuation restarted{*workspace, catalogue, restarted_rules, {}};
         const auto kept = restarted.all();
         require(kept.size() == 1U && kept.contains(list) && kept.at(list).name == "Everything",
                 "the continuation is kept across a restart");
+        // An edit applies at once, by the rule's id.
+        require(restarted_rules.save(rule("r", "Everything else", "codec PRESENT")).has_value(),
+                "the rule is edited");
+        require(restarted.all().at(list).name == "Everything else", "the list follows the edit");
         require(restarted.set(list, std::nullopt).has_value(), "and ended");
         require(restarted.all().empty(), "ended");
     }
     {
-        engine::ListContinuation again{*workspace, catalogue, {}};
+        engine::DynamicRules again_rules{*workspace, {}};
+        engine::ListContinuation again{*workspace, catalogue, again_rules, {}};
         require(again.all().empty(), "an ended continuation stays ended");
+        // Removing a rule ends what continued with it.
+        require(again.set(list, std::string{"r"}).has_value(), "continued again");
+        require(again_rules.remove("r").has_value(), "the rule is removed");
+        require(again.all().empty(), "and the list ends");
+        engine::DynamicRules later_rules{*workspace, {}};
+        engine::ListContinuation later{*workspace, catalogue, later_rules, {}};
+        require(later.all().empty(), "and stays ended");
+    }
+
+    // ADR-0349: an engine's copies from before rules were its own are taken
+    // over once -- as rules, unless it has the rule already.
+    {
+        const auto copied = core::StableId::random().to_string();
+        const auto shipped = core::StableId::random().to_string();
+        const protocol::Json old{{"version", 1},
+                                 {"lists",
+                                  {{copied,
+                                    {{"rule", "copied-rule"},
+                                     {"name", "Copied"},
+                                     {"query", "codec PRESENT"},
+                                     {"group_by", ""},
+                                     {"groups", 0},
+                                     {"per_group", 0},
+                                     {"limit", 100},
+                                     {"shuffle", false}}},
+                                   {shipped,
+                                    {{"rule", "shipped:random-album"},
+                                     {"name", "Random album"},
+                                     {"query", "ALL"},
+                                     {"group_by", "%album%"},
+                                     {"groups", 1},
+                                     {"per_group", 0},
+                                     {"limit", 500},
+                                     {"shuffle", false}}}}}};
+        require(workspace->save_engine_state("list-continuation.v1", old.dump(), 1).has_value(),
+                "an old store");
+        engine::DynamicRules taken_rules{*workspace, {}};
+        engine::ListContinuation taken{*workspace, catalogue, taken_rules, {}};
+        const auto lists = taken.all();
+        require(lists.size() == 2U, "both lists still continue");
+        require(lists.at(copied).name == "Copied", "with the copied rule");
+        require(lists.at(shipped).rule_id == "shipped:random-album", "and the shipped one");
+        require(taken_rules.find("copied-rule").has_value(), "the copy is now a rule");
+        require(taken_rules.all().size() == engine::shipped_dynamic_rules().size() + 2U,
+                "beside the saved Last.fm rule, and only once");
+        require(taken.set(copied, std::nullopt).has_value() &&
+                    taken.set(shipped, std::nullopt).has_value(),
+                "ended");
+        require(taken_rules.remove("copied-rule").has_value(), "and the copy removed");
     }
 
     // ADR-0258: a grouped rule appends its selection -- here the one group a
     // constant makes of the five files, whole, less what is queued; or one
     // track of it.
     {
-        engine::ListContinuation continuation{*workspace, catalogue, {}};
+        // Read again: the rules changed under other readers since.
+        engine::DynamicRules group_rules{*workspace, {}};
+        engine::ListContinuation continuation{*workspace, catalogue, group_rules, {}};
         const auto album = core::StableId::random().to_string();
         const auto play_alone = [&player, &files, &album] {
             engine::QueueEntry only;
@@ -219,17 +274,16 @@ int main(const int argc, char** argv) {
             player->replace_queue({only}, album);
             require(player->play_entry(only.entry_id).has_value(), "the list plays");
         };
-        const auto rule = [](const std::size_t per_group) {
-            return engine::ContinuationRule{.rule_id = "shipped:random-album",
-                                            .name = "Random album",
-                                            .query = "ALL",
-                                            .group_by = "one",
-                                            .groups = 1U,
-                                            .per_group = per_group,
-                                            .limit = 100U,
-                                            .shuffle = false};
+        const auto grouped = [&group_rules, &rule](const std::size_t per_group) {
+            auto made = rule("one-album", "One album", "ALL");
+            made.group_by = "one";
+            made.groups = 1U;
+            made.per_group = per_group;
+            require(group_rules.save(made).has_value(), "a grouped rule is saved");
         };
-        require(continuation.set(album, rule(0U)).has_value(), "a grouped rule is taken");
+        grouped(0U);
+        require(continuation.set(album, std::string{"one-album"}).has_value(),
+                "a grouped rule is taken");
         play_alone();
         require(continuation.continue_if_ending(*player) == files.size() - 1U,
                 "the whole group is appended, less what is queued");
@@ -243,10 +297,11 @@ int main(const int argc, char** argv) {
                     continuation.all().at(album).groups == 1U,
                 "the grouping is kept");
         {
-            engine::ListContinuation restarted{*workspace, catalogue, {}};
+            engine::DynamicRules restarted_rules{*workspace, {}};
+            engine::ListContinuation restarted{*workspace, catalogue, restarted_rules, {}};
             require(restarted.all().at(album).group_by == "one", "and kept across a restart");
         }
-        require(continuation.set(album, rule(1U)).has_value(), "one track a group");
+        grouped(1U);
         play_alone();
         require(continuation.continue_if_ending(*player) == 1U, "one track of the group");
         require(continuation.set(album, std::nullopt).has_value(), "ended");

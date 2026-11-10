@@ -1509,6 +1509,8 @@ void BenchMainWindowTest::lastFmRefreshSelectsFreshTracksFromLargerPool() {
 }
 
 void BenchMainWindowTest::dynamicPlaylistCatalogAndEditor() {
+    // The settings the window kept its rules in before ADR-0349: still read,
+    // to hand them to each engine once.
     DynamicPlaylistDefinition local{.id = QStringLiteral("favorites"),
                                     .name = QStringLiteral("Favorites"),
                                     .profile = QStringLiteral("local"),
@@ -1529,25 +1531,6 @@ void BenchMainWindowTest::dynamicPlaylistCatalogAndEditor() {
     QVERIFY(!saveDynamicPlaylists(local.profile, {ungroupable}));
     QVERIFY(loadDynamicPlaylists(QStringLiteral("mpd/other"))->isEmpty());
     QVERIFY(!saveDynamicPlaylists(QStringLiteral("mpd/other"), {local}));
-    // ADR-0258: the shipped rules are always there, first, valid, and
-    // never written.
-    const auto shipped = shippedDynamicPlaylists(local.profile);
-    QCOMPARE(shipped.size(), 7);
-    for (const auto& rule : shipped) {
-        QVERIFY(rule.shipped());
-        QVERIFY2(query::compile_tkq(rule.query.toStdString()), qPrintable(rule.query));
-        QVERIFY(saveDynamicPlaylists(local.profile, {rule}).has_value() == false);
-    }
-    const auto random_album = std::ranges::find(shipped, QStringLiteral("shipped:random-album"),
-                                                &DynamicPlaylistDefinition::id);
-    QVERIFY(random_album != shipped.end());
-    QCOMPARE(random_album->selection().groups, 1U);
-    QCOMPARE(random_album->selection().per_group, 0U);
-    auto catalog_definitions = dynamicPlaylistCatalog(local.profile);
-    QVERIFY(catalog_definitions);
-    QCOMPARE(catalog_definitions->size(), 8);
-    QCOMPARE(catalog_definitions->front().id, shipped.front().id);
-    QCOMPARE(catalog_definitions->back().id, local.id);
     // Definitions the MPD backend saved under its own profile move over once.
     DynamicPlaylistDefinition old{.id = QStringLiteral("grunge"),
                                   .name = QStringLiteral("Last.fm: Grunge"),
@@ -1571,6 +1554,10 @@ void BenchMainWindowTest::dynamicPlaylistCatalogAndEditor() {
     QSettings{}.setValue(QStringLiteral("dynamic-playlists/v1/mpd/future"),
                          QByteArray{"{\"version\":99,\"definitions\":[]}"});
     QVERIFY(!loadDynamicPlaylists(QStringLiteral("mpd/future")));
+    QSettings{}.remove(QStringLiteral("dynamic-playlists/v1/mpd/future"));
+    // Handed to this test's engine as the window reaches it.
+    QSettings{}.remove(QStringLiteral("dynamic-playlists/handed-v1"));
+
     BenchMainWindow window;
     window.show();
     QTRY_VERIFY(window.findChild<LocalLibraryPanel*>());
@@ -1581,8 +1568,16 @@ void BenchMainWindowTest::dynamicPlaylistCatalogAndEditor() {
     QVERIFY(dialog);
     auto* catalog = dialog->findChild<QComboBox*>(QStringLiteral("dynamic-catalog"));
     QVERIFY(catalog);
-    // "New", the seven that ship, and the one saved.
-    QCOMPARE(catalog->count(), 9);
+    // "New", the seven that ship, and the one handed over -- the engine's.
+    QTRY_COMPARE_WITH_TIMEOUT(catalog->count(), 9, 5'000);
+    QCOMPARE(catalog->itemText(8), QStringLiteral("Favorites"));
+    {
+        const auto handed = window.localPlayback()->dynamicRules();
+        QCOMPARE(handed.size(), 8);
+        QCOMPARE(handed.back().id, local.id);
+        QCOMPARE(handed.back().groups, 4);
+        QVERIFY(handed.front().shipped());
+    }
     auto* save = dialog->findChild<QPushButton*>(QStringLiteral("dynamic-save"));
     auto* remove = dialog->findChild<QPushButton*>(QStringLiteral("dynamic-remove"));
     // A shipped rule is used and copied, not changed or removed.
@@ -1594,22 +1589,24 @@ void BenchMainWindowTest::dynamicPlaylistCatalogAndEditor() {
     QCOMPARE(save->text(), QStringLiteral("Save as copy"));
     dialog->findChild<QSpinBox*>(QStringLiteral("dynamic-per-group"))->setValue(2);
     save->click();
-    QCOMPARE(catalog->count(), 10);
+    QTRY_COMPARE(catalog->count(), 10);
     QCOMPARE(catalog->itemText(catalog->currentIndex()), QStringLiteral("Random album (copy)"));
     QVERIFY(remove->isEnabled());
-    QCOMPARE(shippedDynamicPlaylists(QStringLiteral("local"))[1].per_group, 0);
-    loaded = loadDynamicPlaylists(QStringLiteral("local"));
-    QCOMPARE(loaded->size(), 2);
-    QCOMPARE(loaded->back().per_group, 2);
+    // The engine keeps it, and the window's settings stay as they were.
+    QTRY_COMPARE(window.localPlayback()->dynamicRules().size(), 9);
+    QCOMPARE(window.localPlayback()->dynamicRules().back().per_group, 2);
+    QCOMPARE(window.localPlayback()->dynamicRules()[1].per_group, 0);
+    QCOMPARE(loadDynamicPlaylists(QStringLiteral("local"))->size(), 1);
     remove->click();
-    QCOMPARE(catalog->count(), 9);
+    QTRY_COMPARE(catalog->count(), 9);
+    QTRY_COMPARE(window.localPlayback()->dynamicRules().size(), 8);
     catalog->setCurrentIndex(0);
     emit catalog->activated(0);
     dialog->findChild<QLineEdit*>(QStringLiteral("dynamic-name"))->setText(QStringLiteral("Rock"));
     dialog->findChild<QLineEdit*>(QStringLiteral("dynamic-query"))
         ->setText(QStringLiteral("genre HAS rock"));
     save->click();
-    QCOMPARE(catalog->count(), 10);
+    QTRY_COMPARE(catalog->count(), 10);
     dialog->findChild<QPushButton*>(QStringLiteral("dynamic-refresh"))->click();
     auto* status = dialog->findChild<QLabel*>(QStringLiteral("dynamic-status"));
     QTRY_VERIFY(status->text().startsWith(QStringLiteral("0 tracks")));
@@ -1638,6 +1635,11 @@ void BenchMainWindowTest::dynamicPlaylistCatalogAndEditor() {
     QVERIFY(dialog);
     QCOMPARE(dialog->findChild<QComboBox*>(QStringLiteral("dynamic-catalog"))->count(), 10);
     dialog->close();
+    // Handed once: the engine keeps its own from now on.
+    QVERIFY(QSettings{}
+                .value(QStringLiteral("dynamic-playlists/handed-v1/") + EngineKey::local().text())
+                .toBool());
+    QSettings{}.remove(QStringLiteral("dynamic-playlists/v1/local"));
 }
 
 // ADR-0141: a fresh sidecar beside the file projects onto probed rows

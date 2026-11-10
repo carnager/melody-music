@@ -6,6 +6,11 @@ shuffle and repeat; and which output it plays on -- an agent, a UPnP
 renderer, a sound card -- as the player's source. Changes come as the engine
 says them, not by polling.
 
+The engine's dynamic playlists ("Random album", "Rated 8 and higher", your
+own) are under Browse media, and `media_player.play_media` plays one by
+name, with `media_content_type: playlist` -- for automations. This needs
+protocol level 29.
+
 ## What the engine needs
 
 - melodyd listening on the network, which needs a password:

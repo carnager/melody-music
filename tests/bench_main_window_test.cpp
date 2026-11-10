@@ -336,7 +336,7 @@ void BenchMainWindowTest::dynamicPlaylistRetainsChangesDuringRefresh() {
     using Service = DynamicPlaylistService;
     std::vector<Service::Completion> pending;
     DynamicPlaylistDialog dialog(
-        QStringLiteral("local"), {},
+        {}, {},
         [&](const EngineKey&, engine::DynamicSelection, core::CancellationToken,
             Service::Completion done) { pending.push_back(std::move(done)); });
     dialog.setAttribute(Qt::WA_DeleteOnClose, false);
@@ -369,7 +369,7 @@ void BenchMainWindowTest::dynamicResultSelectionSurvivesRefresh() {
     using Service = DynamicPlaylistService;
     {
         Service::Completion pending;
-        DynamicPlaylistDialog dialog(QStringLiteral("local"), {},
+        DynamicPlaylistDialog dialog({}, {},
                                      [&](const EngineKey&, engine::DynamicSelection,
                                          core::CancellationToken,
                                          Service::Completion done) { pending = std::move(done); });

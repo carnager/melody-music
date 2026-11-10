@@ -9,6 +9,9 @@ import logging
 from typing import Any
 
 from homeassistant.components.media_player import (
+    BrowseError,
+    BrowseMedia,
+    MediaClass,
     MediaPlayerDeviceClass,
     MediaPlayerEntity,
     MediaPlayerEntityFeature,
@@ -37,6 +40,10 @@ _STATES = {
 
 # Covers are asked for at this size: the engine scales them where the file is.
 _COVER_SIZE = 600
+
+# ADR-0349: the engine's dynamic playlists, browsed and played by their id.
+_DYNAMIC = "melody://dynamic"
+_RULE = _DYNAMIC + "/"
 
 
 async def async_setup_entry(
@@ -78,6 +85,8 @@ class MelodyPlayer(MediaPlayerEntity):
         | MediaPlayerEntityFeature.SHUFFLE_SET
         | MediaPlayerEntityFeature.REPEAT_SET
         | MediaPlayerEntityFeature.SELECT_SOURCE
+        | MediaPlayerEntityFeature.BROWSE_MEDIA
+        | MediaPlayerEntityFeature.PLAY_MEDIA
     )
 
     def __init__(self, connection: MelodyConnection, engine_id: str) -> None:
@@ -306,3 +315,59 @@ class MelodyPlayer(MediaPlayerEntity):
             raise HomeAssistantError(f"melodyd has no output called {source}")
         await self._command("outputs.select", {"id": output["id"]})
         await self._refresh_outputs()
+
+    async def _rules(self) -> list[dict[str, Any]]:
+        """The engine's dynamic playlists it plays itself -- not Last.fm's."""
+        answer = await self._connection.call("dynamic.rules")
+        return [rule for rule in answer.get("rules", []) if rule.get("source") == "rules"]
+
+    async def async_browse_media(
+        self, media_content_type: MediaType | str | None = None, media_content_id: str | None = None
+    ) -> BrowseMedia:
+        """The engine's dynamic playlists, each one to play."""
+        if media_content_id not in (None, "", _DYNAMIC):
+            raise BrowseError(f"melodyd has nothing at {media_content_id}")
+        try:
+            rules = await self._rules()
+        except MelodyError as err:
+            raise BrowseError(f"melodyd: {err}") from err
+        return BrowseMedia(
+            media_class=MediaClass.DIRECTORY,
+            media_content_id=_DYNAMIC,
+            media_content_type=MediaType.PLAYLIST,
+            title="Dynamic playlists",
+            can_play=False,
+            can_expand=True,
+            children_media_class=MediaClass.PLAYLIST,
+            children=[
+                BrowseMedia(
+                    media_class=MediaClass.PLAYLIST,
+                    media_content_id=_RULE + rule["id"],
+                    media_content_type=MediaType.PLAYLIST,
+                    title=rule.get("name") or rule["id"],
+                    can_play=True,
+                    can_expand=False,
+                )
+                for rule in rules
+            ],
+        )
+
+    async def async_play_media(
+        self, media_type: MediaType | str, media_id: str, **kwargs: Any
+    ) -> None:
+        """Play a dynamic playlist: as browsed, or by its name or id."""
+        if media_id.startswith(_RULE):
+            rule = media_id.removeprefix(_RULE)
+        else:
+            try:
+                rules = await self._rules()
+            except MelodyError as err:
+                raise HomeAssistantError(f"melodyd: {err}") from err
+            found = next(
+                (r for r in rules if media_id in (r["id"], r.get("name"))),
+                next((r for r in rules if r.get("name", "").casefold() == media_id.casefold()), None),
+            )
+            if found is None:
+                raise HomeAssistantError(f"melodyd has no dynamic playlist called {media_id}")
+            rule = found["id"]
+        await self._command("dynamic.play", {"id": rule})

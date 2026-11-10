@@ -1613,7 +1613,7 @@ void LocalLibraryTest::dynamicRulesFollowIndexedTagsAndKeepRawPaths() {
     QVERIFY(library && library->add_root(root.native()));
     persistence::LibraryScanProgress progress;
     QVERIFY(library->scan({}, progress));
-    DynamicPlaylistDialog dialog{QStringLiteral("local"),
+    DynamicPlaylistDialog dialog{{},
                                  {},
                                  [database](const EngineKey&, engine::DynamicSelection selection,
                                             core::CancellationToken cancellation,

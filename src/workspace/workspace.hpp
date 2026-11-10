@@ -367,14 +367,13 @@ class Workspace final : public QObject {
     bool lastfm_library_only_{false};
     QString lastfm_library_entry_;
     bool lastfm_in_library_{false};
-    // ADR-0253: the tkq-1 rules last seen in the definitions, so that one
-    // gone is told from another window's that this one never knew.
-    std::optional<QSet<QString>> known_rules_;
-    void syncContinuations(EngineLink& engine);
-    // Shows what `engine`'s tabs continue with as it says, and keeps its
-    // copies of the rules in step.
+    // Shows what `engine`'s tabs continue with as it says, and hands it the
+    // window's old rules once it has told its own.
     void followContinuations(EngineLink& engine);
-    void rememberContinuationRules();
+    // ADR-0349: the rules this window kept before go to `engine`, once.
+    void handOldDynamicRules(EngineLink& engine);
+    // The engines being handed them now.
+    QSet<QString> handing_rules_;
     // Last explicitly played local list; transport stop does not release it.
     QString active_local_list_id_;
 
@@ -466,22 +465,20 @@ class Workspace final : public QObject {
     [[nodiscard]] CatalogueSource* catalogueOf(const EngineKey& key) const;
 
     // ADR-0253: a list continues with a dynamic playlist's tkq-1 rule once
-    // it would end. The rules it can continue with, by identity and name.
+    // it would end. The rules `tab`'s engine can continue it with, by
+    // identity and name (ADR-0349).
     struct ContinuationChoice {
         QString rule_id;
         QString name;
         // ADR-0258: one of the rules that ship.
         bool shipped{false};
     };
-    [[nodiscard]] std::vector<ContinuationChoice> continuationChoices() const;
+    [[nodiscard]] std::vector<ContinuationChoice> continuationChoices(const ListTab& tab) const;
     // The rule `tab` continues with, as its engine keeps it; none, nothing.
     [[nodiscard]] std::optional<EnginePlayback::Continuation>
     continuationOf(const ListTab& tab) const;
     // Continues `tab` with the rule `rule_id`, or with an empty one ends it.
     void setContinuation(const ListTab& tab, const QString& rule_id);
-    // The rules were saved: the engines' copies are brought in step, and a
-    // rule deleted or made a Last.fm one ends the lists it continued.
-    void refreshContinuations();
     // An open list, by its document's identity -- or the list that goes on
     // playing after its tab was closed.
     [[nodiscard]] ListTab* tabForDocument(const QString& document_id);

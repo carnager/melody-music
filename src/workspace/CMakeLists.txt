@@ -111,6 +111,8 @@ qt_add_library(
     ../bench/desktop_media_session.hpp
     ../bench/desktop_notifier.cpp
     ../bench/desktop_notifier.hpp
+    ../bench/dynamic_playlist_definition.cpp
+    ../bench/dynamic_playlist_definition.hpp
     ../bench/dynamic_playlist_service.cpp
     dynamic_playlist_session.cpp
     dynamic_playlist_session.hpp

@@ -39,9 +39,9 @@ QList<QByteArray> resultKeys(QAbstractItemModel* model) {
     return keys;
 }
 } // namespace
-DynamicPlaylistDialog::DynamicPlaylistDialog(QString profile, std::vector<Library> libraries,
+DynamicPlaylistDialog::DynamicPlaylistDialog(std::vector<Library> libraries, Rules rules,
                                              LibrarySearch search, QWidget* parent)
-    : QDialog(parent), session_(new DynamicPlaylistSession(std::move(profile), std::move(libraries),
+    : QDialog(parent), session_(new DynamicPlaylistSession(std::move(libraries), std::move(rules),
                                                            std::move(search), this)) {
     setObjectName(QStringLiteral("bench-dynamic-playlists"));
     setWindowTitle(QStringLiteral("Dynamic playlists"));

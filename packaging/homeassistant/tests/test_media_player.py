@@ -10,6 +10,8 @@ from homeassistant.components.media_player import (
     ATTR_INPUT_SOURCE_LIST,
     ATTR_MEDIA_ALBUM_NAME,
     ATTR_MEDIA_ARTIST,
+    ATTR_MEDIA_CONTENT_ID,
+    ATTR_MEDIA_CONTENT_TYPE,
     ATTR_MEDIA_DURATION,
     ATTR_MEDIA_REPEAT,
     ATTR_MEDIA_SEEK_POSITION,
@@ -17,6 +19,7 @@ from homeassistant.components.media_player import (
     ATTR_MEDIA_TITLE,
     ATTR_MEDIA_VOLUME_LEVEL,
     DOMAIN as MEDIA_PLAYER,
+    SERVICE_PLAY_MEDIA,
     SERVICE_SELECT_SOURCE,
 )
 from homeassistant.const import (
@@ -37,7 +40,12 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
-from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
+from homeassistant.exceptions import HomeAssistantError
+import pytest
+from pytest_homeassistant_custom_component.typing import (
+    ClientSessionGenerator,
+    WebSocketGenerator,
+)
 
 from custom_components.melody.const import DOMAIN
 
@@ -154,3 +162,40 @@ async def test_an_engine_that_goes_away_comes_back(hass: HomeAssistant, engine: 
             )
         finally:
             await back.stop()
+
+
+async def test_dynamic_playlists_are_browsed_and_played(
+    hass: HomeAssistant, engine: FakeEngine, hass_ws_client: WebSocketGenerator
+) -> None:
+    """ADR-0349: the engine's rules, browsed as playlists and played by it."""
+    await _added(hass, engine)
+    client = await hass_ws_client(hass)
+    await client.send_json({"id": 1, "type": "media_player/browse_media", "entity_id": PLAYER})
+    answer = await client.receive_json()
+    assert answer["success"], answer
+    browsed = answer["result"]
+    assert browsed["title"] == "Dynamic playlists"
+    # Last.fm's are the window's to play, not the engine's.
+    assert [child["title"] for child in browsed["children"]] == ["Random album", "Late jazz"]
+    assert all(child["can_play"] for child in browsed["children"])
+
+    async def play(media_id: str) -> None:
+        await hass.services.async_call(
+            MEDIA_PLAYER,
+            SERVICE_PLAY_MEDIA,
+            {
+                ATTR_ENTITY_ID: PLAYER,
+                ATTR_MEDIA_CONTENT_TYPE: "playlist",
+                ATTR_MEDIA_CONTENT_ID: media_id,
+            },
+            blocking=True,
+        )
+
+    await play(browsed["children"][0]["media_content_id"])
+    assert ("dynamic.play", {"id": "shipped:random-album"}) in engine.calls
+    await _until(hass, lambda: hass.states.get(PLAYER).state == STATE_PLAYING)
+    # From an automation, by name.
+    await play("late jazz")
+    assert ("dynamic.play", {"id": "jazz"}) in engine.calls
+    with pytest.raises(HomeAssistantError):
+        await play("Loved")

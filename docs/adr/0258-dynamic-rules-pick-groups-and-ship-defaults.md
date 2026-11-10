@@ -1,6 +1,7 @@
 # ADR-0258: Dynamic rules pick groups, the engine selects, and some ship
 
-Status: Accepted (2026-10-03)
+Status: Accepted (2026-10-03). Amended by ADR-0349: the shipped rules come
+from the engine, which keeps every rule.
 
 Extends the dynamic playlists of ADR-0195 (library rules) and the
 continuation of ADR-0253.

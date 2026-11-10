@@ -105,4 +105,7 @@ async def test_the_real_engine(hass: HomeAssistant, real_engine: int) -> None:
         blocking=True,
     )
     assert hass.states.get(player).attributes[ATTR_MEDIA_VOLUME_LEVEL] == 0.42
+    # ADR-0349: the engine's dynamic playlists, the shipped ones at least.
+    rules = (await entry.runtime_data.call("dynamic.rules"))["rules"]
+    assert "Random album" in [rule["name"] for rule in rules]
     assert await hass.config_entries.async_unload(entry.entry_id)
