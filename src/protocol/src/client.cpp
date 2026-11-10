@@ -539,8 +539,12 @@ core::Result<Json> Client::run_job(const std::string& job, const Json& params,
                                            .message = "the engine did not name the job it started",
                                            .context = {{.key = "job", .value = job}}});
     }
-    const auto job_id = identity->get<std::string>();
+    return await_job(identity->get<std::string>(), on_progress, cancellation);
+}
 
+core::Result<Json> Client::await_job(const std::string& job_id,
+                                     const std::function<void(const Json&)>& on_progress,
+                                     const core::CancellationToken& cancellation) {
     auto slot = std::make_shared<RunningJob>();
     slot->on_progress = on_progress;
     {
@@ -575,7 +579,7 @@ core::Result<Json> Client::run_job(const std::string& job, const Json& params,
         return std::unexpected(
             core::Error{.code = core::ErrorCode::io,
                         .message = failure_.empty() ? "the connection was lost" : failure_,
-                        .context = {{.key = "job", .value = job}}});
+                        .context = {{.key = "job_id", .value = job_id}}});
     }
     return *outcome;
 }

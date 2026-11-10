@@ -125,12 +125,14 @@ _melody_cli() {
         play | add | insert | upnext)
             if ((count == 0)); then
                 if [[ "${command}" == play ]]; then
-                    _melody_cli_words album track random list
+                    _melody_cli_words album track random list dynamic
                 else
                     _melody_cli_words album track random
                 fi
             elif [[ "${first}" == list && "${command}" == play ]]; then
                 _melody_cli_offer < <(_melody_cli_ask lists)
+            elif [[ "${first}" == dynamic && "${command}" == play ]]; then
+                _melody_cli_offer < <(_melody_cli_ask dynamic)
             elif [[ "${first}" == random ]]; then
                 ((count == 1)) && _melody_cli_words album tracks
             elif [[ "${cur}" == -* ]]; then

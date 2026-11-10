@@ -491,12 +491,12 @@ int watch_albums(Client& client, const Options& options, const std::vector<std::
     return text;
 }
 
-// The engine's list `words` name from `from` on: by its whole name, or by
-// every word found in one name. Fails, saying why, for none or several.
-[[nodiscard]] Json named_list(Client& client, const std::vector<std::string>& words,
-                              const std::size_t from) {
+// Which of `items` `words` name from `from` on: by its whole name, or by
+// every word found in one name. Fails, saying why, for none or several;
+// `what` is what they are, for saying so.
+[[nodiscard]] Json named_in(const std::vector<Json>& items, const std::vector<std::string>& words,
+                            const std::size_t from, const std::string& what) {
     const auto wanted = joined(words, from);
-    const auto lists = call(client, "list.all").value("lists", std::vector<Json>{});
     const auto lower = [](std::string text) {
         std::ranges::transform(text, text.begin(), [](const unsigned char c) {
             return static_cast<char>(std::tolower(c));
@@ -504,30 +504,44 @@ int watch_albums(Client& client, const Options& options, const std::vector<std::
         return text;
     };
     std::vector<Json> matches;
-    for (const auto& list : lists) {
-        if (lower(text_of(list, "name")) == lower(wanted)) {
-            matches = {list};
+    for (const auto& item : items) {
+        if (lower(text_of(item, "name")) == lower(wanted)) {
+            matches = {item};
             break;
         }
         bool every = true;
         for (std::size_t index = from; index < words.size() && every; ++index) {
-            every = lower(text_of(list, "name")).find(lower(words[index])) != std::string::npos;
+            every = lower(text_of(item, "name")).find(lower(words[index])) != std::string::npos;
         }
         if (every) {
-            matches.push_back(list);
+            matches.push_back(item);
         }
     }
     if (matches.empty()) {
-        fail("no list is called " + wanted);
+        fail("no " + what + " is called " + wanted);
     }
     if (matches.size() > 1U) {
         std::string names;
-        for (const auto& list : matches) {
-            names += "\n  " + text_of(list, "name");
+        for (const auto& item : matches) {
+            names += "\n  " + text_of(item, "name");
         }
-        fail("more than one list matches " + wanted + ":" + names);
+        fail("more than one " + what + " matches " + wanted + ":" + names);
     }
     return matches.front();
+}
+
+// The engine's list `words` name from `from` on.
+[[nodiscard]] Json named_list(Client& client, const std::vector<std::string>& words,
+                              const std::size_t from) {
+    return named_in(call(client, "list.all").value("lists", std::vector<Json>{}), words, from,
+                    "list");
+}
+
+// ADR-0349: the engine's dynamic playlist rule `words` name from `from` on.
+[[nodiscard]] Json named_rule(Client& client, const std::vector<std::string>& words,
+                              const std::size_t from) {
+    return named_in(call(client, "dynamic.rules").value("rules", std::vector<Json>{}), words, from,
+                    "dynamic playlist");
 }
 
 // ADR-0344: entries of the queue, Up Next or a list, one a line, as the
@@ -828,7 +842,7 @@ int complete(const Options& options) {
         trackknife::cli::print_layout_names(std::cout);
         return EXIT_SUCCESS;
     }
-    if (what != "outputs" && what != "lists" && what != "presets") {
+    if (what != "outputs" && what != "lists" && what != "presets" && what != "dynamic") {
         return EXIT_FAILURE;
     }
     auto client = connect(options);
@@ -843,6 +857,8 @@ int complete(const Options& options) {
         names(call(*client, "outputs.list").value("outputs", Json::array()), "name");
     } else if (what == "lists") {
         names(call(*client, "list.all").value("lists", Json::array()), "name");
+    } else if (what == "dynamic") {
+        names(call(*client, "dynamic.rules").value("rules", Json::array()), "name");
     } else {
         names(call(*client, "convert.presets").value("presets", Json::array()), "id");
     }
@@ -1056,6 +1072,49 @@ int run(const Options& options) {
         show(started(call(*client, "playback.state")));
         if (!options.json) {
             std::cerr << "melody-cli: " << text_of(list, "name") << "\n";
+        }
+    } else if (command == "play" && words.size() >= 3U && words[1] == "dynamic") {
+        // ADR-0349, ADR-0350: a dynamic playlist, picked and played by the
+        // engine. A Last.fm one waits on Last.fm, so the engine answers with
+        // a job, whose outcome says what came of it.
+        const auto rule = named_rule(*client, words, 2);
+        auto answer = call(*client, "dynamic.play", Json{{"id", text_of(rule, "id")}});
+        if (const auto job = text_of(answer, "job_id"); !job.empty()) {
+            if (!options.json) {
+                std::cerr << "melody-cli: asking Last.fm…\n";
+            }
+            auto outcome = client->await_job(job, {});
+            if (!outcome) {
+                fail(outcome.error().message);
+            }
+            if (const auto refused = text_of(*outcome, "error"); !refused.empty()) {
+                fail(refused);
+            }
+        }
+        show(started(call(*client, "playback.state")));
+        if (!options.json) {
+            std::cerr << "melody-cli: " << text_of(rule, "name") << "\n";
+        }
+    } else if (command == "dynamic") {
+        // ADR-0349: the engine's dynamic playlists, the shipped ones first.
+        const auto answer = call(*client, "dynamic.rules");
+        if (options.json) {
+            std::cout << answer.dump() << "\n";
+            return EXIT_SUCCESS;
+        }
+        if (words.size() > 1U) {
+            fail("dynamic takes no words; play dynamic NAME plays one");
+        }
+        for (const auto& rule : answer.value("rules", std::vector<Json>{})) {
+            const auto source = text_of(rule, "source");
+            std::cout << text_of(rule, "name");
+            if (!source.empty() && source != "rules") {
+                std::cout << " (Last.fm " << source << ")";
+            }
+            if (options.keys) {
+                std::cout << "\t" << text_of(rule, "id");
+            }
+            std::cout << "\n";
         }
     } else if (command == "lists" && words.size() >= 2U && words[1] == "folder") {
         // ADR-0296: the playlist folder, said or chosen.

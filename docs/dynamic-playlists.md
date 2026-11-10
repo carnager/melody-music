@@ -128,7 +128,8 @@ are included. Missing matches can leave fewer tracks than requested.
 ## Playing a rule from elsewhere
 
 The engine plays a rule itself: `dynamic.play` replaces its queue with what
-the rule picks and starts it. Home Assistant shows the rules under **Browse
+the rule picks and starts it. From a terminal, `melody-cli dynamic` names the
+rules and `melody-cli play dynamic random album` plays one. Home Assistant shows the rules under **Browse
 media** as *Dynamic playlists*, and an automation can play one by name:
 
 ```yaml

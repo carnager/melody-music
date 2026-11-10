@@ -632,6 +632,32 @@ if cli play list nothing-like-this 2>/dev/null; then
 fi
 cli stop > /dev/null
 
+# ADR-0349, ADR-0350: the engine's dynamic playlists, listed and played by
+# name -- a Last.fm one waits on the engine's job, and says what came of it.
+cli dynamic | matches -x "Random album" || fail "dynamic names the engine's dynamic playlists"
+cli --keys dynamic | matches -x -P "Random album\tshipped:random-album" \
+    || fail "--keys gives each its id"
+cli __complete dynamic | matches -x "Random tracks" || fail "__complete dynamic names them"
+completed play dynamic Random\ al | matches -x -F 'Random\ album' \
+    || fail "bash completes a dynamic playlist's name"
+cli play dynamic random tracks 2>"${work}/dynamic.txt" | matches "^playing:" \
+    || fail "play dynamic plays one by its name"
+matches -x "melody-cli: Random tracks" "${work}/dynamic.txt" || fail "and says which"
+cli --json status | python3 -c '
+import json, sys
+assert json.load(sys.stdin)["queue_size"] == 3' || fail "what the rule picked is the queue"
+engine '{"id":23,"method":"dynamic.save","params":{"rule":{"name":"Loved here","source":"loved","user":"someone"}}}' > /dev/null
+cli dynamic | matches -x "Loved here (Last.fm loved)" || fail "a Last.fm one is marked"
+if cli play dynamic loved here 2>"${work}/lastfm.txt"; then
+    fail "a Last.fm one without an account fails"
+fi
+matches "Sign in to Last.fm" "${work}/lastfm.txt" || fail "and says the engine needs an account"
+if cli play dynamic random 2>"${work}/ambiguous.txt"; then
+    fail "a word several dynamic playlists share is refused"
+fi
+matches "more than one dynamic playlist matches" "${work}/ambiguous.txt" || fail "and says which"
+cli stop > /dev/null
+
 # Wrong words say so, and fail.
 if cli play album nothing-like-this 2>"${work}/none.txt"; then
     fail "an album that is not there fails"
