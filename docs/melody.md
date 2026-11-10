@@ -180,6 +180,8 @@ melody-cli lists road trip            # one list's tracks
 melody-cli queue                      # the queue, what plays marked
 melody-cli upnext                     # Up Next, in the order it plays
 melody-cli play list road trip        # one of them, by name or its words
+melody-cli dynamic                    # the engine's dynamic playlists
+melody-cli play dynamic random album  # one, picked and played by the engine
 melody-cli output "Pixel 10 Pro"
 melody-cli rating 8                   # what plays, 1-10; 0 clears
 melody-cli albumrating 9              # its album

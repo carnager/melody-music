@@ -25,7 +25,7 @@ constexpr std::array<std::string_view, 7> groups{
     "Playing", "The queue",        "The library", "Playlists", "Your music's files",
     "Sharing", "Engines and setup"};
 
-const std::array<Entry, 26> entries{{
+const std::array<Entry, 27> entries{{
     {{"status"},
      "Playing",
      "status",
@@ -89,7 +89,8 @@ const std::array<Entry, 26> entries{{
      "  Or let the engine choose -- an album of a random album artist, or COUNT\n"
      "  random tracks (default 25):\n"
      "    melody-cli play random album\n"
-     "    melody-cli play random tracks 50\n"},
+     "    melody-cli play random tracks 50\n"
+     "  play list NAME and play dynamic NAME play a playlist, or a dynamic one.\n"},
     {{"queue", "upnext", "show"},
      "The queue",
      "queue | upnext [--format EXPR]",
@@ -105,6 +106,17 @@ const std::array<Entry, 26> entries{{
      "play one of the engine's playlists",
      "  By its name, or every word found in one name.\n"
      "    melody-cli play list late night\n"},
+    {{"dynamic", "rules"},
+     "Playlists",
+     "dynamic | play dynamic NAME...",
+     "the engine's dynamic playlists; play one",
+     "  dynamic names the engine's dynamic playlists -- rules it picks tracks\n"
+     "  by, the shipped ones first, Last.fm's marked (--keys adds each one's\n"
+     "  id, --json the whole rule). play dynamic NAME has the engine pick for\n"
+     "  one, found as play list finds a list, and play what it picked as the\n"
+     "  queue. A Last.fm one waits for Last.fm, and needs the engine given a\n"
+     "  Last.fm account in Melody.\n"
+     "    melody-cli play dynamic random album\n"},
     {{"albums", "tracks"},
      "The library",
      "albums | tracks [WORDS...]",
@@ -267,7 +279,7 @@ struct Command final {
 };
 
 // Every command run() knows, with what it does in a few words.
-constexpr std::array<Command, 35> commands{{
+constexpr std::array<Command, 36> commands{{
     {"status", "what plays, where, and on which engine"},
     {"current", "the playing track on one line"},
     {"play", "resume, or play what words find"},
@@ -291,6 +303,7 @@ constexpr std::array<Command, 35> commands{{
     {"update", "rescan the library, or these folders and files"},
     {"revision", "changes whenever the library does, for caches"},
     {"lists", "saved playlists, one's tracks, where they are kept"},
+    {"dynamic", "the engine's dynamic playlists"},
     {"fav", "the playing track into Favorites"},
     {"unfav", "the playing track out of Favorites"},
     {"rating", "say or set the playing track's rating"},

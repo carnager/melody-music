@@ -114,6 +114,13 @@ class Client final {
                                              const std::function<void(const Json&)>& on_progress,
                                              const core::CancellationToken& cancellation = {});
 
+    // Waits for a job already started -- one a method answered with its
+    // job_id, as dynamic.play does for a Last.fm rule -- and answers its
+    // outcome, as run_job does.
+    [[nodiscard]] core::Result<Json> await_job(const std::string& job_id,
+                                               const std::function<void(const Json&)>& on_progress,
+                                               const core::CancellationToken& cancellation = {});
+
     // Fire and forget. No response is expected and none will come.
     [[nodiscard]] core::Result<void> notify(const std::string& method,
                                             const Json& params = Json::object());

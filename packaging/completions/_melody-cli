@@ -101,10 +101,13 @@ _melody-cli() {
             if (( count == 0 )); then
                 local -a kinds=('album:an album, by words or --key' 'track:a track, by words or --key'
                     'random:an album or tracks the engine chooses')
-                [[ "$command" == play ]] && kinds+=('list:one of the engine'"'"'s playlists')
+                [[ "$command" == play ]] && kinds+=('list:one of the engine'"'"'s playlists'
+                    'dynamic:one of the engine'"'"'s dynamic playlists')
                 _describe -t kinds kind kinds
             elif [[ "$first" == list && "$command" == play ]]; then
                 _melody_cli_names lists
+            elif [[ "$first" == dynamic && "$command" == play ]]; then
+                _melody_cli_names dynamic
             elif [[ "$first" == random ]]; then
                 (( count == 1 )) && compadd album tracks
             elif [[ "$cur" == -* ]]; then
