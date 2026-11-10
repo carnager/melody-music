@@ -3,22 +3,28 @@
 // ADR-0349: the dynamic playlist rules are the engine's -- listed, saved,
 // edited, removed and handed over through the protocol, kept across a
 // restart, and played by the engine itself.
+// ADR-0350: a Last.fm rule too -- what Last.fm suggests, matched in the
+// library, those not picked the last time first.
 
 #include "recording_audition.hpp"
 
 #include "trackknife/core/stable_id.hpp"
 #include "trackknife/engine/catalogue.hpp"
 #include "trackknife/engine/dynamic_rules.hpp"
+#include "trackknife/engine/job_methods.hpp"
+#include "trackknife/engine/job_registry.hpp"
 #include "trackknife/engine/player.hpp"
 #include "trackknife/engine/workspace.hpp"
 #include "trackknife/protocol/dispatch.hpp"
 #include "trackknife/protocol/message.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -79,7 +85,7 @@ int main(const int argc, char** argv) {
     std::filesystem::create_directories(music);
     for (const auto& [name, extension] :
          {std::pair{"tagged-tone-flac", ".flac"}, std::pair{"tagged-tone-mp3", ".mp3"},
-          std::pair{"tagged-tone-opus", ".opus"}}) {
+          std::pair{"loudness-tone-opus", ".opus"}, std::pair{"rf64-tone-wav", ".wav"}}) {
         static_cast<void>(materialize(fixtures, name, music / (std::string{name} + extension)));
     }
     const auto database = directory / "engine.sqlite3";
@@ -102,11 +108,59 @@ int main(const int argc, char** argv) {
     };
     const auto shipped_count = engine::shipped_dynamic_rules().size();
 
+    // What Last.fm suggests: the library's three songs -- the FLAC and the
+    // MP3 are one, by their tags -- as Last.fm spells them (in capitals),
+    // and one the library does not have; the first twice.
+    std::vector<engine::LastFmSuggestion> suggested;
+    std::set<std::string> library_paths;
+    {
+        const auto all = catalogue.select(engine::DynamicSelection{.query = "ALL",
+                                                                   .limit = 500U,
+                                                                   .shuffle = false,
+                                                                   .group_by = {},
+                                                                   .groups = 0U,
+                                                                   .per_group = 0U});
+        require(all && all->paths.size() == 4U, "four files");
+        const auto tracks = catalogue.cached_tracks(all->paths);
+        require(tracks.has_value(), "their tags");
+        for (const auto& track : *tracks) {
+            require(!track.facts.artist.empty() && !track.facts.title.empty(), "tagged");
+            auto upper = [](std::string text) {
+                for (auto& character : text) {
+                    if (character >= 'a' && character <= 'z') {
+                        character = static_cast<char>(character - 'a' + 'A');
+                    }
+                }
+                return text;
+            };
+            const engine::LastFmSuggestion song{upper(track.facts.artist),
+                                                upper(track.facts.title)};
+            if (std::ranges::find(suggested, song) == suggested.end()) {
+                suggested.push_back(song);
+            }
+            library_paths.insert(track.raw_path);
+        }
+        require(suggested.size() == 3U, "three songs");
+        suggested.insert(suggested.begin() + 1, {"Nobody", "Not here"});
+        suggested.push_back(suggested.front());
+    }
+    std::vector<std::pair<std::string, std::vector<std::pair<std::string, std::string>>>> asked;
+    const engine::DynamicPicker::Suggest suggest =
+        [&](const std::string& method,
+            const std::vector<std::pair<std::string, std::string>>& params,
+            const std::size_t limit) -> core::Result<std::vector<engine::LastFmSuggestion>> {
+        require(limit == 500U, "as many as a rule can pick");
+        asked.emplace_back(method, params);
+        return suggested;
+    };
+
     std::string saved_id;
     {
         engine::DynamicRules rules{*workspace, sink};
+        engine::DynamicPicker picker{*workspace, catalogue, suggest};
+        engine::JobRegistry jobs{[](const protocol::Event&) {}};
         protocol::Dispatcher dispatcher;
-        engine::register_dynamic_rule_methods(dispatcher, rules, catalogue, *player);
+        engine::register_dynamic_rule_methods(dispatcher, rules, picker, catalogue, *player, jobs);
 
         // The shipped rules, first, marked, and fixed.
         auto listed = answer(dispatcher, "dynamic.rules").at("rules");
@@ -153,13 +207,30 @@ int main(const int argc, char** argv) {
         require(answer(dispatcher, "dynamic.rules").at("rules").size() == shipped_count + 1U,
                 "in place");
 
-        // A Last.fm rule is kept, but not played by the engine.
+        // A Last.fm rule is kept, and played by the engine, as a job: Last.fm
+        // takes its time.
         const Json loved{
             {"id", "loved"}, {"name", "Loved"}, {"source", "loved"}, {"user", "someone"}};
         require(answer(dispatcher, "dynamic.save", Json{{"rule", loved}}).contains("rule"),
                 "a Last.fm rule is kept");
-        require(!call(dispatcher, "dynamic.play", Json{{"id", "loved"}}).result,
-                "and not played by the engine");
+        const auto job = answer(dispatcher, "dynamic.play", Json{{"id", "loved"}});
+        require(job.contains("job_id"), "a Last.fm rule plays as a job");
+        jobs.wait_all();
+        require(!asked.empty() && asked.back().first == "user.getLovedTracks" &&
+                    asked.back().second ==
+                        std::vector<std::pair<std::string, std::string>>{{"user", "someone"}},
+                "the user's loved tracks are asked for");
+        require(player->queue().size() == 3U, "what the library has of them is queued");
+        require(player->queue_list().empty(), "of no list");
+        Json no_user = loved;
+        no_user["id"] = "no-user";
+        no_user["user"] = "";
+        require(answer(dispatcher, "dynamic.save", Json{{"rule", no_user}}).contains("rule"),
+                "a rule still being written is kept");
+        require(!call(dispatcher, "dynamic.play", Json{{"id", "no-user"}}).result,
+                "but not played without a user");
+        require(answer(dispatcher, "dynamic.delete", Json{{"id", "no-user"}}).contains("id"),
+                "and removed");
 
         // Handed over: only what the engine does not know.
         const auto adopted = answer(
@@ -197,6 +268,103 @@ int main(const int argc, char** argv) {
         require(!call(dispatcher, "dynamic.play", Json{{"id", "nothing"}}).result, "plays nothing");
         require(!call(dispatcher, "dynamic.play", Json{{"id", "missing"}}).result,
                 "nor does a rule there is not");
+    }
+
+    // ADR-0350: what a Last.fm source picks.
+    {
+        engine::DynamicPicker picker{*workspace, catalogue, suggest};
+        engine::DynamicRule similar{.id = {},
+                                    .name = "Like it",
+                                    .source = "similar",
+                                    .query = {},
+                                    .artist = "Seed",
+                                    .track = "Song",
+                                    .user = {},
+                                    .tag = {},
+                                    .limit = 2U,
+                                    .shuffle = false,
+                                    .group_by = {},
+                                    .groups = 0U,
+                                    .per_group = 0U};
+        std::vector<std::pair<std::size_t, std::size_t>> reported;
+        const auto first = picker.pick(similar, {}, [&](std::size_t done, std::size_t of) {
+            reported.emplace_back(done, of);
+        });
+        require(first.has_value(), "picked");
+        require(asked.back().first == "track.getSimilar" &&
+                    asked.back().second ==
+                        std::vector<std::pair<std::string, std::string>>{{"artist", "Seed"},
+                                                                         {"track", "Song"}},
+                "the seed's similar tracks are asked for");
+        require(first->matched == 3U, "every suggestion the library has, once");
+        require(first->unmatched == 1U, "and one it does not");
+        require(first->paths.size() == 2U, "as many as the rule wants");
+        require(!reported.empty() && reported.back() == std::pair<std::size_t, std::size_t>{5U, 5U},
+                "matching reports its progress");
+        // Picked again: the one not picked the last time comes first, and
+        // a new start of the engine still knows.
+        engine::DynamicPicker restarted{*workspace, catalogue, suggest};
+        const auto second = restarted.pick(similar);
+        require(second && second->paths.size() == 2U, "picked again");
+        const std::set<std::string> before{first->paths.begin(), first->paths.end()};
+        std::size_t fresh = 0U;
+        for (const auto& path : second->paths) {
+            require(library_paths.contains(path), "a library file");
+            fresh += before.contains(path) ? 0U : 1U;
+        }
+        require(fresh == 1U, "the one left out the last time is picked");
+        // A different seed is its own source.
+        auto other = similar;
+        other.track = "Other song";
+        other.limit = 3U;
+        require(restarted.pick(other)->paths.size() == 3U, "every match");
+
+        // What the window asks: a rule, saved or not, as a job.
+        engine::JobCatalog catalog;
+        engine::register_dynamic_rule_jobs(catalog, picker);
+        auto unnamed = engine::dynamic_rule_json(similar);
+        unnamed["name"] = "";
+        auto work = catalog.build("dynamic.pick", Json{{"rule", unnamed}});
+        require(work.has_value(), "a rule being written is picked");
+        std::vector<Json> job_progress;
+        const auto outcome = (*work)({}, [&job_progress](Json reported_progress) {
+            job_progress.push_back(reported_progress);
+        });
+        require(outcome.at("paths").size() == 2U && outcome.at("matched") == 3 &&
+                    outcome.at("unmatched") == 1,
+                "the job answers what was picked");
+        require(protocol::decode_raw_path(outcome.at("paths").front().get<std::string>()) &&
+                    library_paths.contains(
+                        *protocol::decode_raw_path(outcome.at("paths").front().get<std::string>())),
+                "as files");
+        require(!job_progress.empty() && job_progress.back().at("of") == 5, "with its progress");
+        auto library_rule = engine::dynamic_rule_json(engine::shipped_dynamic_rules().front());
+        const auto library_outcome =
+            (*catalog.build("dynamic.pick", Json{{"rule", library_rule}}))({}, [](Json) {});
+        require(library_outcome.at("paths").size() == 4U, "a tkq-1 rule is picked the same way");
+        require(!catalog.build("dynamic.pick", Json{{"rule", Json{{"query", "((("}}}}),
+                "a broken rule is refused at once");
+        core::CancellationSource stop;
+        stop.request_cancellation();
+        require((*work)(stop.token(), [](Json) {}).value("cancelled", false),
+                "a cancelled pick says so");
+        auto tagless = similar;
+        tagless.source = "tag";
+        require(!picker.pick(tagless), "a tag rule needs its tag");
+        engine::DynamicPicker without_lastfm{*workspace, catalogue, {}};
+        require(!without_lastfm.pick(similar), "an engine without Last.fm cannot pick one");
+        // Last.fm failing is said.
+        engine::DynamicPicker failing{
+            *workspace, catalogue,
+            [](const std::string&, const std::vector<std::pair<std::string, std::string>>&,
+               std::size_t) -> core::Result<std::vector<engine::LastFmSuggestion>> {
+                return std::unexpected(core::Error{.code = core::ErrorCode::io,
+                                                   .message = "Last.fm could not be reached",
+                                                   .context = {}});
+            }};
+        const auto failed = failing.pick(similar);
+        require(!failed && failed.error().message == "Last.fm could not be reached",
+                "Last.fm failing is said");
     }
 
     // Kept: another start has them.

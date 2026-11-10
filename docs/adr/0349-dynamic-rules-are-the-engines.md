@@ -4,7 +4,8 @@
 
 Accepted, 2026-11-10. Amends ADR-0195 (where definitions are kept),
 ADR-0253 (the engine kept a copy of a continued list's rule) and ADR-0258
-(the shipped rules came from the window).
+(the shipped rules came from the window). Completed by ADR-0350: the engine
+runs Last.fm rules too.
 
 ## Context
 

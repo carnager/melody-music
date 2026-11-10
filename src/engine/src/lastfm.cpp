@@ -11,6 +11,8 @@
 #include <array>
 #include <fstream>
 #include <map>
+#include <memory>
+#include <optional>
 #include <utility>
 
 namespace trackknife::engine {
@@ -527,6 +529,129 @@ core::Result<void> LastFm::love(std::optional<std::string> artist, std::optional
         return std::unexpected(std::move(answer.error()));
     }
     return {};
+}
+
+core::Result<std::vector<LastFmSuggestion>> parse_lastfm_suggestions(const Json& answer,
+                                                                     const std::size_t limit) {
+    if (!answer.is_object()) {
+        return std::unexpected(lastfm_error("Last.fm answered with something else than JSON"));
+    }
+    if (answer.contains("error")) {
+        const auto message = answer.find("message");
+        return std::unexpected(lastfm_error(message != answer.end() && message->is_string()
+                                                ? "Last.fm: " + message->get<std::string>()
+                                                : std::string{"Last.fm refused the request"}));
+    }
+    const Json* tracks = nullptr;
+    for (const auto* field : {"similartracks", "lovedtracks", "toptracks", "tracks"}) {
+        if (const auto found = answer.find(field); found != answer.end() && found->is_object()) {
+            if (const auto listed = found->find("track"); listed != found->end()) {
+                tracks = &*listed;
+            }
+        }
+    }
+    if (tracks == nullptr || !(tracks->is_array() || tracks->is_object())) {
+        return std::unexpected(lastfm_error("Last.fm's answer has no tracks"));
+    }
+    const auto one = [](const Json& track) -> std::optional<LastFmSuggestion> {
+        if (!track.is_object()) {
+            return std::nullopt;
+        }
+        const auto text = [](const Json& value) {
+            return value.is_string() ? value.get<std::string>() : std::string{};
+        };
+        const auto artist = track.find("artist");
+        const auto name = track.find("name");
+        LastFmSuggestion suggestion;
+        if (artist != track.end()) {
+            suggestion.artist =
+                artist->is_object() ? text(artist->value("name", Json{})) : text(*artist);
+        }
+        if (name != track.end()) {
+            suggestion.title = text(*name);
+        }
+        if (suggestion.artist.empty() || suggestion.title.empty()) {
+            return std::nullopt;
+        }
+        return suggestion;
+    };
+    std::vector<LastFmSuggestion> suggestions;
+    const auto add = [&](const Json& track) {
+        if (suggestions.size() < limit) {
+            if (auto suggestion = one(track)) {
+                suggestions.push_back(std::move(*suggestion));
+            }
+        }
+    };
+    if (tracks->is_array()) {
+        for (const auto& track : *tracks) {
+            add(track);
+        }
+    } else {
+        add(*tracks);
+    }
+    return suggestions;
+}
+
+core::Result<std::vector<LastFmSuggestion>>
+LastFm::suggestions(const std::string& method,
+                    const std::vector<std::pair<std::string, std::string>>& params,
+                    const std::size_t limit) const {
+    std::string api_key;
+    {
+        const std::lock_guard guard{mutex_};
+        if (session_) {
+            api_key = session_->api_key;
+        }
+    }
+    if (api_key.empty()) {
+        return std::unexpected(
+            core::Error{.code = core::ErrorCode::unsupported,
+                        .message = "Sign in to Last.fm in Melody (Last.fm settings) to use "
+                                   "Last.fm dynamic playlists on this engine",
+                        .context = {}});
+    }
+    std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl{curl_easy_init(), curl_easy_cleanup};
+    if (!curl) {
+        return std::unexpected(lastfm_error("could not start an HTTP request"));
+    }
+    std::vector<std::pair<std::string, std::string>> query{params};
+    query.emplace_back("method", method);
+    query.emplace_back("api_key", api_key);
+    query.emplace_back("limit", std::to_string(limit));
+    query.emplace_back("format", "json");
+    std::string url = endpoint_;
+    url += '?';
+    bool first = true;
+    for (const auto& [name, value] : query) {
+        if (!first) {
+            url += '&';
+        }
+        first = false;
+        auto* escaped_name =
+            curl_easy_escape(curl.get(), name.c_str(), static_cast<int>(name.size()));
+        auto* escaped_value =
+            curl_easy_escape(curl.get(), value.c_str(), static_cast<int>(value.size()));
+        url += escaped_name;
+        url += '=';
+        url += escaped_value;
+        curl_free(escaped_name);
+        curl_free(escaped_value);
+    }
+    std::string response;
+    curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl.get(), CURLOPT_HTTPGET, 1L);
+    curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, collect);
+    curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT_MS, request_timeout_ms);
+    curl_easy_setopt(curl.get(), CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl.get(), CURLOPT_USERAGENT, "melodyd");
+    if (curl_easy_perform(curl.get()) != CURLE_OK) {
+        // Not curl's own text: it can carry the URL, and with it the key.
+        return std::unexpected(core::Error{
+            .code = core::ErrorCode::io, .message = "Last.fm could not be reached", .context = {}});
+    }
+    return parse_lastfm_suggestions(Json::parse(response, nullptr, false), limit);
 }
 
 void register_lastfm_methods(protocol::Dispatcher& dispatcher, LastFm& lastfm) {

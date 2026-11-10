@@ -479,13 +479,12 @@ class BenchMainWindowTest final : public QObject {
     void upNextMultiSelectionEdits();
     void muteRestoresLocalVolumeAcrossBrowsing();
     void lastFmSettingsAndTrackActions();
-    void dynamicPlaylistsShareRulesAndRecommendationMatching();
+    void dynamicPlaylistsAskTheEngineToPick();
     void dynamicPlaylistCatalogAndEditor();
     void dynamicPlaylistRetainsChangesDuringRefresh();
     void dynamicResultSelectionSurvivesRefresh();
     void dynamicResultActionsUseTheirOwnSources();
     void currentTabHistoryPreservesOccurrences();
-    void lastFmRefreshSelectsFreshTracksFromLargerPool();
     void replayGainScanPreservesLogicalSources_data();
     void replayGainScanPreservesLogicalSources();
     void convertDialogPlansAndConvertsSelection();

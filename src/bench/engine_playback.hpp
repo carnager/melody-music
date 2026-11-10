@@ -7,6 +7,7 @@
 #include "bench/local_list_model.hpp"
 #include "trackknife/audio/local_playback.hpp"
 #include "trackknife/audio/playback_modes.hpp"
+#include "trackknife/core/cancellation.hpp"
 #include "trackknife/formats/decoder.hpp"
 #include "trackknife/protocol/client.hpp"
 
@@ -228,6 +229,20 @@ class EnginePlayback final : public QObject {
     // it took.
     void handDynamicRules(const QVector<DynamicPlaylistDefinition>& rules,
                           std::function<void(core::Result<int>)> answer);
+    // ADR-0350: what a rule -- saved or not -- picks on this engine: from its
+    // library, or what Last.fm suggests that its library has. Asked as a
+    // job, so a slow Last.fm holds up nothing else; cancelling asks the
+    // engine to stop. Progress and the answer come on this object's thread.
+    struct DynamicPicked {
+        std::vector<std::string> paths;
+        // How many tracks there were to choose from.
+        std::size_t matched{0U};
+        // Last.fm's suggestions the library does not have.
+        std::size_t unmatched{0U};
+    };
+    void pickDynamic(const DynamicPlaylistDefinition& rule, core::CancellationToken cancellation,
+                     std::function<void(std::size_t done, std::size_t of)> progress,
+                     std::function<void(core::Result<DynamicPicked>)> answer);
 
     // Hands the engine a queue and starts one of its entries. The rows carry
     // their own identities (ADR-0221), so the engine's queue and the model

@@ -18,8 +18,23 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace trackknife::engine {
+
+// ADR-0350: a track a Last.fm source suggests, as Last.fm names it.
+struct LastFmSuggestion final {
+    std::string artist;
+    std::string title;
+
+    friend bool operator==(const LastFmSuggestion&, const LastFmSuggestion&) = default;
+};
+
+// The tracks in a Last.fm answer -- similar, loved, top or a tag's -- in its
+// order, at most `limit`; those without an artist or title are left out.
+[[nodiscard]] core::Result<std::vector<LastFmSuggestion>>
+parse_lastfm_suggestions(const protocol::Json& answer, std::size_t limit);
 
 // Last.fm, where playback happens: scrobbles and "now playing" for what this
 // engine plays, with or without a window open, and love for any client.
@@ -72,6 +87,14 @@ class LastFm final {
     // Loves or unloves a track; with no artist and title, the one playing.
     [[nodiscard]] core::Result<void> love(std::optional<std::string> artist,
                                           std::optional<std::string> title, bool loved);
+    // ADR-0350: what `method` -- track.getSimilar, user.getLovedTracks,
+    // user.getTopTracks, tag.getTopTracks -- suggests with `params`, at most
+    // `limit`. Read with the API key of the account handed over: without
+    // one, there is nothing to ask with. Blocks for up to a few seconds.
+    [[nodiscard]] core::Result<std::vector<LastFmSuggestion>>
+    suggestions(const std::string& method,
+                const std::vector<std::pair<std::string, std::string>>& params,
+                std::size_t limit) const;
 
     // One round of what the worker does, at `now_ms` on a monotonic clock
     // and `wall_s` in Unix seconds: for tests, which cannot wait out a track.

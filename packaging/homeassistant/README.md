@@ -9,7 +9,9 @@ says them, not by polling.
 The engine's dynamic playlists ("Random album", "Rated 8 and higher", your
 own) are under Browse media, and `media_player.play_media` plays one by
 name, with `media_content_type: playlist` -- for automations. This needs
-protocol level 29.
+protocol level 29; Last.fm ones (similar, loved, top or tag tracks) need
+level 30 and the engine given a Last.fm account in Melody's Last.fm
+settings.
 
 ## What the engine needs
 

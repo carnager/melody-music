@@ -1346,166 +1346,97 @@ void BenchMainWindowTest::upNextPreservesNormalPlayback() {
     QVERIFY(window.playback_.requests.pending().empty());
 }
 
-void BenchMainWindowTest::dynamicPlaylistsShareRulesAndRecommendationMatching() {
+// ADR-0350: the window does not pick -- not from the library, not from
+// Last.fm. It asks the engine with the rule as written, shows its progress,
+// and shows what it picked; matching Last.fm's suggestions and preferring
+// tracks not picked the last time are the engine's (dynamic-rules).
+void BenchMainWindowTest::dynamicPlaylistsAskTheEngineToPick() {
     using Service = DynamicPlaylistService;
-    const auto parsed = parseLastFmTracks(R"({"similartracks":{"track":[
-        {"name":"Song \"quoted\"","artist":{"name":"A & B"}},
-        {"name":"Missing","artist":{"name":"A & B"}},
-        {"name":"Song \"quoted\"","artist":{"name":"A & B"}}
-    ]}})",
-                                          100);
-    QVERIFY(parsed);
-    QCOMPARE(parsed->size(), 3);
-    QVERIFY(!parseLastFmTracks(R"({"error":10,"message":"Invalid API key"})", 100));
-    QVERIFY(!parseLastFmTracks("not JSON", 100));
-    {
-        std::vector<Service::Completion> pending;
-        std::vector<query::CompiledTkq> queries;
-        Service service([&](engine::DynamicSelection selection, core::CancellationToken,
-                            Service::Completion completion) {
-            auto compiled = query::compile_tkq(selection.query);
-            QVERIFY(compiled);
-            queries.push_back(std::move(*compiled));
-            pending.push_back(std::move(completion));
-        });
-        int completions = 0;
-        Service::Tracks output;
-        QString failure;
-        int unmatched = 0;
-        connect(&service, &Service::finished, &service,
-                [&](const Service::Tracks& rows, int missing, const QString& error) {
-                    ++completions;
-                    output = rows;
-                    unmatched = missing;
-                    failure = error;
-                });
-        const auto rows = []() -> Service::Tracks {
-            LocalTrackRow row;
-            row.raw_path = std::string("/raw-\xff.flac");
-            row.artist = "A & B";
-            row.title = "Song \"quoted\"";
-            return std::vector<LocalTrackRow>{row};
-        };
-        DynamicPlaylistDefinition definition{.id = QStringLiteral("rules"),
-                                             .name = QStringLiteral("Favorites"),
-                                             .profile = QStringLiteral("local")};
-        service.refresh(definition, {});
-        QCOMPARE(pending.size(), 1U);
-        QCOMPARE(queries.front().source, std::string("rating GREATER 6"));
-        auto complete = std::move(pending.back());
-        complete(rows());
-        QCOMPARE(completions, 1);
-        QVERIFY(failure.isEmpty());
-        QCOMPARE(output.front().raw_path, std::string("/raw-\xff.flac"));
-        service.refresh(definition, {});
-        auto cancelled = std::move(pending.back());
-        service.cancel();
-        cancelled(rows());
-        QCOMPARE(completions, 1);
-        definition.source = QStringLiteral("similar");
-        service.matchRecommendations(definition, *parsed);
-        QCOMPARE(queries.back().predicates.front().text, std::string("A & B"));
-        QCOMPARE(queries.back().predicates.back().text, std::string("Song \"quoted\""));
-        auto first = std::move(pending.back());
-        first(rows());
-        const auto before = pending.size();
-        QTRY_COMPARE(pending.size(), before + 1);
-        auto missing = std::move(pending.back());
-        missing(Service::Tracks{});
-        QTRY_COMPARE(pending.size(), before + 2);
-        auto duplicate = std::move(pending.back());
-        duplicate(rows());
-        QTRY_COMPARE(completions, 2);
-        QCOMPARE(unmatched, 1);
-        QCOMPARE(output.size(), 1U);
-        QVERIFY(failure.isEmpty());
-        service.refresh(definition, {});
-        QCOMPARE(completions, 3);
-        QVERIFY(failure.contains(QStringLiteral("Last.fm API key")));
-    }
-}
-
-void BenchMainWindowTest::lastFmRefreshSelectsFreshTracksFromLargerPool() {
-    using Service = DynamicPlaylistService;
-    {
-        DynamicPlaylistDefinition definition{.id = QStringLiteral("variety"),
-                                             .name = QStringLiteral("Variety"),
-                                             .profile = QStringLiteral("local"),
-                                             .source = QStringLiteral("similar"),
-                                             .artist = QStringLiteral("Seed"),
-                                             .track = QStringLiteral("Seed track"),
-                                             .limit = 2,
-                                             .shuffle = false};
-        QVector<RecommendationTrack> pool;
-        for (int i = 0; i < 6; ++i)
-            pool.push_back({QStringLiteral("Artist"), QStringLiteral("Track %1").arg(i), {}});
-        QStringList selection;
-        std::size_t matched = 0;
-        const auto run = [&](QVector<RecommendationTrack> candidates, bool cancel = false) {
-            Service service([](engine::DynamicSelection asked, core::CancellationToken,
-                               Service::Completion completion) {
-                const auto title = query::compile_tkq(asked.query)->predicates.back().text;
-                LocalTrackRow row;
-                row.raw_path = std::string("/raw-\xff/") + title;
-                row.artist = "Artist";
-                row.title = title;
-                completion(Service::Tracks{row});
+    std::vector<DynamicPlaylistDefinition> asked;
+    std::vector<Service::Progress> progressing;
+    std::vector<Service::Completion> pending;
+    std::vector<core::CancellationToken> tokens;
+    Service service([&](DynamicPlaylistDefinition rule, core::CancellationToken cancellation,
+                        Service::Progress progress, Service::Completion completion) {
+        asked.push_back(std::move(rule));
+        tokens.push_back(std::move(cancellation));
+        progressing.push_back(std::move(progress));
+        pending.push_back(std::move(completion));
+    });
+    QStringList said;
+    connect(&service, &Service::progress, &service,
+            [&said](const QString& message) { said.push_back(message); });
+    int completions = 0;
+    Service::Tracks output;
+    QString failure;
+    int unmatched = 0;
+    connect(&service, &Service::finished, &service,
+            [&](const Service::Tracks& rows, int missing, const QString& error) {
+                ++completions;
+                output = rows;
+                unmatched = missing;
+                failure = error;
             });
-            int finished = 0;
-            connect(&service, &Service::finished, &service,
-                    [&](const Service::Tracks& rows, int, const QString& error) {
-                        QVERIFY2(error.isEmpty(), qPrintable(error));
-                        ++finished;
-                        selection.clear();
-                        for (const auto& row : rows) {
-                            selection.push_back(QString::fromStdString(row.title));
-                        }
-                        matched = service.matchedPoolSize();
-                    });
-            service.matchRecommendations(definition, std::move(candidates));
-            if (cancel) {
-                service.cancel();
-                QCoreApplication::processEvents();
-                QCOMPARE(finished, 0);
-            } else {
-                QTRY_COMPARE(finished, 1);
-            }
-        };
-        run(pool);
-        QCOMPARE(selection.size(), 2);
-        QCOMPARE(matched, 6U);
-        QVERIFY(std::is_sorted(selection.begin(), selection.end()));
-        const auto first = selection;
-        // A fresh service instance (reopened editor) remembers the last result.
-        run(pool);
-        QCOMPARE(selection.size(), 2);
-        for (const auto& title : selection)
-            QVERIFY(!first.contains(title));
-        const auto second = selection;
-        run(pool, true); // Aborted matching must not advance history.
-        run({});         // An empty response must not erase it either.
-        QVERIFY(selection.isEmpty());
-        run(pool);
-        for (const auto& title : selection)
-            QVERIFY(!second.contains(title));
-        // With only one unseen track available, exactly one repeat is needed.
-        pool.resize(3);
-        run(pool);
-        const auto small_first = selection;
-        run(pool);
-        QCOMPARE(selection.size(), 2);
-        int overlap = 0;
-        for (const auto& title : selection)
-            if (small_first.contains(title))
-                ++overlap;
-        QCOMPARE(overlap, 1);
-        // Undersized pools remain useful, with no duplicates or invented matches.
-        definition.shuffle = true;
-        pool.resize(1);
-        run(pool);
-        QCOMPARE(selection.size(), 1);
-        QCOMPARE(matched, 1U);
-    }
+    LocalTrackRow row;
+    row.raw_path = std::string("/raw-\xff.flac");
+    row.artist = "A & B";
+    row.title = "Song";
+
+    // A Last.fm rule goes to the engine as it is.
+    DynamicPlaylistDefinition similar{.id = {},
+                                      .name = QStringLiteral("Like it"),
+                                      .profile = {},
+                                      .source = QStringLiteral("similar"),
+                                      .artist = QStringLiteral("Seed"),
+                                      .track = QStringLiteral("Song"),
+                                      .limit = 2};
+    service.refresh(similar);
+    QCOMPARE(asked.size(), 1U);
+    QCOMPARE(asked.back().source, QStringLiteral("similar"));
+    QCOMPARE(asked.back().artist, QStringLiteral("Seed"));
+    QCOMPARE(said.back(), QStringLiteral("Asking Last.fm…"));
+    progressing.back()(20U, 120U);
+    QCOMPARE(said.back(), QStringLiteral("Matching library tracks: 20 / 120"));
+    pending.back()(Service::Picked{.tracks = {row}, .matched = 7U, .unmatched = 3U});
+    QCOMPARE(completions, 1);
+    QVERIFY(failure.isEmpty());
+    QCOMPARE(output.size(), 1U);
+    QCOMPARE(output.front().raw_path, row.raw_path);
+    QCOMPARE(unmatched, 3);
+    QCOMPARE(service.matchedPoolSize(), 7U);
+
+    // What the engine says went wrong is said.
+    service.refresh(similar);
+    pending.back()(std::unexpected(core::Error{
+        .code = core::ErrorCode::unsupported, .message = "Sign in to Last.fm", .context = {}}));
+    QCOMPARE(completions, 2);
+    QCOMPARE(failure, QStringLiteral("Sign in to Last.fm"));
+
+    // A library rule, the same way.
+    DynamicPlaylistDefinition favourites{.id = QStringLiteral("rules"),
+                                         .name = QStringLiteral("Favorites"),
+                                         .profile = QStringLiteral("local")};
+    service.refresh(favourites);
+    QCOMPARE(asked.back().query, QStringLiteral("rating GREATER 6"));
+    QCOMPARE(said.back(), QStringLiteral("Updating from library tags and ratings…"));
+    // Refreshed again before the engine answered: the first is cancelled,
+    // and its answer, coming late, is not shown.
+    auto late = pending.back();
+    const auto first_token = tokens.back();
+    service.refresh(favourites);
+    QVERIFY(first_token.is_cancellation_requested());
+    late(Service::Picked{.tracks = {}, .matched = 0U, .unmatched = 0U});
+    progressing[progressing.size() - 2U](1U, 2U);
+    QCOMPARE(completions, 2);
+    QCOMPARE(said.back(), QStringLiteral("Updating from library tags and ratings…"));
+    pending.back()(Service::Picked{.tracks = {row}, .matched = 1U, .unmatched = 0U});
+    QCOMPARE(completions, 3);
+    QCOMPARE(output.size(), 1U);
+    service.refresh(favourites);
+    auto cancelled = pending.back();
+    service.cancel();
+    cancelled(Service::Picked{.tracks = {row}, .matched = 1U, .unmatched = 0U});
+    QCOMPARE(completions, 3);
 }
 
 void BenchMainWindowTest::dynamicPlaylistCatalogAndEditor() {
@@ -1611,6 +1542,15 @@ void BenchMainWindowTest::dynamicPlaylistCatalogAndEditor() {
     auto* status = dialog->findChild<QLabel*>(QStringLiteral("dynamic-status"));
     QTRY_VERIFY(status->text().startsWith(QStringLiteral("0 tracks")));
     QVERIFY(!dialog->findChild<QPushButton*>(QStringLiteral("dynamic-open"))->isEnabled());
+    // ADR-0350: a Last.fm rule is the engine's to pick too; this one has no
+    // Last.fm account, and says so.
+    auto* source = dialog->findChild<QComboBox*>(QStringLiteral("dynamic-source"));
+    source->setCurrentIndex(source->findData(QStringLiteral("loved")));
+    dialog->findChild<QLineEdit*>(QStringLiteral("dynamic-user"))->setText(QStringLiteral("me"));
+    dialog->findChild<QPushButton*>(QStringLiteral("dynamic-refresh"))->click();
+    QTRY_VERIFY_WITH_TIMEOUT(status->text().startsWith(QStringLiteral("Sign in to Last.fm")),
+                             10000);
+    source->setCurrentIndex(source->findData(QStringLiteral("rules")));
     if (const auto screenshot_dir = qEnvironmentVariable("MELODY_TEST_SCREENSHOT_DIR");
         !screenshot_dir.isEmpty()) {
         QVERIFY(dialog->grab().save(screenshot_dir + QStringLiteral("/dynamic-playlists.png")));

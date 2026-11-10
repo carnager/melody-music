@@ -167,7 +167,7 @@ async def test_an_engine_that_goes_away_comes_back(hass: HomeAssistant, engine: 
 async def test_dynamic_playlists_are_browsed_and_played(
     hass: HomeAssistant, engine: FakeEngine, hass_ws_client: WebSocketGenerator
 ) -> None:
-    """ADR-0349: the engine's rules, browsed as playlists and played by it."""
+    """ADR-0349, ADR-0350: the engine's rules, browsed as playlists and played by it."""
     await _added(hass, engine)
     client = await hass_ws_client(hass)
     await client.send_json({"id": 1, "type": "media_player/browse_media", "entity_id": PLAYER})
@@ -175,8 +175,12 @@ async def test_dynamic_playlists_are_browsed_and_played(
     assert answer["success"], answer
     browsed = answer["result"]
     assert browsed["title"] == "Dynamic playlists"
-    # Last.fm's are the window's to play, not the engine's.
-    assert [child["title"] for child in browsed["children"]] == ["Random album", "Late jazz"]
+    # Last.fm's too: the engine asks Last.fm itself.
+    assert [child["title"] for child in browsed["children"]] == [
+        "Random album",
+        "Late jazz",
+        "Loved",
+    ]
     assert all(child["can_play"] for child in browsed["children"])
 
     async def play(media_id: str) -> None:
@@ -197,5 +201,7 @@ async def test_dynamic_playlists_are_browsed_and_played(
     # From an automation, by name.
     await play("late jazz")
     assert ("dynamic.play", {"id": "jazz"}) in engine.calls
+    await play("Loved")
+    assert ("dynamic.play", {"id": "loved"}) in engine.calls
     with pytest.raises(HomeAssistantError):
-        await play("Loved")
+        await play("Not a playlist")

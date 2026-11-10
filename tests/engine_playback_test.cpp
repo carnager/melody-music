@@ -1310,7 +1310,10 @@ void EnginePlaybackTest::aListContinuesWithADynamicPlaylist() {
     QVERIFY(server.has_value());
     // ADR-0349: the rules are the engine's.
     engine::DynamicRules rules{*store, (*server)->sink()};
-    engine::register_dynamic_rule_methods(recorder.dispatcher(), rules, catalogue, **player);
+    engine::DynamicPicker picker{*store, catalogue, {}};
+    engine::JobRegistry jobs{(*server)->sink()};
+    engine::register_dynamic_rule_methods(recorder.dispatcher(), rules, picker, catalogue, **player,
+                                          jobs);
     engine::DynamicRule everything_rule;
     everything_rule.id = "rule-everything";
     everything_rule.name = "Everything";

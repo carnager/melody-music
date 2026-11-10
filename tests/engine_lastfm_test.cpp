@@ -222,6 +222,13 @@ class FakeLastFm final {
             }
             std::map<std::string, std::string> params;
             std::string body = request.substr(request.find("\r\n\r\n") + 4U);
+            // A read is a GET: its parameters are the URL's.
+            if (request.starts_with("GET ")) {
+                const auto line = request.substr(4U, request.find(' ', 4U) - 4U);
+                const auto query = line.find('?');
+                body = query == std::string::npos ? std::string{} : line.substr(query + 1U);
+                params["http"] = "GET";
+            }
             std::size_t start = 0;
             while (start < body.size()) {
                 auto end = body.find('&', start);
@@ -239,7 +246,16 @@ class FakeLastFm final {
             }
             std::string status = "200 OK";
             std::string answer = "{}";
-            if (params["method"] == "track.scrobble") {
+            if (params["method"] == "track.getSimilar") {
+                answer = params["artist"] == "Nobody" ? R"({"error":6,"message":"Track not found"})"
+                                                      : R"({"similartracks":{"track":[
+                                   {"name":"First","artist":{"name":"A & B"}},
+                                   {"name":"","artist":{"name":"Untitled"}},
+                                   {"name":"Second","artist":{"name":"C"}}]}})";
+            } else if (params["method"] == "user.getLovedTracks") {
+                // One track only: Last.fm answers it as an object.
+                answer = R"({"lovedtracks":{"track":{"name":"Only","artist":{"name":"D"}}}})";
+            } else if (params["method"] == "track.scrobble") {
                 if (refuse_.load()) {
                     status = "503 Service Unavailable";
                 } else {
@@ -419,7 +435,42 @@ int main(const int argc, char** argv) {
                 "and can be taken back");
     }
 
+    // ADR-0350: what Last.fm suggests, for a dynamic playlist -- read with
+    // the account's API key.
+    {
+        const auto suggestions_file = directory / "suggestions.json";
+        engine::LastFm lastfm{*player, catalogue, suggestions_file, fake.endpoint()};
+        const auto without = lastfm.suggestions("track.getSimilar", {{"artist", "A"}}, 10U);
+        require(!without && without.error().message.find("Sign in") != std::string::npos,
+                "without an account there is no key to ask with");
+        require(lastfm.set_session(session).has_value(), "an account");
+        const auto similar = lastfm.suggestions("track.getSimilar",
+                                                {{"artist", "Seed & Co"}, {"track", "Song"}}, 10U);
+        require(similar.has_value(), "similar tracks");
+        require(*similar ==
+                    std::vector<engine::LastFmSuggestion>{{"A & B", "First"}, {"C", "Second"}},
+                "in Last.fm's order, those without a title left out");
+        const auto asked = fake.requests().back();
+        require(asked.at("http") == "GET" && asked.at("api_key") == session.api_key &&
+                    asked.at("artist") == "Seed & Co" && asked.at("limit") == "10" &&
+                    !asked.contains("sk") && !asked.contains("api_sig"),
+                "a read, with the key and nothing secret");
+        require(lastfm.suggestions("track.getSimilar", {{"artist", "A"}}, 1U)->size() == 1U,
+                "at most as many as asked");
+        const auto loved = lastfm.suggestions("user.getLovedTracks", {{"user", "u"}}, 10U);
+        require(loved && loved->size() == 1U && loved->front().title == "Only",
+                "one track, answered alone");
+        const auto refused = lastfm.suggestions("track.getSimilar", {{"artist", "Nobody"}}, 10U);
+        require(!refused && refused.error().message == "Last.fm: Track not found",
+                "Last.fm's refusal is said");
+        engine::LastFm unreachable{*player, catalogue, suggestions_file, "http://127.0.0.1:1/2.0/"};
+        const auto down = unreachable.suggestions("track.getSimilar", {{"artist", "A"}}, 10U);
+        require(!down && down.error().message.find("api_key") == std::string::npos &&
+                    down.error().message.find(session.api_key) == std::string::npos,
+                "an unreachable Last.fm is said without the key");
+    }
+
     std::filesystem::remove_all(directory);
-    std::cout << "engine lastfm: 2 scenarios\n";
+    std::cout << "engine lastfm: 3 scenarios\n";
     return EXIT_SUCCESS;
 }

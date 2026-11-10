@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-#include "trackknife/engine/dynamic_selection.hpp"
 #include "trackknife/protocol/message.hpp"
 
 #include <QString>
@@ -31,8 +30,6 @@ struct DynamicPlaylistDefinition {
 
     // ADR-0258: shipped with Melody, used and copied but not changed.
     [[nodiscard]] bool shipped() const { return id.startsWith(QStringLiteral("shipped:")); }
-    // What the engine is asked for, for a rule.
-    [[nodiscard]] engine::DynamicSelection selection() const;
 };
 
 // ADR-0349: a rule as the engine's dynamic.* methods tell and take it.

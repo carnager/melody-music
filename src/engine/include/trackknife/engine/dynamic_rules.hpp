@@ -2,9 +2,12 @@
 
 #pragma once
 
+#include "trackknife/core/cancellation.hpp"
 #include "trackknife/core/result.hpp"
 #include "trackknife/engine/dynamic_selection.hpp"
+#include "trackknife/engine/job_methods.hpp"
 #include "trackknife/engine/job_registry.hpp"
+#include "trackknife/engine/lastfm.hpp"
 #include "trackknife/engine/player.hpp"
 #include "trackknife/protocol/dispatch.hpp"
 
@@ -15,6 +18,7 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace trackknife::engine {
@@ -99,10 +103,59 @@ class DynamicRules final {
     std::size_t next_observer_{0U};
 };
 
+// ADR-0350: what a rule picks from this engine's library. A tkq-1 rule, its
+// selection (ADR-0258). A Last.fm source, the tracks it suggests that the
+// library has -- each the one file of its artist and title -- chosen as
+// the window chose them: those not picked the last time first, then in
+// Last.fm's order or shuffled. What was picked is kept, per source, in the
+// engine's store.
+class DynamicPicker final {
+  public:
+    // Asks Last.fm: a method, its parameters, and how many at most.
+    using Suggest = std::function<core::Result<std::vector<LastFmSuggestion>>(
+        const std::string& method, const std::vector<std::pair<std::string, std::string>>& params,
+        std::size_t limit)>;
+    // While matching: how many suggestions are looked up, of how many.
+    using Progress = std::function<void(std::size_t done, std::size_t of)>;
+    struct Picked {
+        std::vector<std::string> paths;
+        // How many tracks there were to choose from.
+        std::size_t matched{0U};
+        // Suggestions the library does not have.
+        std::size_t unmatched{0U};
+    };
+
+    DynamicPicker(Workspace& workspace, const Catalogue& catalogue, Suggest suggest);
+    DynamicPicker(const DynamicPicker&) = delete;
+    DynamicPicker& operator=(const DynamicPicker&) = delete;
+
+    [[nodiscard]] core::Result<Picked> pick(const DynamicRule& rule,
+                                            const core::CancellationToken& cancellation = {},
+                                            const Progress& progress = {});
+
+  private:
+    [[nodiscard]] core::Result<Picked> suggested(const DynamicRule& rule,
+                                                 const core::CancellationToken& cancellation,
+                                                 const Progress& progress);
+
+    Workspace* workspace_;
+    const Catalogue* catalogue_;
+    Suggest suggest_;
+    std::mutex mutex_;
+    std::mt19937 random_{std::random_device{}()};
+};
+
 // dynamic.rules, dynamic.save {rule}, dynamic.delete {id}, dynamic.adopt
-// {rules}, and dynamic.play {id}: the queue replaced with the rule's
-// selection from `catalogue`, playing. Changes are told as dynamic.rules.
+// {rules}, and dynamic.play {id}: the queue replaced with what the rule
+// picks, playing -- answered at once for a tkq-1 rule; a Last.fm rule's
+// waits on Last.fm, so it is a job, answered with its job_id. Changes are
+// told as dynamic.rules.
 void register_dynamic_rule_methods(protocol::Dispatcher& dispatcher, DynamicRules& rules,
-                                   const Catalogue& catalogue, Player& player);
+                                   DynamicPicker& picker, const Catalogue& catalogue,
+                                   Player& player, JobRegistry& jobs);
+
+// The dynamic.pick job {rule}: what a rule -- saved or not -- picks, as
+// {paths, matched, unmatched}, with progress {done, of} while matching.
+void register_dynamic_rule_jobs(JobCatalog& jobs, DynamicPicker& picker);
 
 } // namespace trackknife::engine

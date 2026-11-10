@@ -43,7 +43,6 @@ const QString buffer_capacity_key = QStringLiteral("playback/buffer-capacity-ms"
 const QString buffer_threshold_key = QStringLiteral("playback/buffer-start-threshold-ms");
 const QString preamp_with_key = QStringLiteral("playback/rg-preamp-with");
 const QString preamp_without_key = QStringLiteral("playback/rg-preamp-without");
-const QString lastfm_key = QStringLiteral("lastfm/api-key");
 
 } // namespace
 
@@ -118,7 +117,6 @@ SettingsSession::SettingsSession(QObject* parent) : QObject(parent) {
     read(QLatin1String(SettingsKeys::artwork_max_folder_edge_key),
          SettingsKeys::artwork_default_max_edge);
     read(QLatin1String(SettingsKeys::acoustid_client_key), QString{});
-    read(lastfm_key, QString{});
 
     // ADR-0234: engines on other machines, each connected at once beside
     // this computer's. One to fill in when there are none.
@@ -440,7 +438,6 @@ std::optional<SettingsSession::Page> SettingsSession::save() {
           SettingsKeys::engine_music_root_key, SettingsKeys::artwork_folder_image_name_key}) {
         settings.setValue(QLatin1String(key), trimmed(QLatin1String(key)));
     }
-    settings.setValue(lastfm_key, trimmed(lastfm_key));
     // ADR-0234: the engines elsewhere, those with an address.
     std::vector<RemoteEngineSetting> kept;
     for (const auto& entry : engines_) {

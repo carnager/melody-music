@@ -674,8 +674,20 @@ int main(int argc, char** argv) {
                 tcp_server_raw->publish_addressed(everyone, recipient, for_recipient);
             }
         };
+    // Last.fm for what this engine plays, with its session handed over by a
+    // client (lastfm.set_session); it scrobbles with every window closed.
+    // Made before the jobs, which ask it (ADR-0350) and are stopped first.
+    trackknife::engine::LastFm lastfm{*player, catalogue, state_directory / "lastfm.json"};
+    // ADR-0350: what a dynamic playlist's rule picks -- from the library, or
+    // what Last.fm suggests that the library has.
+    trackknife::engine::DynamicPicker dynamic_picker{
+        *workspace, catalogue,
+        [&lastfm](const std::string& method,
+                  const std::vector<std::pair<std::string, std::string>>& params,
+                  const std::size_t limit) { return lastfm.suggestions(method, params, limit); }};
     trackknife::engine::JobRegistry jobs{sink, addressed};
     trackknife::engine::JobCatalog job_catalogue;
+    trackknife::engine::register_dynamic_rule_jobs(job_catalogue, dynamic_picker);
     trackknife::engine::register_catalogue_jobs(job_catalogue, catalogue);
     // ADR-0296: the saved lists are the files in the playlist folder; every
     // change to a list is written to its file, so lists announce through it.
@@ -733,8 +745,8 @@ int main(int argc, char** argv) {
     // ADR-0349: the dynamic playlist rules are the engine's, for every
     // client -- the window, the phone, Home Assistant.
     trackknife::engine::DynamicRules dynamic_rules{*workspace, sink};
-    trackknife::engine::register_dynamic_rule_methods(dispatcher, dynamic_rules, catalogue,
-                                                      *player);
+    trackknife::engine::register_dynamic_rule_methods(dispatcher, dynamic_rules, dynamic_picker,
+                                                      catalogue, *player, jobs);
     trackknife::engine::ListContinuation continuation{*workspace, catalogue, dynamic_rules, sink};
     trackknife::engine::register_list_continuation_methods(dispatcher, continuation);
     // ADR-0237: naming layouts (Trackknife's, copied here) and this engine's
@@ -974,9 +986,6 @@ int main(int argc, char** argv) {
 #endif
     outputs.restore();
 
-    // Last.fm for what this engine plays, with its session handed over by a
-    // client (lastfm.set_session); it scrobbles with every window closed.
-    trackknife::engine::LastFm lastfm{*player, catalogue, state_directory / "lastfm.json"};
     trackknife::engine::register_lastfm_methods(dispatcher, lastfm);
     lastfm.start();
 

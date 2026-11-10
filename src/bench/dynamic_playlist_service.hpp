@@ -6,26 +6,13 @@
 #include "trackknife/core/cancellation.hpp"
 #include "trackknife/core/result.hpp"
 #include "trackknife/engine/catalogue.hpp"
-#include "trackknife/engine/dynamic_selection.hpp"
 #include <QObject>
-#include <QPointer>
 #include <QString>
 #include <QVector>
 #include <functional>
 #include <vector>
 
-class QNetworkAccessManager;
-class QNetworkReply;
-
 namespace trackknife::bench {
-
-inline constexpr int lastfm_candidate_limit = 500;
-
-struct RecommendationTrack {
-    QString artist{};
-    QString title;
-    QString mbid;
-};
 
 // The definitions the window kept in its settings before ADR-0349, by
 // profile, independently versioned from ordinary playlists. No key or
@@ -37,48 +24,47 @@ core::Result<void> saveDynamicPlaylists(const QString& profile,
 // ADR-0258: moves definitions saved under any other profile -- the retired
 // MPD backend kept its own -- into `profile`, once.
 void adoptDynamicPlaylists(const QString& profile);
-core::Result<QVector<RecommendationTrack>> parseLastFmTracks(const QByteArray& data, int limit);
 
+// A rule refreshed into tracks. ADR-0350: the engine picks -- from its
+// library, or what Last.fm suggests that its library has -- and this shows
+// what it picked.
 class DynamicPlaylistService final : public QObject {
     Q_OBJECT
   public:
     using Tracks = std::vector<LocalTrackRow>;
     using Result = core::Result<Tracks>;
-    using Completion = std::function<void(Result)>;
-    // ADR-0258: a library's selection, as its engine makes it.
-    using Search =
-        std::function<void(engine::DynamicSelection, core::CancellationToken, Completion)>;
-    DynamicPlaylistService(Search search, QObject* parent = nullptr);
-    void refresh(DynamicPlaylistDefinition definition, const QString& lastfm_key);
+    // What the engine picked, named from its library.
+    struct Picked {
+        Tracks tracks;
+        // How many tracks there were to choose from.
+        std::size_t matched{0U};
+        // Last.fm's suggestions the library does not have.
+        std::size_t unmatched{0U};
+    };
+    using Completion = std::function<void(core::Result<Picked>)>;
+    // While Last.fm's suggestions are matched: how many, of how many.
+    using Progress = std::function<void(std::size_t done, std::size_t of)>;
+    // Asks the engine to pick for a rule, saved or not. Both callbacks are
+    // called on this object's thread.
+    using Pick = std::function<void(DynamicPlaylistDefinition, core::CancellationToken, Progress,
+                                    Completion)>;
+    explicit DynamicPlaylistService(Pick pick, QObject* parent = nullptr);
+    void refresh(DynamicPlaylistDefinition definition);
     void cancel();
     std::size_t matchedPoolSize() const { return matched_pool_size_; }
-    // Same matching path as a provider response, without network access.
-    void matchRecommendations(DynamicPlaylistDefinition definition,
-                              QVector<RecommendationTrack> candidates);
   signals:
     void progress(const QString& message);
     void finished(const Tracks& tracks, int unmatched, const QString& error);
 
   private:
-    void matchNext(quint64 generation);
-    void complete();
-    void fail(const QString& message);
-    Search search_;
+    Pick pick_;
     core::CancellationSource cancellation_;
-    QNetworkAccessManager* network_;
-    QPointer<QNetworkReply> reply_;
     quint64 generation_{0};
-    DynamicPlaylistDefinition definition_;
-    QVector<RecommendationTrack> candidates_;
-    qsizetype candidate_index_{0};
-    int unmatched_{0};
-    Tracks result_;
     std::size_t matched_pool_size_{0};
 };
-// The library the catalogue source chose -- this process's or an engine's --
-// never a database opened here: its selection, and the cached tags of only
-// what it selected.
-DynamicPlaylistService::Result selectDynamicLibrary(const engine::Catalogue& catalogue,
-                                                    const engine::DynamicSelection& selection,
-                                                    const core::CancellationToken& cancellation);
+// The library's rows for files it picked -- this process's or an engine's,
+// never a database opened here: the cached tags of only those, in order.
+DynamicPlaylistService::Result dynamicRows(const engine::Catalogue& catalogue,
+                                           const std::vector<std::string>& paths,
+                                           const core::CancellationToken& cancellation);
 } // namespace trackknife::bench

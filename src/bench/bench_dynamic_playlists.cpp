@@ -30,33 +30,48 @@ void BenchMainWindow::showDynamicPlaylists() {
         }
         existing->close();
     }
-    // ADR-0220: through the catalogue source, like every other library read.
-    // Opening the database directly here meant that with an engine
-    // configured, dynamic playlists quietly queried this process's library
-    // instead of the engine's.
-    DynamicPlaylistDialog::LibrarySearch search =
-        [this](const EngineKey& engine, engine::DynamicSelection selection,
-               core::CancellationToken cancellation,
+    // ADR-0350: the engine picks -- from its library, or what Last.fm
+    // suggests that its library has -- and its library names what it
+    // picked, through the catalogue source like every other library read.
+    DynamicPlaylistDialog::Picker pick =
+        [this](const EngineKey& engine, DynamicPlaylistDefinition rule,
+               core::CancellationToken cancellation, DynamicPlaylistService::Progress progress,
                DynamicPlaylistService::Completion completion) {
+            const auto* link = workspace_.link(engine);
             auto* catalogues = catalogueOf(engine);
-            if (catalogues == nullptr) {
+            if (link == nullptr || link->playback == nullptr || catalogues == nullptr) {
                 completion(std::unexpected(core::Error{.code = core::ErrorCode::invalid_argument,
                                                        .message = "That engine is not configured",
                                                        .context = {}}));
                 return;
             }
-            auto* watcher = new QFutureWatcher<DynamicPlaylistService::Result>(this);
-            connect(watcher, &QFutureWatcher<DynamicPlaylistService::Result>::finished, this,
-                    [watcher, completion = std::move(completion)] {
-                        completion(watcher->future().takeResult());
-                        watcher->deleteLater();
-                    });
-            watcher->setFuture(
-                QtConcurrent::run([catalogue = std::shared_ptr{catalogues->openDeferred()},
-                                   selection = std::move(selection),
-                                   cancellation]() -> DynamicPlaylistService::Result {
-                    return selectDynamicLibrary(*catalogue, selection, cancellation);
-                }));
+            link->playback->pickDynamic(
+                rule, cancellation, std::move(progress),
+                [this, catalogue = std::shared_ptr{catalogues->openDeferred()}, cancellation,
+                 completion = std::move(completion)](
+                    core::Result<EnginePlayback::DynamicPicked> picked) mutable {
+                    if (!picked) {
+                        completion(std::unexpected(picked.error()));
+                        return;
+                    }
+                    using Named = core::Result<DynamicPlaylistService::Picked>;
+                    auto* watcher = new QFutureWatcher<Named>(this);
+                    connect(watcher, &QFutureWatcher<Named>::finished, this,
+                            [watcher, completion = std::move(completion)] {
+                                completion(watcher->future().takeResult());
+                                watcher->deleteLater();
+                            });
+                    watcher->setFuture(
+                        QtConcurrent::run([catalogue = std::move(catalogue),
+                                           picked = std::move(*picked), cancellation]() -> Named {
+                            auto rows = dynamicRows(*catalogue, picked.paths, cancellation);
+                            if (!rows)
+                                return std::unexpected(rows.error());
+                            return DynamicPlaylistService::Picked{.tracks = std::move(*rows),
+                                                                  .matched = picked.matched,
+                                                                  .unmatched = picked.unmatched};
+                        }));
+                });
         };
     std::vector<DynamicPlaylistDialog::Library> libraries;
     if (const auto* holder = workspace_.link(from); holder != nullptr && holder->catalogue) {
@@ -100,7 +115,7 @@ void BenchMainWindow::showDynamicPlaylists() {
                 link->playback->deleteDynamicRule(id, std::move(answer));
             }};
     auto* dialog =
-        new DynamicPlaylistDialog(std::move(libraries), std::move(rules), std::move(search), this);
+        new DynamicPlaylistDialog(std::move(libraries), std::move(rules), std::move(pick), this);
     for (const auto& engine : engines_) {
         if (engine->playback != nullptr) {
             connect(engine->playback, &EnginePlayback::dynamicRulesChanged, dialog,

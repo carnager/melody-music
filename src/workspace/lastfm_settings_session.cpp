@@ -31,6 +31,7 @@ namespace {
 
 LastFmSettingsSession::LastFmSettingsSession(Workspace& work, QObject* parent)
     : QObject(parent), work_(work),
+      // A key kept for dynamic playlists before ADR-0350 starts the form.
       key_(QSettings{}.value(QStringLiteral("lastfm/api-key")).toString()) {
     poll_.setObjectName(QStringLiteral("lastfm-auth-poll"));
     poll_.setSingleShot(true);
@@ -95,11 +96,6 @@ void LastFmSettingsSession::setSecret(const QString& secret) {
     emit changed();
 }
 
-void LastFmSettingsSession::setReuseKey(const bool on) {
-    reuse_key_ = on;
-    emit changed();
-}
-
 QString LastFmSettingsSession::connectText() const {
     return credentials_saved_ ? QStringLiteral("Reconnect in browser…")
                               : QStringLiteral("Connect to Last.fm…");
@@ -151,11 +147,6 @@ void LastFmSettingsSession::connectAccount() {
                                  "from your Last.fm API account.");
         emit changed();
         return;
-    }
-    if (reuse_key_) {
-        QSettings{}.setValue(QStringLiteral("lastfm/api-key"), api_key);
-        // Settings shows it too, so its Save cannot overwrite the reused key.
-        emit keyReused(api_key);
     }
     setWaiting(true);
     send(QStringLiteral("begin"), {api_key, shared_secret});

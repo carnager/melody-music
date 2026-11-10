@@ -94,29 +94,31 @@ stay.
 
 Editing a rule updates every list that continues with it at once, and
 removing the rule ends their continuation -- the engine looks the rule up
-by its id as the list ends. Last.fm sources are not offered, because the
-engine cannot query Last.fm on its own. See ADR-0253 and ADR-0258.
+by its id as the list ends. Last.fm sources are not offered: a list
+continues as a track starts, and cannot wait for Last.fm to answer. See
+ADR-0253 and ADR-0258.
 
 History rules may also order results, for example
 `ALL SORT DESCENDING HISTORY(playcount)`. Turn off **Shuffle results on refresh**
 to retain query ordering. See [history ordering](query-language.md#history-ordering-adr-0216).
 
-For Last.fm, add an API key under **Settings → Metadata services** using its
-registration link. Choose similar tracks, a user's loved/top tracks, or a tag.
-Enter the seed artist/title, username, or tag, then Refresh. These details are
-sent to Last.fm when you request a refresh. Account authorization, scrobbling,
-and Love/Unlove are configured separately under **Settings → Last.fm**; see
-[Last.fm accounts](lastfm.md).
+Last.fm rules are run by the engine too (ADR-0350). It asks Last.fm with the
+account it was given: sign in under **Settings → Last.fm** and use the account
+on the engine (see [Last.fm accounts](lastfm.md)) -- the same step that makes
+it scrobble. Choose similar tracks, a user's loved/top tracks, or a tag.
+Enter the seed artist/title, username, or tag, then Refresh. The engine sends
+these details to Last.fm when a rule is refreshed or played.
 
-The response is matched to music already in the selected library. Missing
-tracks are counted, duplicate matches are removed, and differing editions use
-a deterministic path choice. Matching currently requires the same artist and
-title apart from case, normalized Unicode, and whitespace; it does not guess
-alternate credits or editions. Each refresh reads up to 500 provider candidates, independently of your
-playlist length, and randomly selects from the library matches. Tracks outside
-the previous result are preferred; previous tracks fill any remaining slots.
-The previous selection is remembered across restarts, separately for each
-definition and library.
+The response is matched to music already in that engine's library. Missing
+tracks are counted, duplicate matches are removed, and a song the library has
+several files of uses the first by path. Matching requires the same artist and
+title apart from simple Unicode case, as tkq-1's `IS` compares them; it does
+not guess alternate credits or editions. Each refresh reads up to 500
+suggestions, independently of your playlist length, and randomly selects from
+the library matches. Tracks outside the previous result are preferred;
+previous tracks fill any remaining slots. The engine remembers the previous
+selection across restarts, for each source -- the same seed, user or tag
+shares it, whichever rule asks.
 
 **Shuffle selected tracks** also randomizes the order. With it unchecked, the
 fresh selection keeps Last.fm’s ranking order. If your library has too few
@@ -138,8 +140,8 @@ data:
   media_content_id: Random album
 ```
 
-Last.fm rules are not offered there: Melody fetches Last.fm, not the
-engine.
+Last.fm rules are offered too; the engine plays one once Last.fm has
+answered, which can take a few seconds.
 
 Results come entirely from the chosen engine's library. Use Library Refresh
 first if new files are not indexed. Closing the dynamic editor leaves saved
