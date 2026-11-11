@@ -755,7 +755,8 @@ void consume_takes_every_finished_track(engine::Player& player,
     modes.consume = audio::ModeState::on;
     player.set_modes(modes);
     const std::vector<engine::QueueEntry> entries{entry(audio.string()), entry(audio.string())};
-    player.replace_queue(entries);
+    // ADR-0351: as a dynamic rule's selection.
+    player.replace_queue(entries, {}, "some-rule");
     if (!player.play_entry(entries[0].entry_id)) {
         std::cerr << "engine player: could not start playback; skipping consume to the end\n";
         player.set_modes({});
@@ -774,6 +775,7 @@ void consume_takes_every_finished_track(engine::Player& player,
     require(first_dropped, "the track playback moved on from is consumed");
     require(player.queue().empty(), "and so is the last one, with nothing after it");
     require(player.state().consumed == entries[1].entry_id, "and is named for clients");
+    require(player.state().queue_rule.empty(), "a selection played away is no rule's queue");
 
     static_cast<void>(player.stop());
     player.set_modes({});

@@ -381,6 +381,10 @@ void Player::consume_locked(const core::StableId& entry_id) {
     }
     queue_.erase(queue_.begin() + row);
     consumed_ = entry_id;
+    // ADR-0351: a selection played away is no rule's queue.
+    if (queue_.empty()) {
+        queue_rule_.clear();
+    }
     ++revision_;
     std::erase(requests_, entry_id);
     // Rows moved, so the playing row is re-derived from its identity rather
@@ -499,9 +503,9 @@ void Player::follow_gapless_locked(const audio::LocalAuditionSnapshot& snapshot)
     prune_asks_locked();
 }
 
-void Player::replace_queue(std::vector<QueueEntry> entries, std::string list) {
+void Player::replace_queue(std::vector<QueueEntry> entries, std::string list, std::string rule) {
     const std::lock_guard guard{mutex_};
-    replace_queue_locked(std::move(entries), std::move(list));
+    replace_queue_locked(std::move(entries), std::move(list), std::move(rule));
 }
 
 core::Result<bool>
@@ -515,7 +519,8 @@ Player::edit_queue(const std::string& list,
     if (auto edited = edit(queue); !edited) {
         return std::unexpected(std::move(edited.error()));
     }
-    replace_queue_locked(std::move(queue), queue_list_);
+    // ADR-0351: an edited selection is not the rule's any more.
+    replace_queue_locked(std::move(queue), queue_list_, {});
     return true;
 }
 
@@ -532,13 +537,15 @@ bool Player::follow_list(const std::string& list, std::vector<QueueEntry> entrie
     held.insert(fresh.begin(), fresh.end());
     std::erase_if(entries,
                   [&held](const QueueEntry& entry) { return !held.contains(entry.entry_id); });
-    replace_queue_locked(std::move(entries), list);
+    replace_queue_locked(std::move(entries), list, {});
     return true;
 }
 
-void Player::replace_queue_locked(std::vector<QueueEntry> entries, std::string list) {
+void Player::replace_queue_locked(std::vector<QueueEntry> entries, std::string list,
+                                  std::string rule) {
     queue_ = std::move(entries);
     queue_list_ = std::move(list);
+    queue_rule_ = std::move(rule);
     ++revision_;
     // ADR-0221: the playing entry is followed by identity. If it has gone,
     // playback is not silently handed to whatever now sits at its old row.
@@ -563,6 +570,21 @@ void Player::replace_queue_locked(std::vector<QueueEntry> entries, std::string l
 std::string Player::queue_list() const {
     const std::lock_guard guard{mutex_};
     return queue_list_;
+}
+
+std::string Player::queue_rule() const {
+    const std::lock_guard guard{mutex_};
+    return queue_rule_;
+}
+
+bool Player::forget_queue_rule(const std::string& rule) {
+    const std::lock_guard guard{mutex_};
+    if (rule.empty() || queue_rule_ != rule) {
+        return false;
+    }
+    queue_rule_.clear();
+    ++revision_;
+    return true;
 }
 
 bool Player::adopt_queue_list(const std::string& from, const std::string& to) {
@@ -986,6 +1008,7 @@ Player::Persisted Player::persisted() const {
     Persisted stored;
     stored.queue = queue_;
     stored.queue_list = queue_list_;
+    stored.queue_rule = queue_rule_;
     stored.asks = asks_;
     stored.entry = anchors_.current;
     stored.request_return = anchors_.request_return;
@@ -1007,6 +1030,7 @@ bool Player::restore(Persisted state) {
     const std::lock_guard guard{mutex_};
     queue_ = std::move(state.queue);
     queue_list_ = std::move(state.queue_list);
+    queue_rule_ = std::move(state.queue_rule);
     asks_ = std::move(state.asks);
     modes_ = state.modes;
     replay_gain_mode_ = state.replay_gain_mode;
@@ -1096,6 +1120,7 @@ Player::State Player::state() const {
         current.duration_ms = playing->duration_ms.value_or(-1);
     }
     current.queue_size = queue_.size();
+    current.queue_rule = queue_rule_;
     current.requests = requests_.size();
     current.requests_revision = requests_revision_;
     current.modes = modes_;

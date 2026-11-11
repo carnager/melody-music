@@ -5,6 +5,8 @@
 // restart, and played by the engine itself.
 // ADR-0350: a Last.fm rule too -- what Last.fm suggests, matched in the
 // library, those not picked the last time first.
+// ADR-0351: the queue says which rule's selection it is, until it is
+// replaced, edited or the rule removed.
 
 #include "recording_audition.hpp"
 
@@ -13,6 +15,8 @@
 #include "trackknife/engine/dynamic_rules.hpp"
 #include "trackknife/engine/job_methods.hpp"
 #include "trackknife/engine/job_registry.hpp"
+#include "trackknife/engine/playback_methods.hpp"
+#include "trackknife/engine/playback_store.hpp"
 #include "trackknife/engine/player.hpp"
 #include "trackknife/engine/workspace.hpp"
 #include "trackknife/protocol/dispatch.hpp"
@@ -222,6 +226,7 @@ int main(const int argc, char** argv) {
                 "the user's loved tracks are asked for");
         require(player->queue().size() == 3U, "what the library has of them is queued");
         require(player->queue_list().empty(), "of no list");
+        require(player->state().queue_rule == "loved", "the rule's selection, once it is queued");
         Json no_user = loved;
         no_user["id"] = "no-user";
         no_user["user"] = "";
@@ -268,6 +273,95 @@ int main(const int argc, char** argv) {
         require(!call(dispatcher, "dynamic.play", Json{{"id", "nothing"}}).result, "plays nothing");
         require(!call(dispatcher, "dynamic.play", Json{{"id", "missing"}}).result,
                 "nor does a rule there is not");
+
+        // ADR-0351: which rule's selection the queue is.
+        engine::register_playback_methods(dispatcher, *player, &catalogue);
+        engine::follow_queue_rule(rules, *player);
+        const auto origin = [&dispatcher] {
+            return answer(dispatcher, "playback.state").at("dynamic_rule");
+        };
+        require(answer(dispatcher, "dynamic.play", Json{{"id", saved_id}}).at("tracks") == 2,
+                "a rule played");
+        require(origin() == saved_id, "the state names its rule");
+        require(answer(dispatcher, "playback.queue").at("dynamic_rule") == saved_id,
+                "and so does the queue");
+        // Playback keeps it: pausing, resuming, seeking, moving on.
+        static_cast<void>(answer(dispatcher, "playback.pause"));
+        static_cast<void>(answer(dispatcher, "playback.resume"));
+        static_cast<void>(answer(dispatcher, "playback.seek", Json{{"position_ms", 100}}));
+        static_cast<void>(answer(dispatcher, "playback.next"));
+        require(origin() == saved_id, "playing on keeps it");
+        // So does renaming the rule: the id is what is matched.
+        auto renamed = engine::dynamic_rule_json(*rules.find(saved_id));
+        renamed["name"] = "Renamed";
+        static_cast<void>(answer(dispatcher, "dynamic.save", Json{{"rule", renamed}}));
+        require(origin() == saved_id, "renaming keeps it");
+        renamed["name"] = "All of it";
+        static_cast<void>(answer(dispatcher, "dynamic.save", Json{{"rule", renamed}}));
+        // A rule that fails leaves the queue and its rule as they were.
+        require(!call(dispatcher, "dynamic.play", Json{{"id", "nothing"}}).result, "fails");
+        require(origin() == saved_id, "and the queue is still the earlier rule's");
+        // Kept across a restart, with the queue.
+        require(player->persisted().queue_rule == saved_id, "remembered");
+        // Edited, it is not the rule's selection any more.
+        const auto first = player->queue().front().entry_id;
+        require(player
+                    ->edit_queue(
+                        {},
+                        [&first](std::vector<engine::QueueEntry>& queue) -> core::Result<void> {
+                            std::erase_if(queue, [&first](const auto& entry) {
+                                return entry.entry_id != first;
+                            });
+                            return {};
+                        })
+                    .value_or(false),
+                "the queue edited");
+        require(origin().is_null(), "an edited queue is no rule's");
+        // Replaced by another client, likewise.
+        static_cast<void>(answer(dispatcher, "dynamic.play", Json{{"id", saved_id}}));
+        require(origin() == saved_id, "played again");
+        static_cast<void>(
+            answer(dispatcher, "playback.replace_queue",
+                   Json{{"entries", Json::array({engine::to_json(player->queue().front())})}}));
+        require(origin().is_null(), "a replaced queue is no rule's");
+        // And a rule removed takes its name off the queue.
+        auto brief = saved;
+        brief.erase("id");
+        brief["name"] = "Brief";
+        const auto brief_id = answer(dispatcher, "dynamic.save", Json{{"rule", brief}})
+                                  .at("rule")
+                                  .at("id")
+                                  .get<std::string>();
+        static_cast<void>(answer(dispatcher, "dynamic.play", Json{{"id", brief_id}}));
+        require(origin() == brief_id, "another rule played");
+        static_cast<void>(answer(dispatcher, "dynamic.delete", Json{{"id", brief_id}}));
+        require(origin().is_null(), "its rule removed, the queue is no rule's");
+        static_cast<void>(answer(dispatcher, "dynamic.play", Json{{"id", saved_id}}));
+        static_cast<void>(answer(dispatcher, "playback.pause"));
+    }
+
+    // ADR-0351: a restart brings the queue back with its rule -- unless the
+    // rule went meanwhile.
+    {
+        {
+            engine::PlaybackStore store{*player, *workspace};
+            store.persist();
+        }
+        auto restarted = engine::Player::create_without_audio();
+        engine::PlaybackStore store{*restarted, *workspace};
+        require(store.restore(), "the queue comes back");
+        require(restarted->state().queue_rule == saved_id, "as the rule's selection");
+        engine::DynamicRules rules{*workspace, {}};
+        engine::follow_queue_rule(rules, *restarted);
+        require(restarted->queue_rule() == saved_id, "its rule is still there");
+
+        auto gone = engine::Player::create_without_audio();
+        auto persisted = player->persisted();
+        persisted.queue_rule = "removed-meanwhile";
+        static_cast<void>(gone->restore(std::move(persisted)));
+        require(gone->queue_rule() == "removed-meanwhile", "restored as it was kept");
+        engine::follow_queue_rule(rules, *gone);
+        require(gone->queue_rule().empty(), "but a rule that is gone is not claimed");
     }
 
     // ADR-0350: what a Last.fm source picks.

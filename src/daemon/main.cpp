@@ -783,6 +783,9 @@ int main(int argc, char** argv) {
                       << " queued entries, paused\n";
         }
         playback_store->start();
+        // ADR-0351: after the restore, so a queue whose rule went meanwhile
+        // comes back as no rule's.
+        trackknife::engine::follow_queue_rule(dynamic_rules, *player);
     }
 
     // ADR-0228: the files an agent without its own copy fetches -- only

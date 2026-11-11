@@ -60,6 +60,10 @@ async def real_engine() -> AsyncGenerator[int]:
             "--state", str(Path(directory) / "state"),
             "--name", "test-engine",
             "--local-only",
+            # Not the user's own melodyd.conf: its TCP listener would clash
+            # with the engine running here.
+            env={**os.environ, "XDG_CONFIG_HOME": str(Path(directory) / "config"),
+                 "XDG_DATA_HOME": str(Path(directory) / "data")},
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -108,4 +112,7 @@ async def test_the_real_engine(hass: HomeAssistant, real_engine: int) -> None:
     # ADR-0349: the engine's dynamic playlists, the shipped ones at least.
     rules = (await entry.runtime_data.call("dynamic.rules"))["rules"]
     assert "Random album" in [rule["name"] for rule in rules]
+    # ADR-0351: an empty queue is no dynamic playlist's.
+    assert (await entry.runtime_data.call("playback.state"))["dynamic_rule"] is None
+    assert hass.states.get(player).attributes["dynamic_playlist_id"] is None
     assert await hass.config_entries.async_unload(entry.entry_id)

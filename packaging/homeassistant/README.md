@@ -13,6 +13,12 @@ protocol level 29; Last.fm ones (similar, loved, top or tag tracks) need
 level 30 and the engine given a Last.fm account in Melody's Last.fm
 settings.
 
+The player's `dynamic_playlist_id` attribute is the id of the dynamic
+playlist the engine's queue is, or empty once anything else was put there
+(`dynamic_playlist` is its name, for showing). Pause, next and renaming the
+playlist keep it, so a room button can resume its own playlist and start it
+again otherwise. This needs protocol level 31.
+
 ## What the engine needs
 
 - melodyd listening on the network, which needs a password:
