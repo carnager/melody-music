@@ -7,6 +7,14 @@ engine's level with its own and says once when the engine is older.
 
 ## Protocol 1
 
+### Level 32 (2026-11-11)
+
+ADR-0352: a scan names the files it could not read.
+
+- The `catalogue.scan` job's outcome carries `unreadable: [{path, reason}]`
+  -- the first 1000 files it could not read, paths encoded, each with why.
+  Absent when there were none; `failed` still counts them all.
+
 ### Level 31 (2026-11-11)
 
 ADR-0351: the queue knows which dynamic playlist it is.

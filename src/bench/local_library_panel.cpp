@@ -12,7 +12,11 @@
 #include "uicommon/library_tree_view.hpp"
 #include "uicommon/rating_stars.hpp"
 
+#include "trackknife/core/local_sources.hpp"
+
+#include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -21,6 +25,7 @@
 #include <QFileDialog>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
@@ -34,6 +39,7 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeView>
+#include <QTreeWidget>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -224,6 +230,16 @@ LocalLibraryPanel::LocalLibraryPanel(const CatalogueSource& catalogues, EngineKe
     status_row->addWidget(scan_button_, 0, Qt::AlignTop);
     status_row->addWidget(folders, 0, Qt::AlignTop);
     footer_layout->addLayout(status_row);
+    // ADR-0352: after a scan that could not read some files, which ones.
+    unreadable_link_ = new QLabel(footer);
+    unreadable_link_->setObjectName(QStringLiteral("local-library-unreadable"));
+    unreadable_link_->setFont(small);
+    unreadable_link_->setTextFormat(Qt::RichText);
+    unreadable_link_->setTextInteractionFlags(Qt::LinksAccessibleByMouse |
+                                              Qt::LinksAccessibleByKeyboard);
+    unreadable_link_->hide();
+    connect(unreadable_link_, &QLabel::linkActivated, this, &LocalLibraryPanel::showUnreadable);
+    footer_layout->addWidget(unreadable_link_);
     // Which library this is: the tab above says so while it answers, so this
     // line appears only when it does not (ADR-0220), and in full colour.
     source_label_ = new QLabel(footer);
@@ -271,6 +287,9 @@ LocalLibraryPanel::LocalLibraryPanel(const CatalogueSource& catalogues, EngineKe
     connect(search_, &QLineEdit::returnPressed, browser_, &LibraryBrowser::commitSearch);
     connect(browser_, &LibraryBrowser::statusChanged, this,
             [this] { status_->setText(browser_->status()); });
+    connect(browser_, &LibraryBrowser::unreadableChanged, this,
+            &LocalLibraryPanel::refreshUnreadable);
+    refreshUnreadable();
     connect(browser_, &LibraryBrowser::queryErrorChanged, this, [this] {
         query_error_->setText(browser_->queryError());
         query_error_->setVisible(!browser_->queryError().isEmpty());
@@ -533,6 +552,71 @@ void LocalLibraryPanel::editViews() {
     dialog->show();
     dialog->raise();
     dialog->activateWindow();
+}
+
+void LocalLibraryPanel::refreshUnreadable() {
+    const auto named = browser_->unreadable().size();
+    unreadable_link_->setText(QStringLiteral("<a href=\"unreadable\">%1</a>")
+                                  .arg(named == 1U ? tr("Show the file") : tr("Show the files")));
+    unreadable_link_->setVisible(named != 0U);
+    if (named == 0U && unreadable_dialog_) {
+        unreadable_dialog_->close();
+    }
+}
+
+void LocalLibraryPanel::showUnreadable() {
+    if (unreadable_dialog_) {
+        unreadable_dialog_->close();
+    }
+    const auto& failures = browser_->unreadable();
+    if (failures.empty()) {
+        return;
+    }
+    auto* dialog = new QDialog(this);
+    dialog->setObjectName(QStringLiteral("local-library-unreadable-dialog"));
+    dialog->setWindowTitle(tr("Files the scan could not read"));
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->resize(760, 380);
+    unreadable_dialog_ = dialog;
+    auto* layout = new QVBoxLayout(dialog);
+    const auto count = browser_->unreadableCount();
+    auto* explanation = new QLabel(
+        (count > failures.size()
+             ? tr("%1 files could not be read; the first %2 are listed.")
+                   .arg(count)
+                   .arg(failures.size())
+             : tr("%n file(s) could not be read.", nullptr, static_cast<int>(failures.size()))) +
+            QLatin1Char(' ') +
+            tr("Their previous library entries were kept. Refresh again once they are fixed."),
+        dialog);
+    explanation->setWordWrap(true);
+    layout->addWidget(explanation);
+    auto* list = new QTreeWidget(dialog);
+    list->setObjectName(QStringLiteral("local-library-unreadable-list"));
+    list->setRootIsDecorated(false);
+    list->setUniformRowHeights(true);
+    list->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    list->setHeaderLabels({tr("File"), tr("Why")});
+    list->header()->setStretchLastSection(true);
+    QString all;
+    for (const auto& failure : failures) {
+        const auto path = QString::fromUtf8(core::display_raw_path(failure.raw_path));
+        const auto reason = QString::fromUtf8(failure.reason);
+        auto* item = new QTreeWidgetItem(list, {path, reason});
+        item->setToolTip(0, path);
+        item->setToolTip(1, reason);
+        all += path + QLatin1Char('\t') + reason + QLatin1Char('\n');
+    }
+    list->resizeColumnToContents(0);
+    list->setColumnWidth(0, std::min(list->columnWidth(0), 480));
+    layout->addWidget(list, 1);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
+    auto* copy = buttons->addButton(tr("Copy List"), QDialogButtonBox::ActionRole);
+    connect(copy, &QPushButton::clicked, dialog,
+            [all] { QApplication::clipboard()->setText(all); });
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
+    layout->addWidget(buttons);
+    dialog->show();
 }
 
 void LocalLibraryPanel::showFolders() {

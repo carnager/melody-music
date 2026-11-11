@@ -234,6 +234,15 @@ void register_catalogue_jobs(JobCatalog& jobs, LocalCatalogue& catalogue) {
                 }
                 result["outside"] = std::move(outside);
             }
+            // ADR-0352, level 32: which files could not be read, and why.
+            if (!outcome->unreadable.empty()) {
+                auto unreadable = Json::array();
+                for (const auto& failure : outcome->unreadable) {
+                    unreadable.push_back(Json{{"path", protocol::encode_raw_path(failure.raw_path)},
+                                              {"reason", failure.reason}});
+                }
+                result["unreadable"] = std::move(unreadable);
+            }
             return result;
         };
     });

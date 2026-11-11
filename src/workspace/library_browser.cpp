@@ -279,13 +279,23 @@ LibraryBrowser::LibraryBrowser(const CatalogueSource& catalogues, EngineKey engi
             return;
         }
         const auto outcome = scan_watcher_.result();
+        // ADR-0352: what could not be read, kept to be shown on request.
+        unreadable_ = outcome.result.unreadable;
+        unreadable_count_ = std::max(progress_->failed.load(), unreadable_.size());
+        emit unreadableChanged();
         if (!outcome.error.isEmpty()) {
             setStatus(outcome.error);
         } else if (outcome.result.cancelled) {
             setStatus(tr("Scan stopped. Completed updates were kept."));
         } else if (outcome.result.incomplete) {
-            setStatus(tr("Scan incomplete. %1 files could not be read; previous entries were kept.")
-                          .arg(progress_->failed.load()));
+            const auto failed = progress_->failed.load();
+            setStatus(failed == 0U ? tr("Scan incomplete; previous entries were kept.")
+                      : failed == 1U
+                          ? tr("Scan incomplete. 1 file could not be read; previous entries "
+                               "were kept.")
+                          : tr("Scan incomplete. %1 files could not be read; previous entries "
+                               "were kept.")
+                                .arg(failed));
         } else {
             const auto updated = progress_->indexed.load();
             setStatus(updated == 0U   ? tr("Library up to date.")
@@ -1668,6 +1678,11 @@ void LibraryBrowser::startScan() {
     }
     scanning_ = true;
     emit scanningChanged();
+    if (unreadable_count_ != 0U) {
+        unreadable_.clear();
+        unreadable_count_ = 0;
+        emit unreadableChanged();
+    }
     scan_cancellation_ = core::CancellationSource{};
     progress_ = std::make_shared<persistence::LibraryScanProgress>();
     poll_timer_.start();

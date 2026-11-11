@@ -305,9 +305,30 @@ RemoteCatalogue::scan(const core::CancellationToken& cancellation,
     progress.visited.store(outcome->value("visited", std::size_t{0}));
     progress.indexed.store(outcome->value("indexed", std::size_t{0}));
     progress.failed.store(outcome->value("failed", std::size_t{0}));
+    // ADR-0352: an engine before level 32 names none; one entry it cannot
+    // decode is passed over rather than failing the scan that happened.
+    std::vector<persistence::LibraryScanFailure> unreadable;
+    if (const auto named = outcome->find("unreadable");
+        named != outcome->end() && named->is_array()) {
+        for (const auto& failure : *named) {
+            if (!failure.is_object() || !failure.contains("path") || !failure["path"].is_string()) {
+                continue;
+            }
+            auto raw = protocol::decode_raw_path(failure["path"].get<std::string>());
+            if (!raw) {
+                continue;
+            }
+            const auto reason = failure.find("reason");
+            unreadable.push_back({.raw_path = std::move(*raw),
+                                  .reason = reason != failure.end() && reason->is_string()
+                                                ? reason->get<std::string>()
+                                                : std::string{}});
+        }
+    }
     return persistence::LibraryScanResult{.cancelled = outcome->value("cancelled", false),
                                           .incomplete = outcome->value("incomplete", false),
-                                          .outside = {}};
+                                          .outside = {},
+                                          .unreadable = std::move(unreadable)};
 }
 
 core::Result<void> RemoteCatalogue::add_root(const std::string& raw_path) {

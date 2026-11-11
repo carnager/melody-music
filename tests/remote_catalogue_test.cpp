@@ -112,6 +112,13 @@ void adding_and_scanning_a_folder_works(engine::Catalogue& catalogue, const std:
     // The counters the caller polls must be filled either way; a remote scan
     // that finishes silently is indistinguishable from one that did nothing.
     require(progress.visited.load() > 0U, label + ": the scan visited something");
+    // ADR-0352: the fake track.flac is named, with why, either side.
+    require(scanned->incomplete, label + ": an unreadable file leaves the scan incomplete");
+    require(progress.failed.load() == 1U, label + ": and is counted");
+    require(scanned->unreadable.size() == 1U, label + ": and named");
+    require(scanned->unreadable[0].raw_path == (music / "track.flac").string(),
+            label + ": by its path, exactly");
+    require(!scanned->unreadable[0].reason.empty(), label + ": with a reason");
 
     // Searching is what the library search box runs, and it is the step that
     // finds results at all -- cached facts are only useful once something has
