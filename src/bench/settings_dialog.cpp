@@ -239,12 +239,22 @@ SettingsDialog::SettingsDialog(QWidget* parent, OutputProfileStore profile_store
     playback_layout->setSpacing(16);
     auto* resume_note =
         new QLabel(QStringLiteral("The engine plays the music and keeps its queue: closing this "
-                                  "window never interrupts it, and an engine that restarts "
+                                  "window does not interrupt it unless asked below, and an "
+                                  "engine that restarts "
                                   "restores its queue, paused."),
                    playback);
     resume_note->setWordWrap(true);
     resume_note->setForegroundRole(QPalette::PlaceholderText);
     playback_layout->addWidget(resume_note);
+    // ADR-0349: closing the window pauses what plays, wherever it plays.
+    auto* pause_on_close =
+        new QCheckBox(QStringLiteral("Pause the music when Melody closes"), playback);
+    pause_on_close->setObjectName(QStringLiteral("bench-settings-pause-on-close"));
+    pause_on_close->setToolTip(QStringLiteral(
+        "Closing or quitting Melody pauses what plays on every engine it is connected to -- "
+        "this computer's or a server's -- for everyone listening to it."));
+    bind(pause_on_close, "playback/pause-on-close");
+    playback_layout->addWidget(pause_on_close);
     auto* buffer_form = new QFormLayout;
     buffer_form->setVerticalSpacing(12);
     buffer_profile_ = new QComboBox(playback);
