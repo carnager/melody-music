@@ -199,6 +199,28 @@ SettingsDialog::SettingsDialog(QWidget* parent, OutputProfileStore profile_store
     panel_animations_->setObjectName(QStringLiteral("bench-settings-panel-animations"));
     bind(panel_animations_, "appearance/panel-animations");
     general_form->addRow(QStringLiteral("Appearance:"), panel_animations_);
+    // The side panel in front when Melody opens: as it was left, or always
+    // the same -- Lyrics or an enabled plugin's.
+    auto* front_panel = new QComboBox(general);
+    front_panel->setObjectName(QStringLiteral("bench-settings-front-panel"));
+    front_panel->setToolTip(
+        QStringLiteral("Which of the side panels is in front when Melody opens. Drag their tabs to "
+                       "order them; the order is kept."));
+    std::vector<SettingsSession::Choice> fronts{
+        {.label = QStringLiteral("The one in front when Melody closed"), .value = QString{}},
+        {.label = QStringLiteral("Lyrics"), .value = QStringLiteral("bench-lyrics")}};
+    for (const auto& found : discoverPlugins()) {
+        if (!found.plugin || !pluginEnabled(found.name)) {
+            continue;
+        }
+        for (const auto& panel : found.plugin->panels) {
+            fronts.push_back(
+                {.label = panel.label,
+                 .value = QStringLiteral("bench-plugin-panel-%1-%2").arg(found.name, panel.id)});
+        }
+    }
+    bind(front_panel, fronts, "panels/start");
+    general_form->addRow(QStringLiteral("Panel in front:"), front_panel);
     // An artist's initials in the library on a tile of the name's colour, as
     // an album without a cover is drawn; off, a quiet grey one.
     auto* coloured_initials =

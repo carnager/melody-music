@@ -42,3 +42,22 @@ Accepted, 2026-10-17. Replaces ADR-0026's composed panel layouts.
   layout actions remain, a divider moved is where it was in the next
   window; Up Next and Lyrics open together are two tabs, the last opened
   in front, and the one left keeps its width when the other closes.
+
+## Amendment, 2026-11-09: the tabs keep their order and the one in front
+
+- **Their order.** The side panels' tabs can be dragged (Qt's dock tab
+  bars always could), but were tabbed again at every start in the order the
+  panels were made -- Lyrics, then each plugin's -- so an order dragged to
+  did not outlive the window. The order dragged to is kept
+  (`panels/order`, the panels' object names; one not in it goes last) and
+  the tabs are put in it whenever they are tabbed together: when the window
+  opens, when Panels brings them back, when the plugins' are made again.
+- **The one in front.** Which tab is in front is kept (`panels/front`)
+  and brought back then, rather than whichever was tabbed last. Settings ›
+  General › Panel in front chooses one to be in front whenever the window
+  opens instead (`panels/start`): Lyrics or an enabled plugin's panel.
+- `bench-main-window`: an order dragged to and the tab in front are as
+  they were in the next window, after Panels hides and shows them, and
+  after the plugins' panels are made again; the panel Settings chose is in
+  front in the next window; Settings offers Lyrics and the enabled
+  plugins' panels.

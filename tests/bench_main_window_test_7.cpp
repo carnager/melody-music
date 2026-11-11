@@ -674,6 +674,101 @@ void BenchMainWindowTest::sidePanelsOpenBeforeAreTabsAgain() {
     QDir{folder}.removeRecursively();
 }
 
+// ADR-0292 (amended 2026-11-09): side panel tabs dragged into another order
+// are in it in the next window, with the one in front then in front again --
+// or the one Settings chose.
+void BenchMainWindowTest::sidePanelTabsKeepTheirOrderAndFront() {
+    const auto folder = pluginFolders().value(0) + QStringLiteral("/side");
+    sidePanelPlugin(folder);
+    QSettings{}.setValue(pluginEnabledKey(QStringLiteral("side")), true);
+    QSettings{}.setValue(QStringLiteral("panels/shown"), true);
+    const auto lyrics_name = QStringLiteral("bench-lyrics");
+    const auto side_name = QStringLiteral("bench-plugin-panel-side-p");
+    // The tab bar of the two, and the panels' names in its order, the one
+    // in front first.
+    const auto tabs = [](BenchMainWindow& window) -> QStringList {
+        auto* lyrics = window.findChild<QDockWidget*>(QStringLiteral("bench-lyrics"));
+        for (auto* bar : window.findChildren<QTabBar*>(Qt::FindDirectChildrenOnly)) {
+            if (bar->count() != 2 || !bar->isVisible()) {
+                continue;
+            }
+            QStringList names;
+            for (int index = 0; index < bar->count(); ++index) {
+                for (auto* dock : window.findChildren<QDockWidget*>()) {
+                    if (reinterpret_cast<quintptr>(dock) == bar->tabData(index).value<quintptr>()) {
+                        names << dock->objectName();
+                    }
+                }
+            }
+            if (names.contains(lyrics->objectName())) {
+                return QStringList{names.value(bar->currentIndex())} + names;
+            }
+        }
+        return {};
+    };
+    const auto bar = [](BenchMainWindow& window) -> QTabBar* {
+        for (auto* bar : window.findChildren<QTabBar*>(Qt::FindDirectChildrenOnly)) {
+            if (bar->count() == 2 && bar->isVisible()) {
+                return bar;
+            }
+        }
+        return nullptr;
+    };
+    {
+        BenchMainWindow window;
+        window.resize(1200, 700);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QTRY_COMPARE(tabs(window).mid(1), (QStringList{lyrics_name, side_name}));
+        // Dragged: Side first. Then Lyrics brought to the front.
+        bar(window)->moveTab(1, 0);
+        QTRY_COMPARE(QSettings{}.value(QStringLiteral("panels/order")).toStringList(),
+                     (QStringList{side_name, lyrics_name}));
+        bar(window)->setCurrentIndex(1);
+        QTRY_COMPARE(QSettings{}.value(QStringLiteral("panels/front")).toString(), lyrics_name);
+        QCOMPARE(tabs(window), (QStringList{lyrics_name, side_name, lyrics_name}));
+        // Panels hiding and showing them again keep both.
+        window.togglePanels();
+        QTRY_VERIFY(
+            std::ranges::none_of(window.findChildren<QDockWidget*>(),
+                                 [](const QDockWidget* dock) { return dock->isVisible(); }));
+        window.togglePanels();
+        QTRY_COMPARE(tabs(window), (QStringList{lyrics_name, side_name, lyrics_name}));
+        QCOMPARE(QSettings{}.value(QStringLiteral("panels/front")).toString(), lyrics_name);
+    }
+    {
+        BenchMainWindow window;
+        window.resize(1200, 700);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QTRY_COMPARE(tabs(window), (QStringList{lyrics_name, side_name, lyrics_name}));
+        // Made again, as when Settings are saved: as they were.
+        window.buildPluginPanels();
+        QTRY_COMPARE(tabs(window), (QStringList{lyrics_name, side_name, lyrics_name}));
+    }
+    // Settings' choice before the one left in front.
+    QSettings{}.setValue(QStringLiteral("panels/start"), side_name);
+    {
+        BenchMainWindow window;
+        window.resize(1200, 700);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QTRY_COMPARE(tabs(window), (QStringList{side_name, side_name, lyrics_name}));
+    }
+    {
+        SettingsDialog dialog;
+        auto* front = dialog.findChild<QComboBox*>(QStringLiteral("bench-settings-front-panel"));
+        QVERIFY(front != nullptr);
+        QCOMPARE(front->count(), 3);
+        QCOMPARE(front->itemData(1).toString(), lyrics_name);
+        QCOMPARE(front->currentData().toString(), side_name);
+    }
+    for (const auto* key : {"panels", "plugins", "plugin-panels", "lyrics"}) {
+        QSettings{}.remove(QString::fromLatin1(key));
+    }
+    QDir{folder}.removeRecursively();
+}
+
 // ADR-0292: one layout -- the sources left, the lists right -- nothing to
 // edit or rearrange, and the divider kept where it was left.
 void BenchMainWindowTest::theSourcesKeepTheirWidth() {
