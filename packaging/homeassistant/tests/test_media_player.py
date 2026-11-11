@@ -205,3 +205,39 @@ async def test_dynamic_playlists_are_browsed_and_played(
     assert ("dynamic.play", {"id": "loved"}) in engine.calls
     with pytest.raises(HomeAssistantError):
         await play("Not a playlist")
+
+
+async def test_the_queue_says_which_dynamic_playlist_it_is(
+    hass: HomeAssistant, engine: FakeEngine
+) -> None:
+    """ADR-0351: a room button tells its own playlist, paused, from another queue."""
+    await _added(hass, engine)
+
+    def attributes() -> dict:
+        return hass.states.get(PLAYER).attributes
+
+    assert attributes()["dynamic_playlist_id"] is None
+    await hass.services.async_call(
+        MEDIA_PLAYER,
+        SERVICE_PLAY_MEDIA,
+        {ATTR_ENTITY_ID: PLAYER, ATTR_MEDIA_CONTENT_TYPE: "playlist", ATTR_MEDIA_CONTENT_ID: "jazz"},
+        blocking=True,
+    )
+    await _until(hass, lambda: attributes().get("dynamic_playlist_id") == "jazz")
+    assert attributes()["dynamic_playlist"] == "Late jazz"
+    # Paused, it is still the playlist's.
+    await hass.services.async_call(
+        MEDIA_PLAYER, SERVICE_MEDIA_PAUSE, {ATTR_ENTITY_ID: PLAYER}, blocking=True
+    )
+    await _until(hass, lambda: hass.states.get(PLAYER).state == STATE_PAUSED)
+    assert attributes()["dynamic_playlist_id"] == "jazz"
+    # Renamed, the id stays; the name follows.
+    engine.rules[1]["name"] = "Night jazz"
+    engine.emit("dynamic.rules", {"rules": engine.rules})
+    await _until(hass, lambda: attributes().get("dynamic_playlist") == "Night jazz")
+    assert attributes()["dynamic_playlist_id"] == "jazz"
+    # Another client replaced the queue.
+    engine.state["dynamic_rule"] = None
+    engine.emit("playback.changed", engine.snapshot())
+    await _until(hass, lambda: attributes().get("dynamic_playlist_id") is None)
+    assert attributes()["dynamic_playlist"] is None

@@ -31,6 +31,7 @@ class FakeEngine:
             "position_ms": 0,
             "duration_ms": -1,
             "volume_percent": 50,
+            "dynamic_rule": None,
             "modes": {"repeat": False, "random": False, "single": 0, "consume": 0},
         }
         self.track: dict[str, Any] | None = None
@@ -139,6 +140,7 @@ class FakeEngine:
         if method == "dynamic.rules":
             return {"rules": self.rules}
         if method == "dynamic.play":
+            self.state["dynamic_rule"] = params["id"]
             self.play("/music/rule.flac", "entry-rule", {"title": "From " + params["id"]})
             rule = next(r for r in self.rules if r["id"] == params["id"])
             # ADR-0350: a Last.fm rule plays as a job.

@@ -80,10 +80,21 @@ class Player final {
     //
     // ADR-0253: `list` names the list the queue was played from, so the
     // engine knows which list's continuation applies; empty, none.
-    void replace_queue(std::vector<QueueEntry> entries, std::string list = {});
+    //
+    // ADR-0351: `rule` names the dynamic playlist rule whose selection this
+    // queue is; empty, none. Any other replacement or edit of the queue
+    // forgets it.
+    void replace_queue(std::vector<QueueEntry> entries, std::string list = {},
+                       std::string rule = {});
     [[nodiscard]] std::vector<QueueEntry> queue() const;
     // The list the queue came from; empty when not known.
     [[nodiscard]] std::string queue_list() const;
+    // ADR-0351: the dynamic playlist rule the queue is the selection of;
+    // empty when it is not one.
+    [[nodiscard]] std::string queue_rule() const;
+    // The rule `rule` is gone: a queue that was its selection is of no rule
+    // any more. Says whether it was.
+    bool forget_queue_rule(const std::string& rule);
     // ADR-0259: the list `from` is now `to` -- a draft saved into the list it
     // drafted, with the same entries -- so a queue played from it is played
     // from `to`. Says whether it was.
@@ -257,6 +268,10 @@ class Player final {
         std::int64_t position_ms{0};
         std::int64_t duration_ms{-1};
         std::size_t queue_size{0};
+        // ADR-0351: the dynamic playlist rule the queue is the selection of,
+        // or empty -- so a client can tell its own selection, paused, from a
+        // queue another client has put there since.
+        std::string queue_rule;
         // How many explicit asks are outstanding. A client renders up-next
         // from playback.requests; this is enough to show that there are any.
         std::size_t requests{0};
@@ -323,6 +338,8 @@ class Player final {
         std::vector<QueueEntry> queue;
         // The list the queue was played from (ADR-0253).
         std::string queue_list;
+        // The dynamic rule it is the selection of (ADR-0351).
+        std::string queue_rule;
         // Requested tracks that are not in the list.
         std::vector<QueueEntry> asks;
         core::StableId entry;
@@ -391,7 +408,7 @@ class Player final {
     // none does, having dropped the ones that do not.
     [[nodiscard]] std::optional<core::Result<void>> start_next_request_locked();
     // An entry by identity, in the list or among the asks; null when neither.
-    void replace_queue_locked(std::vector<QueueEntry> entries, std::string list);
+    void replace_queue_locked(std::vector<QueueEntry> entries, std::string list, std::string rule);
     [[nodiscard]] const QueueEntry* find_locked(const core::StableId& entry_id) const;
     // Drops asks nothing refers to any more: not requested, not playing.
     void prune_asks_locked();
@@ -459,6 +476,7 @@ class Player final {
     core::ListenAccounting listening_;
     std::vector<QueueEntry> queue_;
     std::string queue_list_;
+    std::string queue_rule_;
     audio::PlaybackAnchors anchors_;
     audio::PlaybackModes modes_;
     // Kept here, not left to the output: an output that is replaced, or an

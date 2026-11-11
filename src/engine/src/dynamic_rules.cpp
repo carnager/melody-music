@@ -134,7 +134,9 @@ struct LastFmAsk {
     }
     const auto start = entries->front().entry_id;
     const auto count = entries->size();
-    player.replace_queue(std::move(*entries));
+    // ADR-0351: the queue is this rule's selection until it is replaced or
+    // edited.
+    player.replace_queue(std::move(*entries), {}, id);
     if (auto played = player.play_entry(start); !played) {
         return std::unexpected(std::move(played.error()));
     }
@@ -509,6 +511,16 @@ void register_dynamic_rule_methods(protocol::Dispatcher& dispatcher, DynamicRule
                             });
             return Json{{"job_id", job.to_string()}};
         });
+}
+
+void follow_queue_rule(DynamicRules& rules, Player& player) {
+    const auto check = [&rules, &player] {
+        if (const auto rule = player.queue_rule(); !rule.empty() && !rules.find(rule)) {
+            player.forget_queue_rule(rule);
+        }
+    };
+    check();
+    static_cast<void>(rules.on_change(check));
 }
 
 void register_dynamic_rule_jobs(JobCatalog& jobs, DynamicPicker& picker) {

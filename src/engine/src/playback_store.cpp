@@ -123,6 +123,10 @@ bool PlaybackStore::restore() {
     if (const auto list = document.find("list"); list != document.end() && list->is_string()) {
         state.queue_list = list->get<std::string>();
     }
+    if (const auto rule = document.find("dynamic_rule");
+        rule != document.end() && rule->is_string()) {
+        state.queue_rule = rule->get<std::string>();
+    }
     if (const auto entry = document.find("entry"); entry != document.end() && entry->is_string()) {
         if (auto parsed = core::StableId::parse(entry->get<std::string>())) {
             state.entry = *parsed;
@@ -216,6 +220,8 @@ void PlaybackStore::persist() {
         document["asks"] = std::move(held);
         // ADR-0253: which list the queue was played from.
         document["list"] = state.queue_list;
+        // ADR-0351: which dynamic rule's selection it is.
+        document["dynamic_rule"] = state.queue_rule;
         document["entry"] = state.entry.is_nil() ? Json(nullptr) : Json(state.entry.to_string());
         document["request_return"] =
             state.request_return.is_nil() ? Json(nullptr) : Json(state.request_return.to_string());

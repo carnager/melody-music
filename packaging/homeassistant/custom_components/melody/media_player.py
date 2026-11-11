@@ -106,6 +106,18 @@ class MelodyPlayer(MediaPlayerEntity):
         self._shown: tuple[str | None, str | None] = (None, None)
         self._outputs: list[dict[str, Any]] = []
         self._cover_path: str | None = None
+        # ADR-0351: the dynamic playlist the queue is the selection of, and
+        # every rule's name, so the attribute can name it.
+        self._rule: str | None = None
+        self._rule_names: dict[str, str] = {}
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Which dynamic playlist the queue is, by id -- what automations match."""
+        return {
+            "dynamic_playlist_id": self._rule,
+            "dynamic_playlist": self._rule_names.get(self._rule) if self._rule else None,
+        }
 
     @property
     def available(self) -> bool:
@@ -133,6 +145,10 @@ class MelodyPlayer(MediaPlayerEntity):
             _LOGGER.debug("Reading melodyd's state failed: %s", err)
             return
         self._outputs = outputs.get("outputs", [])
+        try:
+            await self._rules()
+        except MelodyError as err:
+            _LOGGER.debug("Reading melodyd's dynamic playlists failed: %s", err)
         self._sequence = -1
         self._shown = (None, None)
         self._apply_state(state)
@@ -153,6 +169,9 @@ class MelodyPlayer(MediaPlayerEntity):
             self.async_write_ha_state()
         elif name == "outputs.changed":
             self.hass.async_create_task(self._refresh_outputs())
+        elif name == "dynamic.rules":
+            self._name_rules(data.get("rules", []))
+            self.async_write_ha_state()
 
     async def _refresh_outputs(self) -> None:
         try:
@@ -179,6 +198,8 @@ class MelodyPlayer(MediaPlayerEntity):
             return
         self._sequence = sequence
         self._attr_state = _STATES.get(state.get("status", ""), MediaPlayerState.IDLE)
+        # ADR-0351 (level 31): an older engine does not say, which is none.
+        self._rule = state.get("dynamic_rule") or None
         self._attr_volume_level = state.get("volume_percent", 0) / 100
         duration = state.get("duration_ms", -1)
         self._attr_media_duration = duration / 1000 if duration and duration > 0 else None
@@ -319,7 +340,13 @@ class MelodyPlayer(MediaPlayerEntity):
     async def _rules(self) -> list[dict[str, Any]]:
         """The engine's dynamic playlists, Last.fm's too (ADR-0350)."""
         answer = await self._connection.call("dynamic.rules")
-        return list(answer.get("rules", []))
+        rules = list(answer.get("rules", []))
+        self._name_rules(rules)
+        return rules
+
+    @callback
+    def _name_rules(self, rules: list[dict[str, Any]]) -> None:
+        self._rule_names = {rule["id"]: rule.get("name") or rule["id"] for rule in rules}
 
     async def async_browse_media(
         self, media_content_type: MediaType | str | None = None, media_content_id: str | None = None

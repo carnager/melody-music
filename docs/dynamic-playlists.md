@@ -144,6 +144,33 @@ data:
 Last.fm rules are offered too; the engine plays one once Last.fm has
 answered, which can take a few seconds.
 
+The engine remembers which rule the queue is (ADR-0351), until the queue is
+replaced or edited, or the rule removed; pausing, skipping and renaming the
+rule keep it. Home Assistant shows it as the player's `dynamic_playlist_id`
+attribute (and the rule's name as `dynamic_playlist`), so a room button can
+resume its own playlist and start it afresh when something else was put on
+meanwhile:
+
+```yaml
+choose:
+  - conditions: "{{ is_state('media_player.gemenon', 'playing') }}"
+    sequence:
+      - action: media_player.media_pause
+        target: {entity_id: media_player.gemenon}
+  - conditions: >-
+      {{ state_attr('media_player.gemenon', 'dynamic_playlist_id')
+         == 'shipped:random-album' }}
+    sequence:
+      - action: media_player.media_play
+        target: {entity_id: media_player.gemenon}
+default:
+  - action: media_player.play_media
+    target: {entity_id: media_player.gemenon}
+    data:
+      media_content_type: playlist
+      media_content_id: melody://dynamic/shipped:random-album
+```
+
 Results come entirely from the chosen engine's library. Use Library Refresh
 first if new files are not indexed. Closing the dynamic editor leaves saved
 definitions and opened snapshots intact.

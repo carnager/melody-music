@@ -7,6 +7,16 @@ engine's level with its own and says once when the engine is older.
 
 ## Protocol 1
 
+### Level 31 (2026-11-11)
+
+ADR-0351: the queue knows which dynamic playlist it is.
+
+- `playback.state` and `playback.changed` carry `dynamic_rule`: the id of
+  the rule whose selection `dynamic.play` made the queue, or null. Kept
+  through pause, seek, next and previous; null once the queue is replaced,
+  edited, consumed to empty or the rule removed.
+- `playback.queue` answers `dynamic_rule` beside `list`.
+
 ### Level 30 (2026-11-10)
 
 ADR-0350: Last.fm dynamic playlists are the engine's.

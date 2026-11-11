@@ -294,6 +294,8 @@ Json to_json(const Player::State& state) {
     rendered["position_ms"] = state.position_ms;
     rendered["duration_ms"] = state.duration_ms;
     rendered["queue_size"] = state.queue_size;
+    // ADR-0351: the dynamic playlist rule the queue is the selection of.
+    rendered["dynamic_rule"] = state.queue_rule.empty() ? Json(nullptr) : Json(state.queue_rule);
     rendered["requests"] = state.requests;
     rendered["requests_revision"] = state.requests_revision;
     rendered["modes"] = modes_to_json(state.modes);
@@ -368,8 +370,10 @@ void register_playback_methods(protocol::Dispatcher& dispatcher, Player& player,
         }
         // ADR-0344: the list the queue plays from, if any (ADR-0253).
         const auto list = player.queue_list();
+        const auto rule = player.queue_rule();
         return Json{{"entries", std::move(*entries)},
-                    {"list", list.empty() ? Json(nullptr) : Json(list)}};
+                    {"list", list.empty() ? Json(nullptr) : Json(list)},
+                    {"dynamic_rule", rule.empty() ? Json(nullptr) : Json(rule)}};
     });
 
     dispatcher.on("playback.replace_queue", [&player](const Json& params) -> core::Result<Json> {

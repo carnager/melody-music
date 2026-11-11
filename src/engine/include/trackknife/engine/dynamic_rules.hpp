@@ -154,6 +154,12 @@ void register_dynamic_rule_methods(protocol::Dispatcher& dispatcher, DynamicRule
                                    DynamicPicker& picker, const Catalogue& catalogue,
                                    Player& player, JobRegistry& jobs);
 
+// ADR-0351: a queue that is the selection of a rule that is gone is no
+// rule's -- checked now, for a queue restored after a rule was removed, and
+// whenever the rules change. Renaming or editing a rule keeps it: the id is
+// what a client matches.
+void follow_queue_rule(DynamicRules& rules, Player& player);
+
 // The dynamic.pick job {rule}: what a rule -- saved or not -- picks, as
 // {paths, matched, unmatched}, with progress {done, of} while matching.
 void register_dynamic_rule_jobs(JobCatalog& jobs, DynamicPicker& picker);
