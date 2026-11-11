@@ -104,6 +104,9 @@ class LocalLibraryPanel final : public QWidget {
   private:
     void showContextMenu(const QPoint& position);
     void showFolders();
+    // ADR-0352: the files the last scan could not read, and why.
+    void showUnreadable();
+    void refreshUnreadable();
     void refreshRoots();
     void refreshScanButton();
     void requestCovers();
@@ -118,6 +121,8 @@ class LocalLibraryPanel final : public QWidget {
     QTreeView* tree_{nullptr};
     ui::LibraryTreeDelegate* delegate_{nullptr};
     QLabel* status_{nullptr};
+    QLabel* unreadable_link_{nullptr};
+    QPointer<QDialog> unreadable_dialog_;
     // ADR-0254: the view the library is shown in, and its editor.
     QComboBox* view_choice_{nullptr};
     void refreshViewChoices();

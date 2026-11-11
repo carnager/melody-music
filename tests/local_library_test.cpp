@@ -498,6 +498,11 @@ void LocalLibraryTest::deletedSubfoldersArePrunedEvenByIncompleteScans() {
     persistence::LibraryScanProgress partial;
     const auto incomplete = library->scan({}, partial);
     QVERIFY(incomplete && incomplete->incomplete);
+    // ADR-0352: which file, and why.
+    QCOMPARE(partial.failed.load(), 1U);
+    QCOMPARE(incomplete->unreadable.size(), 1U);
+    QCOMPARE(incomplete->unreadable.front().raw_path, (root / "broken.flac").native());
+    QVERIFY(!incomplete->unreadable.front().reason.empty());
     QVERIFY(library->query(tracks("Deleted"))->entries.empty());
     QCOMPARE(library->query(tracks())->entries.size(), 1U);
     QCOMPARE(library->query(tracks())->entries.front().available, 1U);

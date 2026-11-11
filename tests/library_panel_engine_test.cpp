@@ -27,11 +27,13 @@
 #include <QSettings>
 #include <QStandardPaths>
 #include <QTreeView>
+#include <QTreeWidget>
 #include <QtTest>
 #include <atomic>
 
 #include <QDir>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <optional>
 
@@ -58,6 +60,7 @@ class LibraryPanelEngineTest final : public QObject {
     void anEmptyLibrarySaysWhy();
     void aChangeSaysWhichAlbumsItTouched();
     void theTreeFollowsAChangeInPlace();
+    void theFilesAScanCouldNotReadAreShown();
 };
 
 // Settings go to Qt's test location, never the user's own.
@@ -538,6 +541,58 @@ void LibraryPanelEngineTest::everyPathReachesTheEngineNotTheDatabase() {
     QVERIFY2(!std::filesystem::exists(forbidden),
              "a path fell through to the local database instead of asking the engine");
 
+    (*server)->stop();
+}
+
+// ADR-0352: a scan that could not read some files says which, and why, on
+// request -- here from an engine, so the names crossed the protocol.
+void LibraryPanelEngineTest::theFilesAScanCouldNotReadAreShown() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const std::filesystem::path engine_database{
+        (directory.path() + QStringLiteral("/engine.sqlite3")).toStdString()};
+    const std::filesystem::path socket{
+        (directory.path() + QStringLiteral("/engine.sock")).toStdString()};
+    const auto music = std::filesystem::path{directory.path().toStdString()} / "music";
+    std::filesystem::create_directories(music);
+    {
+        std::ofstream broken{music / "broken.flac"};
+        broken << "not audio";
+    }
+    engine::LocalCatalogue catalogue{engine_database};
+    QVERIFY(catalogue.prepare().has_value());
+    QVERIFY(catalogue.add_root(music.native()).has_value());
+    protocol::Dispatcher dispatcher;
+    engine::register_catalogue_methods(dispatcher, catalogue);
+    auto server = engine::Server::listen(socket, dispatcher);
+    QVERIFY(server.has_value());
+    engine::JobRegistry jobs{(*server)->sink()};
+    engine::JobCatalog job_catalogue;
+    engine::register_catalogue_jobs(job_catalogue, catalogue);
+    engine::register_job_methods(dispatcher, jobs, job_catalogue);
+    (*server)->start();
+    QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_socket_key),
+                         QString::fromStdString(socket.string()));
+
+    CatalogueSource catalogues{directory.path().toStdString() + "/unused.sqlite3",
+                               CatalogueSource::Role::remote};
+    LocalLibraryPanel panel{catalogues};
+    panel.show();
+    auto* link = panel.findChild<QLabel*>(QStringLiteral("local-library-unreadable"));
+    QVERIFY(link != nullptr);
+    QVERIFY(!link->isVisible());
+    panel.findChild<QAbstractButton*>(QStringLiteral("local-library-scan"))->click();
+    QTRY_VERIFY_WITH_TIMEOUT(link->isVisible(), 15000);
+    auto* status = panel.findChild<QLabel*>(QStringLiteral("local-library-status"));
+    QCOMPARE(status->text(), QStringLiteral("Scan incomplete. 1 file could not be read; previous "
+                                            "entries were kept."));
+    emit link->linkActivated(QStringLiteral("unreadable"));
+    auto* list = panel.findChild<QTreeWidget*>(QStringLiteral("local-library-unreadable-list"));
+    QVERIFY(list != nullptr);
+    QCOMPARE(list->topLevelItemCount(), 1);
+    QCOMPARE(list->topLevelItem(0)->text(0),
+             QString::fromStdString((music / "broken.flac").string()));
+    QVERIFY(!list->topLevelItem(0)->text(1).isEmpty());
     (*server)->stop();
 }
 

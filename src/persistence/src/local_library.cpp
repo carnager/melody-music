@@ -2536,6 +2536,8 @@ struct PreparedFile {
     std::optional<std::uint8_t> popularimeter;
     Technicals technicals;
     bool failed{false};
+    // Why it failed, said to a person (ADR-0352).
+    std::string reason;
 };
 
 struct ScanRequest {
@@ -2555,8 +2557,12 @@ PreparedFile prepare_file(ScanRequest request, const core::CancellationToken& ca
     prepared.revision = std::move(request.revision);
     prepared.before = request.before;
     auto probe = formats::probe_local_media(prepared.raw_path, cancellation);
-    if (!probe || !probe->best_audio_stream) {
+    if (!probe) {
         prepared.failed = true;
+        prepared.reason = probe.error().message;
+    } else if (!probe->best_audio_stream) {
+        prepared.failed = true;
+        prepared.reason = "no audio stream was found";
     } else {
         prepared.technicals = technicals_from(*probe);
         const auto read = metadata::read_local_metadata(prepared.raw_path, cancellation);
@@ -2565,6 +2571,7 @@ PreparedFile prepare_file(ScanRequest request, const core::CancellationToken& ca
             prepared.popularimeter = read->popularimeter;
         } else if (read.error().code != core::ErrorCode::unsupported) {
             prepared.failed = true;
+            prepared.reason = "tags could not be read: " + read.error().message;
         }
         for (const auto& tag : probe->tags) {
             const auto identity = metadata::resolve_text_property_identity(tag.name);
@@ -2583,6 +2590,10 @@ PreparedFile prepare_file(ScanRequest request, const core::CancellationToken& ca
 }
 
 enum class CommitOutcome : std::uint8_t { committed, failed, root_lost };
+
+// A file that changed between being read and being stored is left for the
+// next scan rather than stored as it no longer is.
+constexpr std::string_view changed_while_read = "the file changed while it was being read";
 
 // Stores one prepared file in its own transaction, with the scan's guards:
 // the file unchanged since it was read, and its root still scanning under
@@ -3034,6 +3045,14 @@ core::Result<LibraryScanResult> LocalLibrary::scan(const core::CancellationToken
         auto* db = implementation_->db;
         const auto generation = core::StableId::random().to_string();
         LibraryScanResult result;
+        // ADR-0352: every unreadable file counted, the first ones named.
+        const auto unreadable = [&progress, &result](const std::string& raw_path,
+                                                     std::string reason) {
+            ++progress.failed;
+            if (result.unreadable.size() < LibraryScanResult::unreadable_named) {
+                result.unreadable.push_back({.raw_path = raw_path, .reason = std::move(reason)});
+            }
+        };
         // What is walked: every root, or of the paths asked for, each folder
         // inside one -- and a root inside one, whole. A file, or a path that
         // is gone, is re-read or dropped as refresh() does it, after.
@@ -3169,7 +3188,9 @@ core::Result<LibraryScanResult> LocalLibrary::scan(const core::CancellationToken
                     ++progress.indexed;
                     break;
                 case CommitOutcome::failed:
-                    ++progress.failed;
+                    unreadable(prepared.raw_path, prepared.failed
+                                                      ? std::move(prepared.reason)
+                                                      : std::string{changed_while_read});
                     complete = false;
                     break;
                 case CommitOutcome::root_lost:
@@ -3212,7 +3233,7 @@ core::Result<LibraryScanResult> LocalLibrary::scan(const core::CancellationToken
                 const auto& raw = path.native();
                 auto before = core::observe_local_source_revision(raw);
                 if (!before) {
-                    ++progress.failed;
+                    unreadable(raw, before.error().message);
                     complete = false;
                     continue;
                 }
@@ -3236,7 +3257,8 @@ core::Result<LibraryScanResult> LocalLibrary::scan(const core::CancellationToken
                 if (unchanged) {
                     const auto after = core::observe_local_source_revision(raw);
                     if (!after || *before != *after) {
-                        ++progress.failed;
+                        unreadable(raw,
+                                   after ? std::string{changed_while_read} : after.error().message);
                         complete = false;
                         continue;
                     }

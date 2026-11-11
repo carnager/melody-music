@@ -99,6 +99,13 @@ class LibraryBrowser final : public QObject {
     [[nodiscard]] bool sourceShown() const { return source_shown_; }
     [[nodiscard]] QString sourceTooltip() const { return source_tooltip_; }
     [[nodiscard]] bool scanning() const { return scanning_; }
+    // ADR-0352: the files the last scan could not read, and why -- the first
+    // `LibraryScanResult::unreadable_named` of `unreadableCount()`. Empty
+    // until a scan ends with some, and again once the next one starts.
+    [[nodiscard]] const std::vector<persistence::LibraryScanFailure>& unreadable() const {
+        return unreadable_;
+    }
+    [[nodiscard]] std::size_t unreadableCount() const { return unreadable_count_; }
     [[nodiscard]] bool queryMode() const { return query_mode_; }
     [[nodiscard]] bool newestFirst() const { return newest_first_; }
     // ADR-0254: the library view shown, by its definition's id.
@@ -202,6 +209,7 @@ class LibraryBrowser final : public QObject {
     void queryErrorChanged();
     void sourceChanged();
     void scanningChanged();
+    void unreadableChanged();
     void searchChanged();
     void rootsChanged();
     // For the view: an index to open, or to make its cursor (and focus the
@@ -322,6 +330,8 @@ class LibraryBrowser final : public QObject {
     // How long the refresh after a change took, for --debug.
     QElapsedTimer elapsed_refresh_;
     QString status_;
+    std::vector<persistence::LibraryScanFailure> unreadable_;
+    std::size_t unreadable_count_{0};
     // The status line says the engine could not be reached: taken back once
     // it is.
     bool unreachable_said_{false};

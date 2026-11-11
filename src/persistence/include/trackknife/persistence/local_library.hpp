@@ -188,11 +188,26 @@ struct LibraryFolder {
     std::vector<LibraryEntry> tracks;
 };
 
+// ADR-0352: a file a scan could not read, and why, in words for a person.
+struct LibraryScanFailure {
+    std::string raw_path;
+    std::string reason;
+
+    friend bool operator==(const LibraryScanFailure&, const LibraryScanFailure&) = default;
+};
+
 struct LibraryScanResult {
+    // ADR-0352: at most this many unreadable files are named; the rest are
+    // counted in the progress's `failed` only.
+    static constexpr std::size_t unreadable_named = 1000;
+
     bool cancelled{false};
     bool incomplete{false};
     // Paths a scan was asked to walk that are in no library folder.
     std::vector<std::string> outside;
+    // The files that could not be read, in the order met, up to
+    // `unreadable_named` of them.
+    std::vector<LibraryScanFailure> unreadable;
 };
 
 // Synchronous, Qt-free service. Each worker owns its own connection; all
