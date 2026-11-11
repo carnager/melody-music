@@ -18,7 +18,14 @@ Json describe_track(const persistence::LibraryTrackSnapshot& track) {
         }
         fields[protocol::displayable_text(name)] = std::move(shown);
     }
+    // Level 32: the names the library shows when a tag is absent -- a title
+    // from the file's name -- beside the tags, or an untagged track
+    // described to a window has no name at all.
     Json described{{"fields", std::move(fields)},
+                   {"title", protocol::displayable_text(track.facts.title)},
+                   {"artist", protocol::displayable_text(track.facts.artist)},
+                   {"album", protocol::displayable_text(track.facts.album)},
+                   {"date", protocol::displayable_text(track.facts.date)},
                    {"duration_ms", track.facts.duration_ms},
                    {"codec", protocol::displayable_text(track.facts.codec)},
                    {"sample_rate", track.facts.sample_rate},
@@ -71,6 +78,15 @@ std::optional<persistence::LibraryTrackSnapshot> described_track(const Json& des
     };
     track.facts.duration_ms = number("duration_ms", -1);
     track.facts.codec = description.value("codec", std::string{});
+    const auto text = [&description](const char* key) {
+        const auto found = description.find(key);
+        return found != description.end() && found->is_string() ? found->get<std::string>()
+                                                                : std::string{};
+    };
+    track.facts.title = text("title");
+    track.facts.artist = text("artist");
+    track.facts.album = text("album");
+    track.facts.date = text("date");
     track.facts.sample_rate = number("sample_rate", 0);
     track.facts.bits = number("bits", 0);
     track.facts.channels = number("channels", 0);

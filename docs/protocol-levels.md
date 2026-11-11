@@ -14,6 +14,10 @@ ADR-0352: a scan names the files it could not read.
 - The `catalogue.scan` job's outcome carries `unreadable: [{path, reason}]`
   -- the first 1000 files it could not read, paths encoded, each with why.
   Absent when there were none; `failed` still counts them all.
+- A track's description (`list.describe`'s and `catalogue.describe`'s
+  `library`) carries `title`, `artist`, `album` and `date` as the library
+  shows them, a tag absent: an untagged file is titled by its name, as in
+  the library, rather than described with no title at all.
 
 ### Level 31 (2026-11-11)
 

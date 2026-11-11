@@ -52,9 +52,30 @@ void aDescriptionRoundTrips() {
     CHECK(old_read && old_read->facts.added == 0 && old_read->facts.album_added == 0);
 }
 
+// Level 32: an untagged track keeps the name the library gives it -- its
+// file's -- across the wire; an older engine's description has none.
+void anUntaggedTrackKeepsItsName() {
+    trackknife::persistence::LibraryTrackSnapshot track;
+    track.raw_path = "/music/there.wav";
+    track.facts.title = "there";
+    track.facts.artist = "Unknown artist";
+    track.facts.album = "music";
+    track.facts.date = "2001";
+    const auto sent = trackknife::engine::describe_track(track);
+    const auto read = trackknife::engine::described_track(sent, track.raw_path);
+    CHECK(read && read->facts.fields.empty());
+    CHECK(read && read->facts.title == "there" && read->facts.artist == "Unknown artist");
+    CHECK(read && read->facts.album == "music" && read->facts.date == "2001");
+    auto older = sent;
+    older.erase("title");
+    const auto old_read = trackknife::engine::described_track(older, track.raw_path);
+    CHECK(old_read && old_read->facts.title.empty());
+}
+
 } // namespace
 
 int main() {
     aDescriptionRoundTrips();
+    anUntaggedTrackKeepsItsName();
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
