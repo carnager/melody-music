@@ -88,6 +88,9 @@ struct ConvertedAudioFile {
     int channels{0};
     // Verified duration of the written output, in output-rate samples.
     std::int64_t duration_samples{0};
+    // Damaged packets of the source passed over while decoding it (ADR-0354);
+    // their few milliseconds are missing from the output.
+    std::uint64_t damaged_source_packets{0U};
 
     friend bool operator==(const ConvertedAudioFile&, const ConvertedAudioFile&) = default;
 };

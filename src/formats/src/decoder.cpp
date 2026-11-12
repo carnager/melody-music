@@ -94,6 +94,14 @@ struct AudioDecoder::Impl {
     // only for the machine that replaced it -- and reading fails mid-track.
     std::optional<std::pair<dev_t, ino_t>> identity;
     unsigned reopened{0};
+    // Packets the codec refused as invalid data and that were passed over
+    // (ADR-0354): one damaged frame of an otherwise sound file -- an MP3
+    // frame without its header, a truncated last ALAC packet -- costs its
+    // few milliseconds, not the track. A run of them is a file that does
+    // not decode, and fails as before.
+    std::uint64_t damaged_packets{0};
+    unsigned damaged_in_a_row{0};
+    bool decoded_any{false};
     bool input_finished{false};
     bool drain_sent{false};
     bool range_finished{false};
@@ -756,13 +764,38 @@ bool AudioDecoder::reopen_if_replaced() {
         return false;
     }
     const auto times = decoder.reopened + 1U;
+    const auto damaged = decoder.damaged_packets;
     implementation_ = std::move(fresh->implementation_);
     implementation_->reopened = times;
+    implementation_->damaged_packets = damaged;
     return true;
+}
+
+std::uint64_t AudioDecoder::damaged_packets() const noexcept {
+    return implementation_->damaged_packets;
 }
 
 core::Result<std::optional<PcmChunk>> AudioDecoder::next_chunk() {
     auto& decoder = *implementation_;
+    // More in a row than any damage seen in real files; a stream of them is
+    // not audio with a flaw in it.
+    constexpr unsigned most_damaged_in_a_row = 32U;
+    const auto pass_over_damaged = [&decoder]() -> core::Result<void> {
+        ++decoder.damaged_packets;
+        if (++decoder.damaged_in_a_row > most_damaged_in_a_row) {
+            return std::unexpected(decoder_error(AVERROR_INVALIDDATA, "decoding damaged audio",
+                                                 decoder.raw_path, decoder.cancellation));
+        }
+        return {};
+    };
+    const auto finished = [&decoder]() -> core::Result<std::optional<PcmChunk>> {
+        // Passed-over packets and nothing else is not a sound file.
+        if (decoder.damaged_packets > 0U && !decoder.decoded_any) {
+            return std::unexpected(decoder_error(AVERROR_INVALIDDATA, "decoding damaged audio",
+                                                 decoder.raw_path, decoder.cancellation));
+        }
+        return std::optional<PcmChunk>{};
+    };
     while (true) {
         if (decoder.cancellation.is_cancellation_requested()) {
             return std::unexpected(core::Error{
@@ -776,6 +809,8 @@ core::Result<std::optional<PcmChunk>> AudioDecoder::next_chunk() {
         }
         const auto receive_result = avcodec_receive_frame(decoder.codec, decoder.frame);
         if (receive_result >= 0) {
+            decoder.decoded_any = true;
+            decoder.damaged_in_a_row = 0U;
             auto converted = decoder.convert_frame();
             if (!converted || !*converted) {
                 return converted;
@@ -798,7 +833,16 @@ core::Result<std::optional<PcmChunk>> AudioDecoder::next_chunk() {
             continue;
         }
         if (receive_result == AVERROR_EOF) {
-            return std::optional<PcmChunk>{};
+            return finished();
+        }
+        if (receive_result == AVERROR_INVALIDDATA) {
+            if (reopen_if_replaced()) {
+                return next_chunk();
+            }
+            if (auto passed = pass_over_damaged(); !passed) {
+                return std::unexpected(std::move(passed.error()));
+            }
+            continue;
         }
         if (receive_result != AVERROR(EAGAIN)) {
             if (reopen_if_replaced()) {
@@ -818,7 +862,7 @@ core::Result<std::optional<PcmChunk>> AudioDecoder::next_chunk() {
                 }
                 continue;
             }
-            return std::optional<PcmChunk>{};
+            return finished();
         }
 
         auto read_result = 0;
@@ -843,6 +887,17 @@ core::Result<std::optional<PcmChunk>> AudioDecoder::next_chunk() {
         }
         const auto send_result = avcodec_send_packet(decoder.codec, decoder.packet);
         av_packet_unref(decoder.packet);
+        if (send_result == AVERROR_INVALIDDATA) {
+            // A file renamed over mid-read reads as damage too: it is
+            // reopened, not passed over.
+            if (reopen_if_replaced()) {
+                return next_chunk();
+            }
+            if (auto passed = pass_over_damaged(); !passed) {
+                return std::unexpected(std::move(passed.error()));
+            }
+            continue;
+        }
         if (send_result < 0 && send_result != AVERROR(EAGAIN)) {
             if (reopen_if_replaced()) {
                 return next_chunk();

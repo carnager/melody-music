@@ -484,6 +484,17 @@ add_test(
     COMMAND trackknife_decoder_replaced_file_tests
 )
 
+add_executable(trackknife_decoder_damaged_packets_tests decoder_damaged_packets_test.cpp)
+target_link_libraries(
+    trackknife_decoder_damaged_packets_tests
+    PRIVATE Trackknife::Convert Trackknife::Formats trackknife_project_options
+            trackknife_project_warnings
+)
+add_test(
+    NAME decoder-damaged-packets
+    COMMAND trackknife_decoder_damaged_packets_tests "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/audio"
+)
+
 add_executable(trackknife_cue_sheet_tests cue_sheet_test.cpp)
 target_link_libraries(
     trackknife_cue_sheet_tests
