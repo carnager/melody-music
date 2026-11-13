@@ -7,10 +7,15 @@ Proposed, 2026-11-12. Adds a preset to ADR-0133's converter.
 ## Context
 
 - **A library carried on a laptop or a phone wants smaller files than
-  Opus 192.** The converter's presets were WAV, FLAC, ALAC, Opus 192 and
-  MP3 V0. For a library of 35,000 tracks copied to a MacBook Air -- and
-  next to an iPhone -- Opus 192 is a third larger than the listener asked
-  for, and MP3 V0 larger still.
+  Opus 192.** The converter's presets -- the files `convert.apply` writes
+  and keeps, tags and cover carried and verified -- are WAV, FLAC, Opus 192,
+  MP3 V0 and Vorbis q6. For a library of 35,000 tracks copied to a MacBook
+  Air -- and next to an iPhone -- Opus 192 is a third larger than the
+  listener asked for, and MP3 V0 larger still.
+- **This is not the Opus of streaming.** Streams to phones and speakers are
+  transcoded on the fly at any rate from 16 to 512 kbit/s (ADRs 0230,
+  0231), for playback; they are not files kept with their tags. Only the
+  converter's list lacked 128 kbit/s.
 - **Opus at 128 kbit/s is transparent for most listeners** and is what
   portable players are commonly given. A preset is the converter's whole
   promise about a file: naming the rate in the id keeps an exported
