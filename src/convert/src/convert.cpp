@@ -1042,6 +1042,16 @@ core::Result<ConvertedAudioFile> convert_audio_file(const AudioConversionRequest
         }
         verified_frames += static_cast<std::int64_t>((*chunk)->frame_count(output_channels));
     }
+    // What was just written is held to more than a source is: not one of its
+    // packets may need passing over (ADR-0354).
+    if (verify->damaged_packets() > 0U) {
+        return std::unexpected(
+            core::Error{.code = core::ErrorCode::invariant,
+                        .message = "converted audio has damaged packets",
+                        .context = {{.key = "path", .value = request.destination_raw_path},
+                                    {.key = "damaged_packets",
+                                     .value = std::to_string(verify->damaged_packets())}}});
+    }
     const auto expected_output_frames = static_cast<std::int64_t>(std::llround(
         static_cast<double>(decoded_frames) * output_rate / source_format.sample_rate));
     const auto tolerance = std::max<std::int64_t>(output_rate / 5, 1);
@@ -1083,6 +1093,7 @@ core::Result<ConvertedAudioFile> convert_audio_file(const AudioConversionRequest
         .sample_rate = output_rate,
         .channels = output_channels,
         .duration_samples = verified_frames,
+        .damaged_source_packets = decoder->damaged_packets(),
     };
 }
 
