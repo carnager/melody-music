@@ -9,6 +9,7 @@ extern "C" {
 #include <libavutil/dict.h>
 #include <libavutil/error.h>
 #include <libavutil/intreadwrite.h>
+#include <libavutil/opt.h>
 #include <libavutil/replaygain.h>
 #include <libavutil/samplefmt.h>
 #include <libswresample/swresample.h>
@@ -119,9 +120,54 @@ struct AudioDecoder::Impl {
         return decoder != nullptr && decoder->cancellation.is_cancellation_requested() ? 1 : 0;
     }
 
+    // The resampler is set up for the stream as it opens, but a frame may
+    // come otherwise: an MP3 stream can carry a mono frame among stereo
+    // ones, and past a damaged packet (ADR-0354) such a frame is reached.
+    // Read with the stream's layout, its missing second plane is a null
+    // pointer. The resampler takes each frame as it is; the output does not
+    // change, so a mono frame is mixed up to the stream's stereo.
+    [[nodiscard]] core::Result<void> follow_frame_format() {
+        if (frame->ch_layout.nb_channels <= 0 || frame->sample_rate <= 0 || frame->format < 0) {
+            return std::unexpected(decoder_error(AVERROR_INVALIDDATA, "decoding a frame without a format",
+                                                 raw_path, cancellation));
+        }
+        std::int64_t rate = 0;
+        auto format = AV_SAMPLE_FMT_NONE;
+        AVChannelLayout layout{};
+        const auto read = av_opt_get_int(resampler, "in_sample_rate", 0, &rate) >= 0 &&
+                          av_opt_get_sample_fmt(resampler, "in_sample_fmt", 0, &format) >= 0 &&
+                          av_opt_get_chlayout(resampler, "in_chlayout", 0, &layout) >= 0;
+        const auto same = read && rate == frame->sample_rate && format == frame->format &&
+                          av_channel_layout_compare(&layout, &frame->ch_layout) == 0;
+        av_channel_layout_uninit(&layout);
+        if (same) {
+            return {};
+        }
+        swr_close(resampler);
+        auto result = av_opt_set_chlayout(resampler, "in_chlayout", &frame->ch_layout, 0);
+        if (result >= 0) {
+            result = av_opt_set_sample_fmt(resampler, "in_sample_fmt",
+                                           static_cast<AVSampleFormat>(frame->format), 0);
+        }
+        if (result >= 0) {
+            result = av_opt_set_int(resampler, "in_sample_rate", frame->sample_rate, 0);
+        }
+        if (result >= 0) {
+            result = swr_init(resampler);
+        }
+        if (result < 0) {
+            return std::unexpected(
+                decoder_error(result, "following a change of audio format", raw_path, cancellation));
+        }
+        return {};
+    }
+
     [[nodiscard]] core::Result<std::optional<PcmChunk>> convert_frame() {
         std::uint32_t skip_start = 0U;
         std::uint32_t skip_end = 0U;
+        if (auto followed = follow_frame_format(); !followed) {
+            return std::unexpected(std::move(followed.error()));
+        }
         const auto* skip_samples = av_frame_get_side_data(frame, AV_FRAME_DATA_SKIP_SAMPLES);
         if (skip_samples != nullptr) {
             constexpr std::size_t skip_sample_data_size = 10U;

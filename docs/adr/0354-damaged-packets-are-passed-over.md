@@ -40,6 +40,13 @@ converter's verification of its own output (ADR-0133) is unchanged.
 4. **A converter's own output is held to none.** Its verification reads the
    new file back and refuses it if a single packet had to be passed over:
    what the engine writes is never damaged.
+5. **A frame is converted as it comes.** Past a damaged packet the decoder
+   reaches frames it never did before, among them, in real MP3 files, a mono
+   frame in a stereo stream. The resampler was set up once for the stream,
+   and read the mono frame's missing second plane: a null pointer, and the
+   engine crashed. When a frame's channel layout, sample format or rate is
+   not the resampler's, the resampler now takes the frame's; the output
+   does not change, so a mono frame is mixed up to the stream's stereo.
 
 ## Verification
 
@@ -47,7 +54,10 @@ converter's verification of its own output (ADR-0133) is unchanged.
   removed decodes, one packet passed over, one frame short; every header
   removed fails or yields nothing; converted to FLAC, the damage is said and
   the output reads back with none. Without the decision the first and third
-  fail with the error above.
+  fail with the error above. From the `mono-frame-in-stereo-mp3` fixture,
+  a stereo stream with one mono frame decodes and converts; without
+  decision 5 the test crashes (SIGSEGV), as the engine did converting
+  "04 Obvious.mp3" on the server.
 - `decoder-replaced-file`, `audio-convert`, `formats-probe`,
   `loudness-analyzer` and `local-playback` fail the same checks with and
   without it on macOS 27 (libvorbis absent, module files).

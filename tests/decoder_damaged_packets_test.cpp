@@ -227,6 +227,49 @@ int main(const int argc, char** argv) {
         }
     }
 
+    // A mono frame among stereo ones -- reached in real files past a
+    // damaged packet -- is mixed up to the stream's stereo, not read as
+    // stereo: its second plane does not exist.
+    const auto mixed_source =
+        decode_base64_file(std::filesystem::path{argv[1]} / "mono-frame-in-stereo-mp3.b64");
+    CHECK(mixed_source.has_value());
+    if (mixed_source) {
+        const auto mixed_path = write(directory / "mono-frame-in-stereo.mp3", *mixed_source);
+        auto decoder = formats::AudioDecoder::open(mixed_path.native(), {});
+        CHECK(decoder.has_value());
+        if (decoder) {
+            CHECK(decoder->output_format().channels == 2);
+        }
+        const auto mixed = decode(mixed_path);
+        if (mixed.error) {
+            std::cerr << "mono frame in stereo: " << *mixed.error << '\n';
+        }
+        CHECK(!mixed.error);
+        // Fourteen frames of 1152 samples, less the encoder's delay.
+        CHECK(mixed.frames > 1152 * 12);
+        CHECK(mixed.frames <= 1152 * 14);
+        if (flac) {
+            const auto destination = directory / "mono-frame-in-stereo.flac";
+            const auto converted = trackknife::convert::convert_audio_file(
+                {.source_raw_path = mixed_path.native(),
+                 .source_selection = {},
+                 .source_range = {},
+                 .destination_raw_path = destination.native(),
+                 .preset = *flac,
+                 .target_sample_rate = {},
+                 .sample_rate_cap = {},
+                 .target_bit_depth = {},
+                 .keep_source_bit_depth = false,
+                 .metadata = {},
+                 .artwork = {}},
+                [](std::uint64_t, std::optional<std::uint64_t>) {});
+            if (!converted) {
+                std::cerr << "converting mono frame in stereo: " << converted.error().message << '\n';
+            }
+            CHECK(converted.has_value());
+        }
+    }
+
     std::error_code removed;
     std::filesystem::remove_all(directory, removed);
     if (failures != 0) {
