@@ -317,7 +317,8 @@ void temporarySiblingsStayWithinAFileName() {
     const auto sibling = trackknife::core::temporary_sibling(target, "tk-part");
     const auto name = sibling.filename().native();
     check(sibling.parent_path() == target.parent_path(), "beside its target", __LINE__);
-    check(name.size() <= 255U, "within a file name's length", __LINE__);
+    // 240, short of 255: over SMB, a name of 254 or 255 bytes cannot be renamed.
+    check(name.size() <= 240U, "short of a file name's length", __LINE__);
     check(name.front() == '.' && name.find(".tk-part-") != std::string::npos,
           "hidden, and labelled", __LINE__);
     check(valid_utf8(name), "never cut inside a character", __LINE__);
