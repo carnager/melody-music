@@ -851,8 +851,15 @@ Workspace::trackViewLayoutFor(const lists::ListView& view,
                                .collapsed = {}};
 }
 
+ui::TrackViewLayout Workspace::newListTrackViewLayout() {
+    if (const auto view = findListView(newListsViewId())) {
+        return trackViewLayoutFor(*view);
+    }
+    return defaultTrackViewLayout();
+}
+
 ui::TrackViewLayout Workspace::restoredTrackViewLayout(ListTab& tab) {
-    auto layout = defaultTrackViewLayout();
+    auto layout = newListTrackViewLayout();
     const auto binding = QStringLiteral("local:%1").arg(document_text(tab.document.id));
     const auto stored = restored_track_view_layouts_.value(binding);
     if (stored.isEmpty()) {

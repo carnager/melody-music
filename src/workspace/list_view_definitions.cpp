@@ -13,6 +13,7 @@ namespace trackknife::bench {
 namespace {
 
 const QString settings_key = QStringLiteral("lists/views");
+const QString new_lists_view_key = QStringLiteral("lists/new-list-view");
 
 [[nodiscard]] core::Error invalid(const std::string& message) {
     return {.code = core::ErrorCode::invalid_argument, .message = message, .context = {}};
@@ -68,6 +69,20 @@ core::Result<void> saveCustomListViews(const std::vector<lists::ListView>& views
                          QByteArray{text.data(), static_cast<qsizetype>(text.size())});
     emit ListViewCatalog::instance().changed();
     return {};
+}
+
+QString newListsViewId() {
+    const auto id = QSettings{}.value(new_lists_view_key).toString();
+    return !id.isEmpty() && findListView(id) ? id : default_list_view_id;
+}
+
+void setNewListsViewId(const QString& id) {
+    QSettings settings;
+    if (id.isEmpty() || id == default_list_view_id) {
+        settings.remove(new_lists_view_key);
+    } else {
+        settings.setValue(new_lists_view_key, id);
+    }
 }
 
 std::optional<lists::ListView> findListView(const QString& id) {

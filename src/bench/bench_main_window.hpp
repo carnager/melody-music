@@ -811,6 +811,8 @@ class BenchMainWindow final : public QMainWindow, public WorkspaceView {
     void rebuildListViewActions();
     QAction* track_layout_reset_action_{nullptr};
     QAction* track_layout_copy_action_{nullptr};
+    // Checked when the current list's view is the one new lists start in.
+    QAction* track_layout_new_lists_action_{nullptr};
     QSlider* seek_{nullptr};
     QLabel* elapsed_{nullptr};
     QLabel* duration_{nullptr};

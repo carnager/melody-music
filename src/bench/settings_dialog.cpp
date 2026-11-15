@@ -104,6 +104,14 @@ SettingsDialog::SettingsDialog(QWidget* parent, OutputProfileStore profile_store
     setObjectName(QStringLiteral("bench-settings-dialog"));
     setAttribute(Qt::WA_DeleteOnClose);
     resize(940, 640);
+    // Its size, as it was last left.
+    static constexpr auto geometry_key = "workspace/settings-dialog-geometry";
+    if (const auto geometry = QSettings{}.value(QString::fromLatin1(geometry_key)).toByteArray();
+        !geometry.isEmpty()) {
+        static_cast<void>(restoreGeometry(geometry));
+    }
+    connect(this, &QDialog::finished, this,
+            [this] { QSettings{}.setValue(QString::fromLatin1(geometry_key), saveGeometry()); });
 
     session_ = new SettingsSession(this);
     auto* root = new QVBoxLayout(this);
@@ -129,6 +137,9 @@ SettingsDialog::SettingsDialog(QWidget* parent, OutputProfileStore profile_store
             for (int row = 0; row < form->rowCount(); ++row) {
                 auto* item = form->itemAt(row, QFormLayout::FieldRole);
                 auto* field = item != nullptr ? item->widget() : nullptr;
+                if (field == nullptr) {
+                    continue;
+                }
                 if (qobject_cast<QAbstractSpinBox*>(field) != nullptr ||
                     qobject_cast<QComboBox*>(field) != nullptr) {
                     field->setMaximumWidth(260);
