@@ -26,6 +26,11 @@ inline const QString default_list_view_id =
 [[nodiscard]] core::Result<std::vector<lists::ListView>> customListViews();
 // Replaces the user's views; each must be valid.
 [[nodiscard]] core::Result<void> saveCustomListViews(const std::vector<lists::ListView>& views);
+// The view a new list starts in: the one chosen with Track list layout ›
+// Use for new lists, while it exists, else the default.
+[[nodiscard]] QString newListsViewId();
+// Chooses it; an empty id goes back to the default.
+void setNewListsViewId(const QString& id);
 // A view by id, shipped or the user's.
 [[nodiscard]] std::optional<lists::ListView> findListView(const QString& id);
 // Compiled, and kept while it is unchanged: every tab of one view shares it.

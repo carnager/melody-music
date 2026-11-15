@@ -589,6 +589,8 @@ class Workspace final : public QObject {
     // The columns a list was saved with, or the default when there are none
     // -- or they cannot be read, when what was saved is kept and not
     // overwritten.
+    // A new list's layout: the view chosen for new lists (ADR-0282).
+    [[nodiscard]] static ui::TrackViewLayout newListTrackViewLayout();
     [[nodiscard]] ui::TrackViewLayout restoredTrackViewLayout(ListTab& tab);
     // A list's columns as chosen now -- what was saved is replaced -- and
     // one of them shown or hidden; the last shown is not hidden (false).

@@ -551,6 +551,15 @@ void BenchMainWindow::buildWorkspace() {
     track_layout_copy_action_->setObjectName(QStringLiteral("action-copy-track-layout"));
     connect(track_layout_copy_action_, &QAction::triggered, this,
             &BenchMainWindow::copyTrackViewLayoutToAllTabs);
+    track_layout_new_lists_action_ =
+        track_layout_menu->addAction(QStringLiteral("Use current view for new lists"));
+    track_layout_new_lists_action_->setObjectName(QStringLiteral("action-new-lists-view"));
+    track_layout_new_lists_action_->setCheckable(true);
+    connect(track_layout_new_lists_action_, &QAction::triggered, this, [this](const bool on) {
+        const auto* tab = currentListTab();
+        setNewListsViewId(on && tab != nullptr ? tab->view_layout.view : QString{});
+        refreshTrackViewActions();
+    });
 
     tab_context_menu_ = new QMenu(tabs_);
     tab_context_menu_->setObjectName(QStringLiteral("bench-tab-context-menu"));

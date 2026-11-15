@@ -4485,4 +4485,69 @@ void BenchMainWindowTest::theTrackLayoutMenuListsEveryListView() {
     QTRY_VERIFY(!listed().contains(*made));
 }
 
+// A new list starts in the view chosen with "Use current view for new
+// lists"; unchecking it goes back to the default, and so does a chosen view
+// that is gone.
+void BenchMainWindowTest::newListsStartInTheViewChosenForThem() {
+    BenchMainWindow window;
+    window.show();
+    QTRY_VERIFY(window.lists_restored_);
+    auto* use = window.findChild<QAction*>(QStringLiteral("action-new-lists-view"));
+    QVERIFY(use != nullptr && use->isCheckable());
+    const auto plain = ui::trackViewPresentationId(ui::TrackViewPresentation::plain_columns);
+    QVERIFY(plain != default_list_view_id);
+    const auto add = [&window] {
+        return window.addListTab(persistence::ListDocument{.id = core::StableId::random(),
+                                                           .kind = persistence::ListKind::scratch,
+                                                           .name = "New",
+                                                           .pinned = false,
+                                                           .dirty = false,
+                                                           .items = {},
+                                                           .engine = {}},
+                                 true);
+    };
+    QCOMPARE(add()->view_layout.view, default_list_view_id);
+    QVERIFY(use->isChecked());
+    window.chooseListView(plain);
+    QTRY_COMPARE(window.currentListTab()->view_layout.view, plain);
+    QVERIFY(!use->isChecked());
+    use->trigger();
+    QCOMPARE(newListsViewId(), plain);
+    QCOMPARE(add()->view_layout.view, plain);
+    QVERIFY(use->isChecked());
+    // Reset goes to it too.
+    window.chooseListView(default_list_view_id);
+    window.resetTrackViewLayout();
+    QCOMPARE(window.currentListTab()->view_layout.view, plain);
+    use->trigger();
+    QVERIFY(!use->isChecked());
+    QCOMPARE(newListsViewId(), default_list_view_id);
+    QCOMPARE(add()->view_layout.view, default_list_view_id);
+    // A view of the user's that is removed: new lists are the default again.
+    auto base = findListView(default_list_view_id);
+    auto made = listViewCopy(*base, base->columns, QStringLiteral("Mine"));
+    QVERIFY(made.has_value());
+    setNewListsViewId(*made);
+    QCOMPARE(add()->view_layout.view, *made);
+    QVERIFY(saveCustomListViews({}).has_value());
+    QCOMPARE(newListsViewId(), default_list_view_id);
+    QCOMPARE(add()->view_layout.view, default_list_view_id);
+}
+
+// Settings opens at the size it was last left at.
+void BenchMainWindowTest::theSettingsDialogKeepsItsSize() {
+    BenchMainWindow window;
+    window.show();
+    auto* dialog = window.showSettingsDialog(SettingsDialog::Page::general);
+    // Within the offscreen screen, which restoreGeometry() keeps it to.
+    const QSize size{713, 517};
+    QVERIFY(dialog->size() != size);
+    dialog->resize(size);
+    dialog->reject();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    dialog = window.showSettingsDialog(SettingsDialog::Page::general);
+    QCOMPARE(dialog->size(), size);
+    dialog->reject();
+}
+
 } // namespace trackknife::bench

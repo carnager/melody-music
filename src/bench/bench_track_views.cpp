@@ -410,7 +410,7 @@ void BenchMainWindow::resetTrackViewLayout() {
     }
     tab->view_layout_persistence_protected = false;
     tab->preserved_view_layout.clear();
-    applyTrackViewLayout(*tab, defaultTrackViewLayout());
+    applyTrackViewLayout(*tab, Workspace::newListTrackViewLayout());
     schedulePersist();
 }
 
@@ -451,12 +451,13 @@ void BenchMainWindow::rebuildListViewActions() {
 void BenchMainWindow::refreshTrackViewActions() {
     // Not before the whole menu is made.
     if (track_presentation_group_ == nullptr || track_layout_reset_action_ == nullptr ||
-        track_layout_copy_action_ == nullptr) {
+        track_layout_copy_action_ == nullptr || track_layout_new_lists_action_ == nullptr) {
         return;
     }
     auto* tab = currentListTab();
     const auto available = tab != nullptr;
-    for (auto* action : {track_layout_reset_action_, track_layout_copy_action_}) {
+    for (auto* action :
+         {track_layout_reset_action_, track_layout_copy_action_, track_layout_new_lists_action_}) {
         action->setEnabled(available);
     }
     for (auto* action : track_presentation_group_->actions()) {
@@ -475,6 +476,10 @@ void BenchMainWindow::refreshTrackViewActions() {
     for (auto* action : track_presentation_group_->actions()) {
         const QSignalBlocker blocker{action};
         action->setChecked(action->data().toString() == layout.view);
+    }
+    {
+        const QSignalBlocker blocker{track_layout_new_lists_action_};
+        track_layout_new_lists_action_->setChecked(layout.view == newListsViewId());
     }
 
     for (const auto& column : layout.columns) {
@@ -551,6 +556,7 @@ void BenchMainWindow::showTrackViewHeaderMenu(QTableView* view, const QPoint& po
     }
     menu.addSeparator();
     menu.addAction(track_layout_reset_action_);
+    menu.addAction(track_layout_new_lists_action_);
     menu.exec(view->horizontalHeader()->mapToGlobal(position));
 }
 
