@@ -41,6 +41,18 @@ const std::vector<EncoderPreset>& builtin_encoder_presets() {
             .sample_format_hint = "s32",
         },
         {
+            .id = "opus-128",
+            .version = 1,
+            .display_name = "Opus 128 kbps",
+            .codec_name = "libopus",
+            .container_name = "opus",
+            .file_extension = "opus",
+            .lossless = false,
+            .bit_rate = 128'000,
+            .vbr_quality = std::nullopt,
+            .sample_format_hint = {},
+        },
+        {
             .id = "opus-192",
             .version = 1,
             .display_name = "Opus 192 kbps",
