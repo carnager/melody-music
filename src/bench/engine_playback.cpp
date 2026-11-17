@@ -1226,22 +1226,6 @@ void EnginePlayback::deleteDynamicRule(const QString& id,
             });
 }
 
-void EnginePlayback::handDynamicRules(const QVector<DynamicPlaylistDefinition>& rules,
-                                      std::function<void(core::Result<int>)> answer) {
-    auto handed = protocol::Json::array();
-    for (const auto& rule : rules) {
-        handed.push_back(dynamicRuleJson(rule));
-    }
-    request(QStringLiteral("dynamic.adopt"), protocol::Json{{"rules", std::move(handed)}},
-            [answer = std::move(answer)](const core::Result<protocol::Json>& adopted) {
-                if (!adopted) {
-                    answer(std::unexpected(adopted.error()));
-                    return;
-                }
-                answer(adopted->value("adopted", 0));
-            });
-}
-
 void EnginePlayback::pickDynamic(const DynamicPlaylistDefinition& rule,
                                  core::CancellationToken cancellation,
                                  std::function<void(std::size_t, std::size_t)> progress,

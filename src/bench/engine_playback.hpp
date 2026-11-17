@@ -225,10 +225,6 @@ class EnginePlayback final : public QObject {
     using RuleAnswer = std::function<void(core::Result<DynamicPlaylistDefinition>)>;
     void saveDynamicRule(const DynamicPlaylistDefinition& rule, RuleAnswer answer);
     void deleteDynamicRule(const QString& id, std::function<void(core::Result<void>)> answer);
-    // Hands the engine rules it does not have yet; answered with how many
-    // it took.
-    void handDynamicRules(const QVector<DynamicPlaylistDefinition>& rules,
-                          std::function<void(core::Result<int>)> answer);
     // ADR-0350: what a rule -- saved or not -- picks on this engine: from its
     // library, or what Last.fm suggests that its library has. Asked as a
     // job, so a slow Last.fm holds up nothing else; cancelling asks the

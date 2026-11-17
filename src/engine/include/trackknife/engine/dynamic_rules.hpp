@@ -82,8 +82,6 @@ class DynamicRules final {
     // A shipped rule is not changed.
     [[nodiscard]] core::Result<DynamicRule> save(DynamicRule rule);
     [[nodiscard]] core::Result<void> remove(const std::string& id);
-    // Keeps each valid rule whose id is not known yet; answers how many.
-    std::size_t adopt(std::vector<DynamicRule> rules);
 
     // Called, without any lock held, after the rules changed, until
     // forgotten by the number this answers.
@@ -145,8 +143,8 @@ class DynamicPicker final {
     std::mt19937 random_{std::random_device{}()};
 };
 
-// dynamic.rules, dynamic.save {rule}, dynamic.delete {id}, dynamic.adopt
-// {rules}, and dynamic.play {id}: the queue replaced with what the rule
+// dynamic.rules, dynamic.save {rule}, dynamic.delete {id}, and
+// dynamic.play {id}: the queue replaced with what the rule
 // picks, playing -- answered at once for a tkq-1 rule; a Last.fm rule's
 // waits on Last.fm, so it is a job, answered with its job_id. Changes are
 // told as dynamic.rules.

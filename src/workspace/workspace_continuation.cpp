@@ -21,10 +21,6 @@ namespace {
            !definition.query.trimmed().isEmpty();
 }
 
-[[nodiscard]] QString handedKey(const EngineKey& engine) {
-    return QStringLiteral("dynamic-playlists/handed-v1/") + engine.text();
-}
-
 } // namespace
 
 std::vector<Workspace::ContinuationChoice>
@@ -84,32 +80,6 @@ void Workspace::followContinuations(EngineLink& engine) {
             }
         }
     });
-    connect(engine.playback, &EnginePlayback::dynamicRulesChanged, this,
-            [this, link = &engine] { handOldDynamicRules(*link); });
-}
-
-void Workspace::handOldDynamicRules(EngineLink& engine) {
-    // ADR-0349: the rules the window kept before go to each engine once, so
-    // every engine starts with the same set. The settings stay, for an
-    // engine reached later.
-    if (engine.playback == nullptr || !engine.playback->dynamicRulesKnown() ||
-        QSettings{}.value(handedKey(engine.key)).toBool() ||
-        handing_rules_.contains(engine.key.text())) {
-        return;
-    }
-    const auto old = loadDynamicPlaylists(QStringLiteral("local"));
-    if (!old || old->isEmpty()) {
-        QSettings{}.setValue(handedKey(engine.key), true);
-        return;
-    }
-    handing_rules_.insert(engine.key.text());
-    engine.playback->handDynamicRules(*old,
-                                      [this, key = engine.key](const core::Result<int>& adopted) {
-                                          handing_rules_.remove(key.text());
-                                          if (adopted) {
-                                              QSettings{}.setValue(handedKey(key), true);
-                                          }
-                                      });
 }
 
 } // namespace trackknife::bench

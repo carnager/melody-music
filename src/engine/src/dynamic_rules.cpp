@@ -400,28 +400,6 @@ core::Result<void> DynamicRules::remove(const std::string& id) {
     return {};
 }
 
-std::size_t DynamicRules::adopt(std::vector<DynamicRule> rules) {
-    std::size_t adopted = 0U;
-    {
-        const std::lock_guard guard{mutex_};
-        for (auto& rule : rules) {
-            if (rule.id.empty() || rule.shipped() || !validate_dynamic_rule(rule) ||
-                std::ranges::find(saved_, rule.id, &DynamicRule::id) != saved_.end()) {
-                continue;
-            }
-            saved_.push_back(std::move(rule));
-            ++adopted;
-        }
-        if (adopted > 0U) {
-            store_locked();
-        }
-    }
-    if (adopted > 0U) {
-        changed();
-    }
-    return adopted;
-}
-
 std::size_t DynamicRules::on_change(std::function<void()> observer) {
     const std::lock_guard guard{mutex_};
     const auto number = next_observer_++;
@@ -461,18 +439,6 @@ void register_dynamic_rule_methods(protocol::Dispatcher& dispatcher, DynamicRule
             return std::unexpected(std::move(removed.error()));
         }
         return Json{{"id", id}};
-    });
-    dispatcher.on("dynamic.adopt", [&rules](const Json& params) -> core::Result<Json> {
-        const auto given = params.find("rules");
-        if (given == params.end() || !given->is_array()) {
-            return std::unexpected(invalid("a list of rules is required", "rules"));
-        }
-        std::vector<DynamicRule> adopted;
-        adopted.reserve(given->size());
-        for (const auto& value : *given) {
-            adopted.push_back(dynamic_rule_from_json(value));
-        }
-        return Json{{"adopted", rules.adopt(std::move(adopted))}};
     });
     dispatcher.on(
         "dynamic.play",
