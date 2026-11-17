@@ -300,11 +300,16 @@ void register_convert_jobs(JobCatalog& jobs, LocalCatalogue& catalogue) {
             }
             for (const auto& item : scanned->items) {
                 const bool made = item.state == convert::ConversionScanState::converted;
-                files.push_back(
-                    Json{{"source", protocol::encode_raw_path(item.source_raw_path)},
-                         {"target", protocol::encode_raw_path(item.destination_raw_path)},
-                         {"converted", made},
-                         {"error", made || !item.issue ? Json() : Json(item.issue->message)}});
+                Json file{{"source", protocol::encode_raw_path(item.source_raw_path)},
+                          {"target", protocol::encode_raw_path(item.destination_raw_path)},
+                          {"converted", made},
+                          {"error", made || !item.issue ? Json() : Json(item.issue->message)}};
+                // Said only when there were any: a source with damaged packets
+                // passed over is converted, and missing their milliseconds.
+                if (made && item.converted && item.converted->damaged_source_packets > 0U) {
+                    file["damaged_packets"] = item.converted->damaged_source_packets;
+                }
+                files.push_back(std::move(file));
             }
             return Json{{"result", Json{{"files", std::move(files)},
                                         {"passed", passed},

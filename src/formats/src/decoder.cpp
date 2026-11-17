@@ -9,6 +9,7 @@ extern "C" {
 #include <libavutil/dict.h>
 #include <libavutil/error.h>
 #include <libavutil/intreadwrite.h>
+#include <libavutil/opt.h>
 #include <libavutil/replaygain.h>
 #include <libavutil/samplefmt.h>
 #include <libswresample/swresample.h>
@@ -94,6 +95,14 @@ struct AudioDecoder::Impl {
     // only for the machine that replaced it -- and reading fails mid-track.
     std::optional<std::pair<dev_t, ino_t>> identity;
     unsigned reopened{0};
+    // Packets the codec refused as invalid data and that were passed over
+    // (ADR-0354): one damaged frame of an otherwise sound file -- an MP3
+    // frame without its header, a truncated last ALAC packet -- costs its
+    // few milliseconds, not the track. A run of them is a file that does
+    // not decode, and fails as before.
+    std::uint64_t damaged_packets{0};
+    unsigned damaged_in_a_row{0};
+    bool decoded_any{false};
     bool input_finished{false};
     bool drain_sent{false};
     bool range_finished{false};
@@ -111,9 +120,54 @@ struct AudioDecoder::Impl {
         return decoder != nullptr && decoder->cancellation.is_cancellation_requested() ? 1 : 0;
     }
 
+    // The resampler is set up for the stream as it opens, but a frame may
+    // come otherwise: an MP3 stream can carry a mono frame among stereo
+    // ones, and past a damaged packet (ADR-0354) such a frame is reached.
+    // Read with the stream's layout, its missing second plane is a null
+    // pointer. The resampler takes each frame as it is; the output does not
+    // change, so a mono frame is mixed up to the stream's stereo.
+    [[nodiscard]] core::Result<void> follow_frame_format() {
+        if (frame->ch_layout.nb_channels <= 0 || frame->sample_rate <= 0 || frame->format < 0) {
+            return std::unexpected(decoder_error(AVERROR_INVALIDDATA, "decoding a frame without a format",
+                                                 raw_path, cancellation));
+        }
+        std::int64_t rate = 0;
+        auto format = AV_SAMPLE_FMT_NONE;
+        AVChannelLayout layout{};
+        const auto read = av_opt_get_int(resampler, "in_sample_rate", 0, &rate) >= 0 &&
+                          av_opt_get_sample_fmt(resampler, "in_sample_fmt", 0, &format) >= 0 &&
+                          av_opt_get_chlayout(resampler, "in_chlayout", 0, &layout) >= 0;
+        const auto same = read && rate == frame->sample_rate && format == frame->format &&
+                          av_channel_layout_compare(&layout, &frame->ch_layout) == 0;
+        av_channel_layout_uninit(&layout);
+        if (same) {
+            return {};
+        }
+        swr_close(resampler);
+        auto result = av_opt_set_chlayout(resampler, "in_chlayout", &frame->ch_layout, 0);
+        if (result >= 0) {
+            result = av_opt_set_sample_fmt(resampler, "in_sample_fmt",
+                                           static_cast<AVSampleFormat>(frame->format), 0);
+        }
+        if (result >= 0) {
+            result = av_opt_set_int(resampler, "in_sample_rate", frame->sample_rate, 0);
+        }
+        if (result >= 0) {
+            result = swr_init(resampler);
+        }
+        if (result < 0) {
+            return std::unexpected(
+                decoder_error(result, "following a change of audio format", raw_path, cancellation));
+        }
+        return {};
+    }
+
     [[nodiscard]] core::Result<std::optional<PcmChunk>> convert_frame() {
         std::uint32_t skip_start = 0U;
         std::uint32_t skip_end = 0U;
+        if (auto followed = follow_frame_format(); !followed) {
+            return std::unexpected(std::move(followed.error()));
+        }
         const auto* skip_samples = av_frame_get_side_data(frame, AV_FRAME_DATA_SKIP_SAMPLES);
         if (skip_samples != nullptr) {
             constexpr std::size_t skip_sample_data_size = 10U;
@@ -756,13 +810,38 @@ bool AudioDecoder::reopen_if_replaced() {
         return false;
     }
     const auto times = decoder.reopened + 1U;
+    const auto damaged = decoder.damaged_packets;
     implementation_ = std::move(fresh->implementation_);
     implementation_->reopened = times;
+    implementation_->damaged_packets = damaged;
     return true;
+}
+
+std::uint64_t AudioDecoder::damaged_packets() const noexcept {
+    return implementation_->damaged_packets;
 }
 
 core::Result<std::optional<PcmChunk>> AudioDecoder::next_chunk() {
     auto& decoder = *implementation_;
+    // More in a row than any damage seen in real files; a stream of them is
+    // not audio with a flaw in it.
+    constexpr unsigned most_damaged_in_a_row = 32U;
+    const auto pass_over_damaged = [&decoder]() -> core::Result<void> {
+        ++decoder.damaged_packets;
+        if (++decoder.damaged_in_a_row > most_damaged_in_a_row) {
+            return std::unexpected(decoder_error(AVERROR_INVALIDDATA, "decoding damaged audio",
+                                                 decoder.raw_path, decoder.cancellation));
+        }
+        return {};
+    };
+    const auto finished = [&decoder]() -> core::Result<std::optional<PcmChunk>> {
+        // Passed-over packets and nothing else is not a sound file.
+        if (decoder.damaged_packets > 0U && !decoder.decoded_any) {
+            return std::unexpected(decoder_error(AVERROR_INVALIDDATA, "decoding damaged audio",
+                                                 decoder.raw_path, decoder.cancellation));
+        }
+        return std::optional<PcmChunk>{};
+    };
     while (true) {
         if (decoder.cancellation.is_cancellation_requested()) {
             return std::unexpected(core::Error{
@@ -776,6 +855,8 @@ core::Result<std::optional<PcmChunk>> AudioDecoder::next_chunk() {
         }
         const auto receive_result = avcodec_receive_frame(decoder.codec, decoder.frame);
         if (receive_result >= 0) {
+            decoder.decoded_any = true;
+            decoder.damaged_in_a_row = 0U;
             auto converted = decoder.convert_frame();
             if (!converted || !*converted) {
                 return converted;
@@ -798,7 +879,16 @@ core::Result<std::optional<PcmChunk>> AudioDecoder::next_chunk() {
             continue;
         }
         if (receive_result == AVERROR_EOF) {
-            return std::optional<PcmChunk>{};
+            return finished();
+        }
+        if (receive_result == AVERROR_INVALIDDATA) {
+            if (reopen_if_replaced()) {
+                return next_chunk();
+            }
+            if (auto passed = pass_over_damaged(); !passed) {
+                return std::unexpected(std::move(passed.error()));
+            }
+            continue;
         }
         if (receive_result != AVERROR(EAGAIN)) {
             if (reopen_if_replaced()) {
@@ -818,7 +908,7 @@ core::Result<std::optional<PcmChunk>> AudioDecoder::next_chunk() {
                 }
                 continue;
             }
-            return std::optional<PcmChunk>{};
+            return finished();
         }
 
         auto read_result = 0;
@@ -843,6 +933,17 @@ core::Result<std::optional<PcmChunk>> AudioDecoder::next_chunk() {
         }
         const auto send_result = avcodec_send_packet(decoder.codec, decoder.packet);
         av_packet_unref(decoder.packet);
+        if (send_result == AVERROR_INVALIDDATA) {
+            // A file renamed over mid-read reads as damage too: it is
+            // reopened, not passed over.
+            if (reopen_if_replaced()) {
+                return next_chunk();
+            }
+            if (auto passed = pass_over_damaged(); !passed) {
+                return std::unexpected(std::move(passed.error()));
+            }
+            continue;
+        }
         if (send_result < 0 && send_result != AVERROR(EAGAIN)) {
             if (reopen_if_replaced()) {
                 return next_chunk();

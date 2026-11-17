@@ -409,3 +409,28 @@ base64 -d tagged-tone-flac.b64 > empty-field.flac
 metaflac --set-tag="EMPTYFIELD=" empty-field.flac
 base64 -w 76 empty-field.flac > empty-field-flac.b64
 ```
+
+## Mono frame in a stereo MP3 fixture
+
+`mono-frame-in-stereo-mp3.b64` is a 44.1 kHz stereo MP3 with one mono
+frame among its stereo ones, as real files carry: 0.3 s of a 440 Hz left
+and 660 Hz right sine, and the sixth frame of a mono 440 Hz sine spliced in
+before its seventh frame. Both were made without the bit reservoir, so each
+frame decodes on its own (FFmpeg 4.4.6 / libmp3lame):
+
+```sh
+ffmpeg -f lavfi -i "sine=frequency=440:duration=0.3:sample_rate=44100" \
+  -f lavfi -i "sine=frequency=660:duration=0.3:sample_rate=44100" \
+  -filter_complex "[0][1]join=inputs=2:channel_layout=stereo" \
+  -c:a libmp3lame -b:a 128k -reservoir 0 -bitexact -write_xing 0 \
+  -id3v2_version 0 stereo.mp3
+ffmpeg -f lavfi -i "sine=frequency=440:duration=0.3:sample_rate=44100" \
+  -c:a libmp3lame -b:a 128k -reservoir 0 -bitexact -write_xing 0 \
+  -id3v2_version 0 mono.mp3
+```
+
+The frame is spliced by walking both files' MPEG frame headers. `ffprobe`
+reports 6 stereo frames, one mono, then 7 stereo. The binary SHA-256 is
+`426389a71a9151341b9b7ede37b6537ddd4e8308707706a07b8c91ce0134b340`.
+Decoded with a resampler set up only for the stream's stereo, the mono
+frame's missing second plane crashed the engine.

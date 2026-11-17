@@ -108,6 +108,9 @@ class AudioDecoder final {
     [[nodiscard]] const AudioSourceSelection& source_selection() const noexcept;
     [[nodiscard]] core::Result<void> seek_to_sample(std::int64_t target_sample);
     [[nodiscard]] core::Result<std::optional<PcmChunk>> next_chunk();
+    // Packets passed over so far because the codec refused them as invalid
+    // data (ADR-0354). A run of them, or a file of nothing else, fails.
+    [[nodiscard]] std::uint64_t damaged_packets() const noexcept;
 
   private:
     struct Impl;

@@ -10,6 +10,15 @@ client keeps a path for what an older engine lacked.
 
 ## Protocol 1
 
+### Level 33 (2026-11-12)
+
+ADR-0354: a damaged packet is passed over, not the track.
+
+- A file of the `convert.apply` job's outcome carries `damaged_packets`: how
+  many packets of its source the codec refused as invalid data and were
+  passed over, their milliseconds missing from what was made. Absent when
+  there were none. A source of nothing but damage still fails.
+
 ### Level 32 (2026-11-11)
 
 ADR-0352: a scan names the files it could not read.
