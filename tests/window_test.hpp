@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-// The window test (bench_main_window_test*.cpp), its cases in several files
-// so they compile side by side: what they share is here.
+// The window tests (window_*_test.cpp): what they share.
 
 #include "bench/animated_panel_dock.hpp"
 #include "bench/bench_main_window.hpp"
@@ -308,273 +307,49 @@ inline bool materialize_audio_fixture(const QString& encoded_name, const QString
 
 using namespace window_test;
 
-class BenchMainWindowTest final : public QObject {
+// The window's tests, a class for each feature in a file of its own
+// (window_*_test.cpp): nested here, so they are what the window and its
+// parts name as their friend.
+class BenchMainWindowTest {
+  public:
+    class Artwork;
+    class Convert;
+    class Desktop;
+    class Dynamic;
+    class EngineLists;
+    class FileWork;
+    class Library;
+    class ListEditing;
+    class ListViews;
+    class Look;
+    class MusicBrainz;
+    class Panels;
+    class Playback;
+    class Plugins;
+    class RemoteEngines;
+    class ReplayGain;
+    class Search;
+    class Settings;
+    class Tabs;
+    class Tagger;
+    class TaggerEdits;
+    class UpNext;
+};
+
+namespace window_test {
+
+// What every window test does around each case: a home and settings of the
+// process's own, an engine started for each case and everything cleared
+// after it.
+class Fixture : public QObject {
     Q_OBJECT
 
   private slots:
     void initTestCase();
-    void discsOfAnAlbumAreNamed();
     void init();
     void cleanup();
-    void transportIsOneRowWithCoverAndPills();
-    void theDesktopNamesWhatPlaysAfterARestart();
-    void thePlayingRowFollowsItsList();
-    void headerShowsThePlayingAlbumsCover();
-    void libraryDragsIntoUpNextWithCovers();
-    void quickAlbumFindsByWordsAndPutsItAway();
-    void quickAlbumShiftEnterReplacesAndPlays();
-    void quickTrackFindsATrackByItsTitle();
-    void settingsListEnginesFoundOnTheNetwork();
-    void recentlyAddedComesFirstWhereAskedFor();
-    void ffmpegEncoderIsTheTagTagLibCallsEncoding();
-    void activePlaybackTabRemainsMarkedWhileBrowsing();
-    void doubleClickOnEmptyTabBarMakesAList();
-    void activeTabAccentSurvivesThemeTextColor();
-    void listTabsMeasureTheSameUnderEveryStyle();
-    void followPlaybackAndJumpRespectBrowsing();
-    void commandPaletteFindsAndRunsRegisteredActions();
-    void commandPaletteTracksAvailabilityAndLifetime();
-    void commandPaletteOffersEveryMenuEntry();
-    void commandPaletteHidesWhatAGreyedMenuHolds();
-    void localListeningColumnsLoadRefreshAndRespectAuthority();
-    void shortcutSettingsValidateSaveAndCancel();
-    void everyCommandTakesAKeyAndCtrlLSearchesTheLibrary();
-    void quittingStopsTheEngineForGood();
-    void sharingSettingsAreHandedToTheEngineOnce();
-    void theWindowsListsAreOnItsEngine();
-    void listsTravelAsEdits();
-    void anotherClientsListChangesReachTheWindow();
-    void aListChangedWhileClosedIsTakenUpOnOpening();
-    void aListFromElsewhereOpensAsATab();
-    void aListFromTheEngineCarriesItsLibraryTags();
-    void aMoveIsFollowedInListsNotOpenHere();
-    void libraryAndFoldersAddToAChosenList();
-    void tabsAreGroupedByEngine();
-    void theRemotesListsTakeItsIdOnceItSaysIt();
-    void remoteEnginesStartFromTheOneRemoteOfBefore();
-    void twoEnginesElsewhereSideBySide();
-    void settingsListTheEnginesElsewhere();
-    void anEnginesOwnPasswordIsSaidAndCanGo();
-    void enginesAddedOrRemovedApplyAtOnce();
-    void aPasswordGivenLaterReachesTheEngine();
-    void anotherEngineAtTheSameAddressLeavesTheOldOnesLists();
-    void theListsPanelShowsEveryListAndTakesDrops();
-    void aScratchTabNeverReachesItsEngine();
-    void theTabStoreKeepsWhatItCannotRead();
-    void aRestoreTakesBackOnlyWhatIsTicked();
-    void aPlayingTabsEditsReachTheQueueAsEdits();
-    void thisComputersTabsAreMarkedWhenTheLibraryIsElsewhere();
-    void theLibraryMenuMovesTheLibrary();
-    void aboutShowsTheMascotAndTheRelease();
-    void aPluginActionSharesWhatIsChosen();
-    void manyPluginActionsGoInASubmenu();
-    void pluginTriggersRunOnTheLibrarysNews();
-    void settingsSayAndChooseThePlaylistFolder();
-    void thePlaylistsTabOpensAPlaylistFile();
-    void theEngineFolderDialogBrowsesAnEnginesMachine();
-    void theHeartMakesWhatPlaysAFavourite();
-    void theTrackLayoutMenuListsEveryListView();
-    void newListsStartInTheViewChosenForThem();
-    void theSettingsDialogKeepsItsSize();
-    void thisComputersFilesDroppedOnARemoteTab();
-    void aListDeletedElsewhereWhileBeingWrittenStaysDeleted();
-    void aRemovalLeftPendingByAnOlderReleaseIsCarriedOut();
-    void playbackBufferProfilesPersistAndExposeDiagnostics();
-    void statusBarSummarizesTrackSelection();
-    void committedMetadataRefreshesDuplicatesAndPreservesCueOverlay();
-    void metadataReadyPlanAppliesAndRefreshesHistory();
-    void aTaggerUndoesItsWriteUntilClosed();
-    void aPluginPanelShowsWhatItSaysAboutThePlayingTrack();
-    void aPluginPanelIsToldTheLibrary();
-    void aTogetherLinkAsksTheEngineToJoin();
-    void aRoomPanelIsAskedAgainAsTheRoomChanges();
-    void aPanelsControlsAskItAgain();
-    void aPanelIsAskedAgainWhenItSays();
-    void theListeningRoomPanelIsTheRoom();
-    void lyricsProvidersAreAskedWhenTheFileHasNone();
-    void metadataRenameMovesTheFileAndItsRow();
-    void aFileAlreadyWhereRenamingPutsItGetsItsCover();
-    void aMovedAlbumGetsItsFolderCoverWhereItMoved_data();
-    void aMovedAlbumGetsItsFolderCoverWhereItMoved();
-    void aCoverWrittenWithAMoveShowsInItsTab();
-    void applyReadsAgainAFileChangedElsewhere();
-    void listRowsFollowChangedFiles();
-    void fileWorkWithoutAnEngineSaysWhy();
-    void metadataApplyCancellationPreservesDraftForFreshPreview();
-    void metadataDialogLayoutsPersistAsynchronously();
-    void taggerWindowStateRoundTrips();
-    void metadataFieldLayoutsLoadFilterAndPersist();
-    void metadataGridDisplaysUnicodePaths();
-    void metadataGridReusesExactNativeFieldWithoutInvalidIndexes();
-    void metadataTransformationChainPreviewsAndStagesOneUndo();
-    void metadataCapturePatternSavesReloadsAndStagesAllFields();
-    void preparationSidePanelEditsReusableOutputProfiles();
-    void pathOnlyPreparationUsesActualTagsAndAppliesReviewedPlan();
-    void moveDestinationsArePerEngine();
-    void actionChoicesAreRemembered();
-    void actionsLinksOpenTheirOwnSettings();
-    void namingLayoutsAreMelodys();
-    void combinedTagAndRenameReviewReachesPreparationApply_data();
-    void combinedTagAndRenameReviewReachesPreparationApply();
-    void metadataSuggestionsStageSelectionConsistency();
-    void musicBrainzMatchingHandlesUnequalCounts_data();
-    void musicBrainzMatchingHandlesUnequalCounts();
-    void theMatchingBoardPairsByDropClickAndDisc();
-    void aSecondAlbumTakesTheDiscTheFirstLeft();
-    void musicBrainzIdentifyStagesChosenVersion_data();
-    void musicBrainzIdentifyStagesChosenVersion();
-    void musicBrainzIdentifyLooksUpNamedReleases();
-    void musicBrainzIdentifyStepsThroughAlbums();
-    void identifyOpensTheTagEditorWithIdentify();
-    void paintedStatusIconsFollowThePalette();
-    void cachedRowsAreReadEvenWithARevision();
-    void settingsGroupWhatTheyAreAbout();
-    void settingsChooseWhereUndoCopiesAreKept();
-    void listRowsWhoseFilesAreGoneAreGreyed();
-    void upNextFromAnotherClientShows();
-    void applyMeasuresReplayGainAndWritesOnce();
-    void applyMovesIntoAChosenFolder();
-    void musicBrainzFingerprintScanRanksAndStages();
-    void replayGainScanStagesMeasuredGainsAsDrafts();
-    void replayGainScanUsesTruePeakWhenOptedIn();
-    void replayGainScanStagesR128ForOpusTags();
-    void propertiesShowTechnicalSummary();
-    void savedSearchesCanBeManagedAndReopened();
-    void searchDialogFiltersTabAndOpensResults();
-    void searchResultTabLoadsCovers();
-    void searchDialogProbesMissingTechnicalsOnDemand();
-    void searchPresetsAreGroupedAndPrompt();
-    void musicBrainzStagesFromCachedSearchMetadata();
-    void theTaggerOpensOnCachedTagsAndReadsBehind();
-    void coversAreResizedBeforeTheyTravel();
-    void contextReplayGainScansAndApplies_data();
-    void contextReplayGainScansAndApplies();
-    void loudnessSidecarProjectsOntoProbedRows();
-    void desktopNotificationsNotifyBackgroundTrackChanges();
-    void upNextPreservesNormalPlayback_data();
-    void upNextPreservesNormalPlayback();
-    void aRemoteEnginePlaysItsOwnTabs();
-    void theWindowFollowsAnEngineStartedElsewhere();
-    void aNotificationWaitsForItsCover();
-    void aPluginPanelIsToldWhatAnotherClientStarted();
-    void theRemoteTabTakesTheNameItsEngineAnnounces();
-    void anUnreachableRemoteDoesNotHoldTheWindow();
-    void aListReplacedOnTheFollowedEngineMarksWhatPlays();
-    void aRemoteTabGetsTagsAndCoversFromItsEngine();
-    void aRemoteTabRatesOnItsEngine();
-    void thisComputersFilesMoveIntoTheLibrary();
-    void aRatingSetElsewhereShowsInTheTabs();
-    void dynamicPlaylistsReadTheLibraryChosen();
-    void quickAlbumSearchesTheLibraryChosen();
-    void replacingARemoteTabFromItsLibraryPlays();
-    void locateFindsARemoteTracksAlbumInTheRemoteLibrary();
-    void remoteUpNextKeepsItsIdentityAcrossARestart();
-    void sourcePanelOpensOnALibrary();
-    void emptyListsSayHowToFillThem();
-    void aKeptSearchOpensAtOnce();
-    void narrowWindowKeepsListAndUpNextCompact();
-    void aRestoredRemoteTabGetsItsCovers();
-    void lastFmIsHandedToTheEngine();
-    void theDeviceMenuChoosesAnOutputAgent();
-    void upNextEditingAndPersistence();
-    void upNextPanelAnimationAndSettings();
-    void upNextMultiSelectionEdits();
-    void muteRestoresLocalVolumeAcrossBrowsing();
-    void lastFmSettingsAndTrackActions();
-    void dynamicPlaylistsAskTheEngineToPick();
-    void dynamicPlaylistCatalogAndEditor();
-    void dynamicPlaylistRetainsChangesDuringRefresh();
-    void dynamicResultSelectionSurvivesRefresh();
-    void dynamicResultActionsUseTheirOwnSources();
-    void currentTabHistoryPreservesOccurrences();
-    void replayGainScanPreservesLogicalSources_data();
-    void replayGainScanPreservesLogicalSources();
-    void convertDialogPlansAndConvertsSelection();
-    void convertDialogAppliesPermanentReplayGain();
-    void convertDialogFetchesFilesItCannotReach();
-    void propertiesFileListLivesInTheTaggerWindow();
-    void selectionActionsFollowTheActiveTab();
-    void closingATabReturnsToThePreviousOne();
-    void localArtworkSurvivesInvalidation();
-    void artworkFetchesCoverArtFromArchiveAndAddsFront_data();
-    void artworkFetchesCoverArtFromArchiveAndAddsFront();
-    void identifyFetchesTheCoversOfTheAlbumsApplied();
-    void fileListShowsTheFilesUnderTheirAlbums();
-    void closingWaitsForACoverThenCloses();
-    void metadataRetrySkipsSavedFiles_data();
-    void metadataRetrySkipsSavedFiles();
-    void coverPolicyRoundTrip();
-    void upnpSettingRoundTrip();
-    void aSaveWritesOnlyListsThatChanged();
-    void playbackSettingsApplyLiveAndCancel();
-    void librarySettingsManageFoldersWithoutScanning();
-    void ratingsInTagsIsAnEngineOption();
-    void metadataServiceSettingsAndCompactPages();
-    void coverThumbnailAppliesPolicy_data();
-    void coverThumbnailAppliesPolicy();
-    void metadataApplyCombinesTagsAndArtwork_data();
-    void metadataApplyCombinesTagsAndArtwork();
-    void artworkArchivePickerAddsChosenImageWithItsRole();
-    void aCoverBesideTheFilesIsOfferedNotShown();
-    void automaticScriptsStageOnOpen();
-    void metadataStartupPresentsReconciliation();
-    void filePublicationStartupPresentsReconciliation();
-    void combinedPublicationStartupRecoversMetadataAndPath();
-    void folderDiscoveryAdmitsWave64();
-    void contextMenusTargetSelectionsAndLists();
-    void contextTransfersCreateTabs();
-    void tabBarDropsTransferLocalRows();
-    void filesDroppedOnTheTabBarMakeATab();
-    void theSourcesKeepTheirWidth();
-    void sidePanelsShareTheirRoomAsTabs();
-    void sidePanelsOpenBeforeAreTabsAgain();
-    void trackViewLayoutMatchesGroupedQueueAndPersists();
-    void listViewsShowExpressionsGroupAndSort();
-    void listViewEditorChecksAndSavesACopy();
-    void builtinColumnsShowTheirExpressions();
-    void listViewsReadListeningHistory();
-    void groupsFoldToTheirHeaders();
-    void rowsHaveMoreLines();
-    void listLayoutsFromBeforeViewsMigrate();
-    void localReorderPreservesVisibleRowGeometry();
-    void localListUndoRestoresOccurrencesAndFreshMetadata();
-    void localListHistoryBranchesAndBounds();
-    void crossTabMoveUndoIsOneTransaction();
-    void localListUndoActionsRespectAuthorityAndTextEditing();
-    void deleteInUpNextTakesItsTrackNotTheLists();
-    void settingsLeftOffReadAsOff();
-    void colorSchemesAreChosenAndApplied();
-    void interfaceSizeIsChosenForTheNextStart();
-    void headerPillsFollowAPaletteChangedLater();
-    void listTabCloseButtonsClose();
-    void mprisOrderAndCoverFollowTheWorkspace();
-    void longJobsKeepTheComputerAwake();
-    void lyricsPanelFollowsThePosition();
-    void lyricsPanelLooksAreChosenAndAdjusted();
-    void windowListTabsCloseFromTheirButtons();
-    void localListOrderingActionsRespectAuthorityAndPersist();
-    void portablePlaylistImportsPreserveAuthorityAndPersist();
-    void trackListFindActionsFollowActiveTab();
-    void noncontiguousLocalReorderPreservesOccurrences();
-    void persistsPinnedDuplicatedAndDirtyTabs();
-    void theWindowKeepsItsTabsNotTheLists();
-    void richMetadataValuesAndIdentitiesSurviveListRestart();
-    void metadataPropertiesFileSelectionDrivesIndividualAndBulkEdits();
-    void metadataFieldReviewPreservesDraftAndSelectionScope();
-    void metadataPropertiesArtworkSectionShowsProvenanceAndCapabilities();
-    void artworkOfAWholeReleaseIsOneRowAndSkipsFilesWithoutCovers();
-    void metadataPropertiesArtworkRemoveReviewsAppliesAndRefreshes_data();
-    void metadataPropertiesArtworkRemoveReviewsAppliesAndRefreshes();
-    void cueSheetsExpandIntoPersistentSegmentRows();
-    void containerChaptersExpandIntoPersistentSegmentRows();
-    void codecNativeSubsongsExpandAndPersistDecoderSelections();
-    void autoAdvancesOncePerFinishedTrack();
-    void localPlaybackModesPersistAndStayLocal();
-    void localPlaybackModesAdvance_data();
-    void localPlaybackModesAdvance();
-    void localTrackRatingsPersistByContentIdentity();
 
-  private:
+  protected:
     // A home of this process's own: test-mode data lives under ~/.qttest,
     // which every run shares otherwise -- and each run's first act is to
     // clear it, so two runs at once (two checkouts, two sessions) broke each
@@ -583,6 +358,8 @@ class BenchMainWindowTest final : public QObject {
     QTemporaryDir settings_directory_;
     testing::TestEngine engine_;
 };
+
+} // namespace window_test
 
 namespace window_test {
 

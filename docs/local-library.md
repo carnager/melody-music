@@ -231,7 +231,7 @@ different filesystem; they cannot distinguish same-device bind-mount substitutio
 The `local-library` tests use real FLAC files to check indexing, query results,
 raw filenames, refresh, cancellation, offline folders, deletion cleanup, and
 metadata/path updates. They also cover album counts, cached search tabs,
-artwork, and navigation through paged results. The related `bench-main-window`
+artwork, and navigation through paged results. The related window tests (`window-*`)
 and `queue-table-view` suites check the workspace behavior.
 
 Older test runs and sanitizer results are recorded in ADRs 0115–0118 and 0126.
