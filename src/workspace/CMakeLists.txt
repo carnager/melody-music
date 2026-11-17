@@ -216,3 +216,5 @@ if(APPLE)
     )
 endif()
 target_compile_features(trackknife_workspace PUBLIC cxx_std_23)
+
+melody_precompile_ui_headers(trackknife_workspace)

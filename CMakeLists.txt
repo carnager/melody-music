@@ -79,6 +79,14 @@ if(MELODY_COMPILER_CACHE STREQUAL "AUTO" AND NOT DEFINED CMAKE_CXX_COMPILER_LAUN
     endif()
 endif()
 
+# Qt, nlohmann::json and the standard library, which every UI file parses
+# and no edit to Melody changes, precompiled once per target.
+function(melody_precompile_ui_headers target)
+    if(NOT MELODY_ENABLE_CLANG_TIDY)
+        target_precompile_headers(${target} PRIVATE "${PROJECT_SOURCE_DIR}/cmake/pch/ui.hpp")
+    endif()
+endfunction()
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)

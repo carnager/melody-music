@@ -176,3 +176,5 @@ install(DIRECTORY ${PROJECT_SOURCE_DIR}/plugins/web-search
 # ADR-0287: the vinyl bird, for the desktop entry and the window.
 install(FILES ${PROJECT_SOURCE_DIR}/packaging/icons/melody.svg
         DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps COMPONENT app)
+
+melody_precompile_ui_headers(trackknife_bench_ui)
