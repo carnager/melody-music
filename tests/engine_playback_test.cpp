@@ -40,6 +40,7 @@
 #include <QLabel>
 #include <QMenu>
 #include <QPushButton>
+#include <QScopeGuard>
 #include <QSettings>
 #include <QSignalSpy>
 #include <QSlider>
@@ -1142,9 +1143,9 @@ void EnginePlaybackTest::aNewWindowAttachesToWhatTheEngineIsPlaying() {
             (*server)->stop();
             QSKIP("no audio output here, so the engine is not playing anything to attach to");
         }
-        // The list has to be on disk for the next window to restore it, which
-        // is debounced.
-        QTest::qWait(1'500);
+        // The list has to be on disk for the next window to restore it:
+        // closing writes it at once.
+        QVERIFY(window.close());
     }
 
     // The window is gone; the engine is still playing.
@@ -1429,6 +1430,9 @@ void EnginePlaybackTest::aListContinuesWithADynamicPlaylist() {
 
 // ADR-0260: decided once, on connecting, from engine.info.
 void EnginePlaybackTest::anEngineOfAnotherProtocolOrAnOlderLevelIsNotUsed() {
+    // Tried again often, so the wait below sees several tries.
+    qputenv("MELODY_ENGINE_RETRY_MS", "200");
+    const auto retry = qScopeGuard([] { qunsetenv("MELODY_ENGINE_RETRY_MS"); });
     for (const auto& [protocol, level] :
          {std::pair{2, 0}, std::pair{1, protocol::protocol_level - 1}}) {
         QTemporaryDir directory;
@@ -1462,7 +1466,7 @@ void EnginePlaybackTest::anEngineOfAnotherProtocolOrAnOlderLevelIsNotUsed() {
             QTest::qWait(300);
             const auto once = said.count();
             QVERIFY(once <= 1);
-            QTest::qWait(1'500);
+            QTest::qWait(1'000);
             QVERIFY(!playback->active());
             QCOMPARE(said.count(), once);
         } else {

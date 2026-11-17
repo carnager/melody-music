@@ -1501,6 +1501,8 @@ void BenchMainWindowTest::quittingStopsTheEngineForGood() {
         qputenv("MELODY_ENGINE", program);
     });
 
+    qputenv("MELODY_ENGINE_RETRY_MS", "200");
+    const auto retry = qScopeGuard([] { qunsetenv("MELODY_ENGINE_RETRY_MS"); });
     BenchMainWindow window;
     window.show();
     QTRY_VERIFY(window.lists_restored_);
@@ -1513,9 +1515,9 @@ void BenchMainWindowTest::quittingStopsTheEngineForGood() {
 
     window.quitAndStopEngine();
     QVERIFY(lockHolders(engine->state / "engine.lock").empty());
-    // The loop turns on past the reconnect timer's next tick, as it does
-    // while the process ends.
-    QTest::qWait(5'000);
+    // The loop turns on past several of the reconnect timer's ticks, as it
+    // does while the process ends.
+    QTest::qWait(1'000);
     QVERIFY2(lockHolders(engine->state / "engine.lock").empty(),
              "quitting must not leave anything that starts the engine again");
 }

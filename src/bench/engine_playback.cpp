@@ -39,8 +39,11 @@ EnginePlayback::EnginePlayback(const CatalogueSource& catalogues, QObject* paren
     // An engine is a separate process with its own lifetime: it can be
     // restarted, or started after the window. Without this the only way back
     // is to restart the window.
+    // $MELODY_ENGINE_RETRY_MS, for tests, else three seconds.
     reconnect_timer_ = new QTimer(this);
-    reconnect_timer_->setInterval(3'000);
+    bool number = false;
+    const auto retry = qEnvironmentVariableIntValue("MELODY_ENGINE_RETRY_MS", &number);
+    reconnect_timer_->setInterval(number && retry > 0 ? retry : 3'000);
     connect(reconnect_timer_, &QTimer::timeout, this, [this] { maintain(); });
     reconnect_timer_->start();
 
