@@ -64,14 +64,6 @@ constexpr std::string_view store_key = "list-continuation.v1";
                             .shuffle = rule.shuffle};
 }
 
-// A copy kept before ADR-0349 (list-continuation.v1), as a rule.
-[[nodiscard]] DynamicRule copied_rule(const Json& value) {
-    auto rule = dynamic_rule_from_json(value);
-    rule.id = value.value("rule", std::string{});
-    rule.source = "rules";
-    return rule;
-}
-
 } // namespace
 
 ListContinuation::ListContinuation(Workspace& workspace, const Catalogue& catalogue,
@@ -94,28 +86,10 @@ void ListContinuation::load() {
     if (lists == document.end() || !lists->is_object()) {
         return;
     }
-    std::vector<DynamicRule> copies;
     for (const auto& [list, value] : lists->items()) {
-        if (!core::StableId::parse(list)) {
-            continue;
-        }
-        if (value.is_string()) {
+        if (core::StableId::parse(list) && value.is_string()) {
             lists_.emplace(list, value.get<std::string>());
-        } else if (value.is_object()) {
-            // ADR-0349: a copy kept by an engine before rules were its own
-            // becomes one of its rules, unless it has that rule already.
-            auto rule = copied_rule(value);
-            if (rule.id.empty()) {
-                continue;
-            }
-            lists_.emplace(list, rule.id);
-            copies.push_back(std::move(rule));
         }
-    }
-    if (!copies.empty()) {
-        static_cast<void>(dynamic_rules_->adopt(std::move(copies)));
-        std::erase_if(lists_, [this](const auto& entry) { return !rule_of(entry.second); });
-        store_locked();
     }
 }
 

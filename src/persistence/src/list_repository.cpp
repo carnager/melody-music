@@ -4390,15 +4390,12 @@ engine_list_revision(sqlite3* database, const core::StableId& id) {
 }
 
 [[nodiscard]] core::Result<std::vector<EngineListSummary>>
-select_engine_list_summaries(sqlite3* database, const std::optional<core::StableId>& only,
-                             const bool retired = false) {
-    // ADR-0286: the lists, or those set aside -- the same columns in tables
-    // of their own.
-    const std::string lists = retired ? "retired_engine_lists" : "engine_lists";
-    const std::string items = retired ? "retired_engine_list_items" : "engine_list_items";
-    const auto sql = "SELECT id, name, revision, modified_ms, (SELECT count(*) FROM " + items +
-                     " i WHERE i.list_id=p.id), kind, draft_of, draft_base FROM " + lists +
-                     (only ? " p WHERE id=?1" : " p ORDER BY name, id");
+select_engine_list_summaries(sqlite3* database, const std::optional<core::StableId>& only) {
+    const std::string sql =
+        std::string{"SELECT id, name, revision, modified_ms, (SELECT count(*) FROM "
+                    "engine_list_items i WHERE i.list_id=p.id), kind, draft_of, draft_base "
+                    "FROM engine_lists"} +
+        (only ? " p WHERE id=?1" : " p ORDER BY name, id");
     auto statement = prepare(database, sql.c_str());
     if (!statement || (only && !bind_text(statement->get(), 1, only->to_string()))) {
         return std::unexpected(database_error(database, "Could not list lists"));
@@ -4524,16 +4521,14 @@ select_engine_list_summaries(sqlite3* database, const std::optional<core::Stable
 // A list's entries in order; with `positions`, where each is stored too.
 [[nodiscard]] core::Result<std::vector<EngineListItem>>
 select_engine_list_items(sqlite3* database, const core::StableId& id,
-                         std::vector<std::int64_t>* positions = nullptr,
-                         const bool retired = false) {
+                         std::vector<std::int64_t>* positions = nullptr) {
     std::vector<EngineListItem> items;
     const auto sql = std::string{"SELECT entry_id, raw_path, logical_reference, "
                                  "segment_start_sample, segment_end_sample, audio_stream_index, "
                                  "subsong_index, duration_ms, title, artist, album, album_artist, "
                                  "date, track_gain_db, track_peak, album_gain_db, album_peak, "
-                                 "position FROM "} +
-                     (retired ? "retired_engine_list_items" : "engine_list_items") +
-                     " WHERE list_id=?1 ORDER BY position";
+                                 "position FROM engine_list_items "
+                                 "WHERE list_id=?1 ORDER BY position"};
     auto statement = prepare(database, sql.c_str());
     if (!statement || !bind_text(statement->get(), 1, id.to_string())) {
         return std::unexpected(database_error(database, "Could not read a list"));
@@ -4632,56 +4627,6 @@ ListRepository::load_engine_list(const core::StableId& id) const {
     }
     list.items = std::move(*items);
     return std::optional{std::move(list)};
-}
-
-core::Result<std::vector<EngineListSummary>> ListRepository::load_retired_engine_lists() const {
-    return select_engine_list_summaries(implementation_->database, std::nullopt, true);
-}
-
-core::Result<std::optional<EngineList>>
-ListRepository::load_retired_engine_list(const core::StableId& id) const {
-    auto* database = implementation_->database;
-    auto summaries = select_engine_list_summaries(database, id, true);
-    if (!summaries) {
-        return std::unexpected(std::move(summaries.error()));
-    }
-    if (summaries->empty()) {
-        return std::optional<EngineList>{};
-    }
-    EngineList list{.summary = std::move(summaries->front()), .items = {}};
-    auto items = select_engine_list_items(database, id, nullptr, true);
-    if (!items) {
-        return std::unexpected(std::move(items.error()));
-    }
-    list.items = std::move(*items);
-    return std::optional{std::move(list)};
-}
-
-core::Result<std::size_t>
-ListRepository::drop_retired_engine_lists(const std::vector<core::StableId>& ids) {
-    auto* database = implementation_->database;
-    if (auto begun = execute(database, "BEGIN IMMEDIATE"); !begun) {
-        return std::unexpected(std::move(begun.error()));
-    }
-    std::size_t dropped = 0U;
-    for (const auto& id : ids) {
-        for (const auto* sql : {"DELETE FROM retired_engine_list_items WHERE list_id=?1",
-                                "DELETE FROM retired_engine_lists WHERE id=?1"}) {
-            auto statement = prepare(database, sql);
-            if (!statement || !bind_text(statement->get(), 1, id.to_string()) ||
-                sqlite3_step(statement->get()) != SQLITE_DONE) {
-                auto error = database_error(database, "Could not drop a retired list");
-                static_cast<void>(execute(database, "ROLLBACK"));
-                return std::unexpected(std::move(error));
-            }
-        }
-        dropped += static_cast<std::size_t>(sqlite3_changes(database));
-    }
-    if (auto committed = execute(database, "COMMIT"); !committed) {
-        static_cast<void>(execute(database, "ROLLBACK"));
-        return std::unexpected(std::move(committed.error()));
-    }
-    return dropped;
 }
 
 core::Result<std::vector<std::optional<std::pair<std::string, core::LocalSourceRevision>>>>

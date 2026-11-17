@@ -234,8 +234,6 @@ class BenchMainWindow final : public QMainWindow, public WorkspaceView {
     void albumsAdded(const std::vector<AlbumArrival>& albums) override;
     void enginesSynced() override;
     void engineListsChanged() override { fetchEngineLists(); }
-    void offerRetiredLists(const QString& engine, const QStringList& names,
-                           std::function<void(RetiredChoice)> answer) override;
     void engineRatingsChanged(const EngineKey& engine,
                               const QHash<QString, unsigned>& ratings) override;
     void engineInterruptionsChanged(bool reported_now) override;

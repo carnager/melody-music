@@ -1462,25 +1462,6 @@ void BenchMainWindowTest::dynamicPlaylistCatalogAndEditor() {
     QVERIFY(!saveDynamicPlaylists(local.profile, {ungroupable}));
     QVERIFY(loadDynamicPlaylists(QStringLiteral("mpd/other"))->isEmpty());
     QVERIFY(!saveDynamicPlaylists(QStringLiteral("mpd/other"), {local}));
-    // Definitions the MPD backend saved under its own profile move over once.
-    DynamicPlaylistDefinition old{.id = QStringLiteral("grunge"),
-                                  .name = QStringLiteral("Last.fm: Grunge"),
-                                  .profile = QStringLiteral("mpd/3cd2aea9"),
-                                  .source = QStringLiteral("tag"),
-                                  .tag = QStringLiteral("grunge")};
-    QSettings{}.remove(QStringLiteral("dynamic-playlists/adopted-v1"));
-    QVERIFY(saveDynamicPlaylists(old.profile, {old}));
-    adoptDynamicPlaylists(local.profile);
-    loaded = loadDynamicPlaylists(local.profile);
-    QVERIFY(loaded);
-    QCOMPARE(loaded->size(), 2);
-    QCOMPARE(loaded->back().id, old.id);
-    QCOMPARE(loaded->back().profile, local.profile);
-    QVERIFY(loadDynamicPlaylists(old.profile)->isEmpty());
-    QVERIFY(saveDynamicPlaylists(old.profile, {old}));
-    adoptDynamicPlaylists(local.profile);
-    QCOMPARE(loadDynamicPlaylists(old.profile)->size(), 1);
-    QSettings{}.remove(QStringLiteral("dynamic-playlists/v1/mpd/3cd2aea9"));
     QVERIFY(saveDynamicPlaylists(local.profile, {local}));
     QSettings{}.setValue(QStringLiteral("dynamic-playlists/v1/mpd/future"),
                          QByteArray{"{\"version\":99,\"definitions\":[]}"});

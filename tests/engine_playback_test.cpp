@@ -23,11 +23,13 @@
 #include "trackknife/engine/catalogue.hpp"
 #include "trackknife/engine/dynamic_rules.hpp"
 #include "trackknife/engine/list_continuation.hpp"
+#include "trackknife/engine/list_methods.hpp"
 #include "trackknife/engine/playback_methods.hpp"
 #include "trackknife/engine/player.hpp"
 #include "trackknife/engine/server.hpp"
 #include "trackknife/engine/workspace.hpp"
 #include "trackknife/protocol/message.hpp"
+#include "trackknife/protocol/version.hpp"
 #include "uicommon/track_row_roles.hpp"
 
 #include <QAction>
@@ -99,6 +101,7 @@ class RecordingEngine final {
   public:
     explicit RecordingEngine(engine::Player& player) {
         engine::register_playback_methods(inner_, player);
+        engine::register_queue_edit_methods(inner_, player);
         // Asked of the dispatcher rather than listed here. A hand-written list
         // silently drops a method added later, which reads as the feature not
         // working -- twice while this was being built.
@@ -123,6 +126,13 @@ class RecordingEngine final {
                 return core::Result<protocol::Json>{std::move(answer)};
             });
         }
+        // An engine of this build's protocol and level, as every engine says.
+        outer_.on("engine.info", [](const protocol::Json&) {
+            return core::Result<protocol::Json>{
+                protocol::Json{{"name", "recorder"},
+                               {"protocol", protocol::protocol_version},
+                               {"level", protocol::protocol_level}}};
+        });
     }
 
     [[nodiscard]] protocol::Dispatcher& dispatcher() noexcept { return outer_; }
@@ -177,7 +187,7 @@ class EnginePlaybackTest final : public QObject {
     void withoutAnEngineNothingChanges();
     void anOlderStateIsNotTakenOverANewerOne();
     void aListContinuesWithADynamicPlaylist();
-    void anEngineOfAnotherProtocolIsNotUsedAndAnOlderOneIsSaidToBe();
+    void anEngineOfAnotherProtocolOrAnOlderLevelIsNotUsed();
 
   private:
     QTemporaryDir settings_directory_;
@@ -1418,18 +1428,19 @@ void EnginePlaybackTest::aListContinuesWithADynamicPlaylist() {
 }
 
 // ADR-0260: decided once, on connecting, from engine.info.
-void EnginePlaybackTest::anEngineOfAnotherProtocolIsNotUsedAndAnOlderOneIsSaidToBe() {
-    for (const int protocol : {2, 1}) {
+void EnginePlaybackTest::anEngineOfAnotherProtocolOrAnOlderLevelIsNotUsed() {
+    for (const auto& [protocol, level] :
+         {std::pair{2, 0}, std::pair{1, protocol::protocol_level - 1}}) {
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
         const std::filesystem::path socket{
             (directory.path() + QStringLiteral("/engine.sock")).toStdString()};
         auto player = engine::Player::create_without_audio();
         RecordingEngine recorder{*player};
-        // Protocol 2, or protocol 1 from before levels were said.
-        recorder.dispatcher().on("engine.info", [protocol](const protocol::Json&) {
+        // Protocol 2, or protocol 1 at a level before this build's.
+        recorder.dispatcher().on("engine.info", [protocol, level](const protocol::Json&) {
             return core::Result<protocol::Json>{
-                protocol::Json{{"name", "elsewhere"}, {"protocol", protocol}}};
+                protocol::Json{{"name", "elsewhere"}, {"protocol", protocol}, {"level", level}}};
         });
         auto server = engine::Server::listen(socket, recorder.dispatcher());
         QVERIFY(server.has_value());
@@ -1455,9 +1466,9 @@ void EnginePlaybackTest::anEngineOfAnotherProtocolIsNotUsedAndAnOlderOneIsSaidTo
             QVERIFY(!playback->active());
             QCOMPARE(said.count(), once);
         } else {
-            QTRY_VERIFY(playback->active());
             QTRY_VERIFY(window.statusBar()->currentMessage().contains(
-                QStringLiteral("elsewhere's melodyd is older than this Melody")));
+                QStringLiteral("elsewhere's melodyd is older than this Melody. Update it.")));
+            QVERIFY(!playback->active());
         }
         (*server)->stop();
     }

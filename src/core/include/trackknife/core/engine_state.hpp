@@ -29,23 +29,7 @@ namespace trackknife::core {
 // The presets' database in it.
 [[nodiscard]] std::filesystem::path presets_database_path();
 
-// Where it was kept before, under Trackknife's name.
-[[nodiscard]] std::filesystem::path legacy_engine_state_directory();
-
-// The folder in use: the default, unless it holds no database yet and the
-// old one does -- an engine not yet started since the rename, which moves
-// it then. A window opening the database follows the engine this way.
+// The folder in use: the default.
 [[nodiscard]] std::filesystem::path engine_state_directory();
-
-// Takes the folder's lock, as an engine running there holds it, for as
-// long as the process lives. False when another holds it.
-[[nodiscard]] bool hold_engine_lock(const std::filesystem::path& state_directory);
-
-// Moves an engine's own files from the old folder to `to`, once: when `to`
-// holds no database and the old folder does, and no engine holds the old
-// folder's lock. Only what an engine keeps is moved -- a window's tabs and
-// backups in the same folder stay for the window. Answers how many entries
-// were moved; nothing moved on an error, which says why.
-[[nodiscard]] Result<std::size_t> adopt_legacy_engine_state(const std::filesystem::path& to);
 
 } // namespace trackknife::core

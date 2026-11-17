@@ -141,11 +141,8 @@ void BenchMainWindow::refreshLyrics(const EnginePlayback::State& state) {
                         if (!answer) {
                             askLyricsProviders(
                                 entry, state,
-                                answer.error().code == core::ErrorCode::unsupported
-                                    ? QStringLiteral("The engine playing this does not read "
-                                                     "lyrics. Update melodyd there.")
-                                    : QStringLiteral("Lyrics could not be read: %1")
-                                          .arg(QString::fromStdString(answer.error().message)));
+                                QStringLiteral("Lyrics could not be read: %1")
+                                    .arg(QString::fromStdString(answer.error().message)));
                         } else if (!*answer) {
                             askLyricsProviders(entry, state, QStringLiteral("No lyrics"));
                         } else {

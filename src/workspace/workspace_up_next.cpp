@@ -309,14 +309,9 @@ void Workspace::restoreUpNext() {
                                    !playback_.requests.active();
             if (untouched) {
                 // Saved before the engine was: whose the tab it returns to is.
-                // An older release said only whether it was the remote's.
                 if (state.contains(QStringLiteral("engine"))) {
                     up_next_engine_ =
                         EngineKey::fromText(state.value(QStringLiteral("engine")).toString());
-                } else if (state.contains(QStringLiteral("remote"))) {
-                    up_next_engine_ = state.value(QStringLiteral("remote")).toBool()
-                                          ? EngineKey::remote()
-                                          : EngineKey::local();
                 } else if (const auto* returns_to =
                                tabForDocument(state.value(QStringLiteral("document")).toString())) {
                     up_next_engine_ = EngineKey::of(returns_to->document);

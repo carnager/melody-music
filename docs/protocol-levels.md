@@ -3,7 +3,10 @@
 ADR-0260: `engine.info` answers `protocol` and `level`. The protocol is 1
 for all of 1.x; the level goes up with every release that adds to it, and
 each level's additions are listed here, newest first. A client compares the
-engine's level with its own and says once when the engine is older.
+engine's level with its own: an engine at its level or newer is used, an
+older one is not -- the client says once that it is older and to update it,
+as it does for another protocol. Every user runs the latest of both, so no
+client keeps a path for what an older engine lacked.
 
 ## Protocol 1
 

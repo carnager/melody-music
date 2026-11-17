@@ -19,10 +19,9 @@ PeerVersion peer_version(const Json& engine_info) {
 }
 
 Compatibility compatibility(const PeerVersion engine) {
-    if (engine.protocol != protocol_version) {
-        return Compatibility::incompatible;
-    }
-    return engine.level < protocol_level ? Compatibility::older_engine : Compatibility::full;
+    return engine.protocol == protocol_version && engine.level >= protocol_level
+               ? Compatibility::full
+               : Compatibility::incompatible;
 }
 
 std::string compatibility_message(const PeerVersion engine, const std::string_view engine_name,
@@ -31,10 +30,10 @@ std::string compatibility_message(const PeerVersion engine, const std::string_vi
     switch (compatibility(engine)) {
     case Compatibility::full:
         return {};
-    case Compatibility::older_engine:
-        return name + "'s melodyd is older than this " + std::string{client} +
-               "; some things will not work until it is updated.";
     case Compatibility::incompatible: {
+        if (engine.protocol == protocol_version) {
+            return name + "'s melodyd is older than this " + std::string{client} + ". Update it.";
+        }
         const bool engine_newer = engine.protocol > protocol_version;
         return name + " speaks protocol " + std::to_string(engine.protocol) + "; this " +
                std::string{client} + " speaks protocol " + std::to_string(protocol_version) +

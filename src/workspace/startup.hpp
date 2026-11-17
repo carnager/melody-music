@@ -6,12 +6,6 @@
 
 namespace trackknife::bench {
 
-// Before anything opens the settings or the workspace database, as either
-// window starts.
-//
-// ADR-0287: the application is Melody. Its settings, its data and its cache
-// move from Trackknife's names, once.
-void adoptTrackknifeNames();
 // A window in Qt's test mode -- every test, a --screenshot run -- keeps its
 // engine's state in its own test folder when none is named: the engine's
 // folder is found from the environment, not from Qt, and a test that forgot

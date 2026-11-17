@@ -49,12 +49,11 @@ int main() try {
             "a newer level serves an older client fully");
     const protocol::PeerVersion older{.protocol = protocol::protocol_version,
                                       .level = protocol::protocol_level - 1};
-    require(protocol::compatibility(older) == Compatibility::older_engine,
-            "an older level is used, without what it lacks");
+    require(protocol::compatibility(older) == Compatibility::incompatible,
+            "an older level is not used");
     require(protocol::compatibility_message(older, "gemenon", "Melody") ==
-                "gemenon's melodyd is older than this Melody; some things will not work "
-                "until it is updated.",
-            "and said so");
+                "gemenon's melodyd is older than this Melody. Update it.",
+            "and the engine is named to update");
     const protocol::PeerVersion next{.protocol = protocol::protocol_version + 1, .level = 0};
     require(protocol::compatibility(next) == Compatibility::incompatible,
             "another protocol is not used");

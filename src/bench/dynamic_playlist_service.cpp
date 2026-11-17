@@ -29,40 +29,6 @@ bool validSelection(const DynamicPlaylistDefinition& d) {
 }
 } // namespace
 
-void adoptDynamicPlaylists(const QString& profile) {
-    const auto done = QStringLiteral("dynamic-playlists/adopted-v1");
-    QSettings settings;
-    if (settings.value(done).toBool())
-        return;
-    settings.beginGroup(QStringLiteral("dynamic-playlists/v1"));
-    const auto profiles = settings.allKeys();
-    settings.endGroup();
-    auto kept = loadDynamicPlaylists(profile);
-    if (!kept)
-        return;
-    QStringList moved;
-    for (const auto& other : profiles) {
-        if (other == profile)
-            continue;
-        const auto found = loadDynamicPlaylists(other);
-        if (!found)
-            continue;
-        for (auto definition : *found) {
-            if (std::ranges::any_of(
-                    *kept, [&definition](const auto& known) { return known.id == definition.id; }))
-                continue;
-            definition.profile = profile;
-            kept->push_back(std::move(definition));
-        }
-        moved.push_back(other);
-    }
-    if (!moved.isEmpty() && !saveDynamicPlaylists(profile, *kept))
-        return;
-    for (const auto& other : moved)
-        settings.remove(key(other));
-    settings.setValue(done, true);
-}
-
 core::Result<QVector<DynamicPlaylistDefinition>> loadDynamicPlaylists(const QString& profile) {
     QVector<DynamicPlaylistDefinition> result;
     const auto bytes = QSettings{}.value(key(profile)).toByteArray();

@@ -218,48 +218,6 @@ int main(const int argc, char** argv) {
         require(later.all().empty(), "and stays ended");
     }
 
-    // ADR-0349: an engine's copies from before rules were its own are taken
-    // over once -- as rules, unless it has the rule already.
-    {
-        const auto copied = core::StableId::random().to_string();
-        const auto shipped = core::StableId::random().to_string();
-        const protocol::Json old{{"version", 1},
-                                 {"lists",
-                                  {{copied,
-                                    {{"rule", "copied-rule"},
-                                     {"name", "Copied"},
-                                     {"query", "codec PRESENT"},
-                                     {"group_by", ""},
-                                     {"groups", 0},
-                                     {"per_group", 0},
-                                     {"limit", 100},
-                                     {"shuffle", false}}},
-                                   {shipped,
-                                    {{"rule", "shipped:random-album"},
-                                     {"name", "Random album"},
-                                     {"query", "ALL"},
-                                     {"group_by", "%album%"},
-                                     {"groups", 1},
-                                     {"per_group", 0},
-                                     {"limit", 500},
-                                     {"shuffle", false}}}}}};
-        require(workspace->save_engine_state("list-continuation.v1", old.dump(), 1).has_value(),
-                "an old store");
-        engine::DynamicRules taken_rules{*workspace, {}};
-        engine::ListContinuation taken{*workspace, catalogue, taken_rules, {}};
-        const auto lists = taken.all();
-        require(lists.size() == 2U, "both lists still continue");
-        require(lists.at(copied).name == "Copied", "with the copied rule");
-        require(lists.at(shipped).rule_id == "shipped:random-album", "and the shipped one");
-        require(taken_rules.find("copied-rule").has_value(), "the copy is now a rule");
-        require(taken_rules.all().size() == engine::shipped_dynamic_rules().size() + 2U,
-                "beside the saved Last.fm rule, and only once");
-        require(taken.set(copied, std::nullopt).has_value() &&
-                    taken.set(shipped, std::nullopt).has_value(),
-                "ended");
-        require(taken_rules.remove("copied-rule").has_value(), "and the copy removed");
-    }
-
     // ADR-0258: a grouped rule appends its selection -- here the one group a
     // constant makes of the five files, whole, less what is queued; or one
     // track of it.
