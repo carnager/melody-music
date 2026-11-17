@@ -4,6 +4,7 @@
 #include "bench/bench_main_window.hpp"
 #include "bench/desktop_media_session.hpp"
 #include "bench/desktop_notifier.hpp"
+#include "bench/lyrics_panel.hpp"
 #include <QDockWidget>
 
 #include "bench/bench_main_window_helpers.hpp"
@@ -179,6 +180,10 @@ void BenchMainWindow::refreshHeaderCover(const QString& entry) {
         cover = coverFor(*row, playing != nullptr ? playing->key : EngineKey::local());
     }
     header_cover_wanted_ = key;
+    if (lyrics_panel_ != nullptr) {
+        // ADR-0353: the Sleeve look draws the same cover behind the words.
+        lyrics_panel_->setCover(cover);
+    }
     if (cover.isNull()) {
         key.clear();
     }

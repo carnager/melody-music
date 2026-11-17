@@ -39,6 +39,10 @@ qt_add_library(
     bench_lastfm.cpp
     bench_up_next.cpp
     bench_lyrics.cpp
+    lyrics_look.cpp
+    lyrics_look.hpp
+    lyrics_look_dialog.cpp
+    lyrics_look_dialog.hpp
     lyrics_panel.cpp
     lyrics_panel.hpp
     up_next_delegate.cpp
