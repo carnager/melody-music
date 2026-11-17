@@ -180,46 +180,6 @@ void ListPersistenceService::initialize(WorkspaceCallback callback, const bool l
         });
 }
 
-void ListPersistenceService::saveWorkspace(std::vector<persistence::ListDocumentWrite> lists,
-                                           std::vector<persistence::TrackViewPreset> presets,
-                                           CompletionCallback callback) {
-    const QPointer self{this};
-    invokeQueued(worker_, [self, state = state_, lists = std::move(lists),
-                           presets = std::move(presets), callback = std::move(callback)]() mutable {
-        QString error = state->initialization_error;
-        if (error.isEmpty() && state->workspace) {
-            if (auto stored = state->workspace->save_workspace(lists); !stored) {
-                error = errorText(stored.error());
-            } else if (auto stored_presets = state->workspace->replace_view_presets(presets);
-                       !stored_presets) {
-                error = errorText(stored_presets.error());
-            }
-        }
-        if (!callback || !self) {
-            return;
-        }
-        invokeQueued(self, [callback = std::move(callback), error]() mutable { callback(error); });
-    });
-}
-
-void ListPersistenceService::saveProfiles(std::vector<persistence::ConnectionProfile> profiles,
-                                          CompletionCallback callback) {
-    const QPointer self{this};
-    invokeQueued(worker_, [self, state = state_, profiles = std::move(profiles),
-                           callback = std::move(callback)]() mutable {
-        QString error = state->initialization_error;
-        if (error.isEmpty() && state->workspace) {
-            if (auto stored = state->workspace->replace_profiles(profiles); !stored) {
-                error = errorText(stored.error());
-            }
-        }
-        if (!callback || !self) {
-            return;
-        }
-        invokeQueued(self, [callback = std::move(callback), error]() mutable { callback(error); });
-    });
-}
-
 void ListPersistenceService::backupDatabase(std::filesystem::path destination,
                                             CompletionCallback callback) {
     const QPointer self{this};
@@ -239,42 +199,6 @@ void ListPersistenceService::backupDatabase(std::filesystem::path destination,
             return;
         }
         invokeQueued(self, [callback = std::move(callback), error]() mutable { callback(error); });
-    });
-}
-
-void ListPersistenceService::recordLocalListen(persistence::ListItem source,
-                                               core::StableId occurrence_id,
-                                               std::int64_t played_at_ms,
-                                               CompletionCallback callback) {
-    if (pending_listens_ >= 16) {
-        if (callback)
-            callback(QStringLiteral("Listening history is busy; this listen was not saved."));
-        return;
-    }
-    ++pending_listens_;
-    const QPointer self{this};
-    invokeQueued(worker_, [self, state = state_, source = std::move(source), occurrence_id,
-                           played_at_ms, callback = std::move(callback)]() mutable {
-        QString error = state->initialization_error;
-        if (error.isEmpty() && !state->workspace)
-            error = QStringLiteral("Listening history persistence is not initialized");
-        else if (error.isEmpty()) {
-            auto stored =
-                state->workspace->record_local_listen(source, occurrence_id, played_at_ms);
-            if (!stored)
-                error = errorText(stored.error());
-        }
-        if (!self)
-            return;
-        invokeQueued(self, [self, callback = std::move(callback), error]() mutable {
-            if (!self)
-                return;
-            --self->pending_listens_;
-            if (error.isEmpty())
-                emit self->listeningHistoryChanged();
-            if (callback)
-                callback(error);
-        });
     });
 }
 
@@ -545,116 +469,6 @@ void ListPersistenceService::saveUiState(QString key, QByteArray value,
             callback(std::move(error));
         });
     });
-}
-
-QString
-ListPersistenceService::saveWorkspaceAndWait(std::vector<persistence::ListDocumentWrite> lists,
-                                             std::vector<persistence::TrackViewPreset> presets) {
-    QString error;
-    invokeBlocking(
-        worker_, [state = state_, lists = std::move(lists), presets = std::move(presets), &error] {
-            error = state->initialization_error;
-            if (!error.isEmpty() || !state->workspace) {
-                return;
-            }
-            if (auto stored = state->workspace->save_workspace(lists); !stored) {
-                error = errorText(stored.error());
-            } else if (auto stored_presets = state->workspace->replace_view_presets(presets);
-                       !stored_presets) {
-                error = errorText(stored_presets.error());
-            }
-        });
-    return error;
-}
-
-core::Result<persistence::LocalMetadataRefreshResult>
-ListPersistenceService::refreshLocalMetadataAndWait(persistence::LocalMetadataRefresh refresh) {
-    if (QThread::currentThread() == thread()) {
-        return std::unexpected(core::Error{
-            .code = core::ErrorCode::invariant,
-            .message = "Metadata refresh cannot block the UI thread",
-            .context = {},
-        });
-    }
-    if (QThread::currentThread() == thread_) {
-        if (!state_->initialization_error.isEmpty() || !state_->workspace) {
-            return std::unexpected(core::Error{
-                .code = core::ErrorCode::database,
-                .message = state_->initialization_error.isEmpty()
-                               ? "List persistence is not initialized"
-                               : state_->initialization_error.toStdString(),
-                .context = {},
-            });
-        }
-        return state_->workspace->refresh_local_metadata(refresh);
-    }
-    std::optional<core::Result<persistence::LocalMetadataRefreshResult>> result;
-    invokeBlocking(worker_, [state = state_, refresh = std::move(refresh), &result] {
-        if (!state->initialization_error.isEmpty() || !state->workspace) {
-            result = std::unexpected(core::Error{
-                .code = core::ErrorCode::database,
-                .message = state->initialization_error.isEmpty()
-                               ? "List persistence is not initialized"
-                               : state->initialization_error.toStdString(),
-                .context = {},
-            });
-            return;
-        }
-        result = state->workspace->refresh_local_metadata(refresh);
-    });
-    if (!result) {
-        return std::unexpected(core::Error{
-            .code = core::ErrorCode::invariant,
-            .message = "Metadata refresh did not return a persistence result",
-            .context = {},
-        });
-    }
-    return std::move(*result);
-}
-
-core::Result<persistence::LocalSourceRelocationResult>
-ListPersistenceService::relocateLocalSourceAndWait(persistence::LocalSourceRelocation relocation) {
-    if (QThread::currentThread() == thread()) {
-        return std::unexpected(core::Error{
-            .code = core::ErrorCode::invariant,
-            .message = "Local-source relocation cannot block the UI thread",
-            .context = {},
-        });
-    }
-    if (QThread::currentThread() == thread_) {
-        if (!state_->initialization_error.isEmpty() || !state_->workspace) {
-            return std::unexpected(core::Error{
-                .code = core::ErrorCode::database,
-                .message = state_->initialization_error.isEmpty()
-                               ? "List persistence is not initialized"
-                               : state_->initialization_error.toStdString(),
-                .context = {},
-            });
-        }
-        return state_->workspace->relocate_local_source(relocation);
-    }
-    std::optional<core::Result<persistence::LocalSourceRelocationResult>> result;
-    invokeBlocking(worker_, [state = state_, relocation = std::move(relocation), &result] {
-        if (!state->initialization_error.isEmpty() || !state->workspace) {
-            result = std::unexpected(core::Error{
-                .code = core::ErrorCode::database,
-                .message = state->initialization_error.isEmpty()
-                               ? "List persistence is not initialized"
-                               : state->initialization_error.toStdString(),
-                .context = {},
-            });
-            return;
-        }
-        result = state->workspace->relocate_local_source(relocation);
-    });
-    if (!result) {
-        return std::unexpected(core::Error{
-            .code = core::ErrorCode::invariant,
-            .message = "Local-source relocation did not return a persistence result",
-            .context = {},
-        });
-    }
-    return std::move(*result);
 }
 
 } // namespace trackknife::ui

@@ -186,7 +186,6 @@ class LocalListModel final : public QAbstractTableModel {
     explicit LocalListModel(QObject* parent = nullptr);
 
     void replaceRows(std::vector<LocalTrackRow> rows, bool remember = false, QString label = {});
-    void appendPaths(std::vector<std::string> raw_paths, int insertion_row = -1);
     void appendRows(std::vector<LocalTrackRow> rows, int insertion_row = -1, bool remember = true);
     // ADR-0153: stores on-demand probed technicals onto every row of the
     // given physical source.
@@ -203,9 +202,6 @@ class LocalListModel final : public QAbstractTableModel {
     // their rows show greyed; the rest are there again.
     void setMissing(const std::vector<std::string>& checked,
                     const std::vector<std::string>& missing);
-    [[nodiscard]] bool isMissing(const std::string& raw_path) const {
-        return missing_.contains(raw_path);
-    }
     void removeRowIndexes(std::vector<int> rows, bool remember = true, QString label = {});
     bool applyPermutation(const std::vector<int>& order, QString label);
     [[nodiscard]] bool canUndo() const noexcept { return history_cursor_ > 0; }

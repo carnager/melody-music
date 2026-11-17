@@ -156,7 +156,7 @@ DynamicPlaylistDialog::DynamicPlaylistDialog(std::vector<Library> libraries, Rul
     view_->setActivateCallback([this](const QModelIndex&) { playCurrent(); });
     connect(view_, &QTableView::doubleClicked, this, [this](const QModelIndex&) { playCurrent(); });
     view_->setModel(session_->results());
-    // Hidden by default; the owning window supplies the authority's history service.
+    // Hidden by default; the window shows them where the library has its history.
     view_->setColumnHidden(ui::track_play_count_column, true);
     view_->setColumnHidden(ui::track_last_played_column, true);
     layout->addWidget(view_, 1);
@@ -212,7 +212,7 @@ void DynamicPlaylistDialog::hideEvent(QHideEvent* event) {
     session_->setShown(false);
 }
 void DynamicPlaylistDialog::playCurrent() {
-    if (session_->authorityValid() && view_->currentIndex().isValid())
+    if (view_->currentIndex().isValid())
         emit playRequested(view_->currentIndex().row());
 }
 void DynamicPlaylistDialog::syncCatalog() {

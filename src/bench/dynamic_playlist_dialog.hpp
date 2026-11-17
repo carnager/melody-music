@@ -37,8 +37,6 @@ class DynamicPlaylistDialog final : public QDialog {
     void followLibrary(const EngineKey& engine) { session_->followLibrary(engine); }
     void libraryChanged() { session_->libraryChanged(); }
     void rulesChanged(const EngineKey& engine) { session_->rulesChanged(engine); }
-    void invalidateAuthority() { session_->invalidateAuthority(); }
-    bool authorityValid() const { return session_->authorityValid(); }
     const DynamicPlaylistService::Tracks& tracks() const { return session_->tracks(); }
     QString playlistName() const { return session_->playlistName(); }
     void playCurrent();

@@ -1020,20 +1020,6 @@ void Workspace::renameList(ListTab& tab, const QString& name) {
     markTabDirty(tab);
 }
 
-bool Workspace::setColumnVisible(ListTab& tab, ui::TrackViewLayout layout, const QString& id,
-                                 const bool visible) {
-    // The last column shown stays.
-    const auto visible_count =
-        std::ranges::count(layout.columns, true, &ui::TrackViewColumnLayout::visible);
-    const auto found = std::ranges::find(layout.columns, id, &ui::TrackViewColumnLayout::id);
-    if (found == layout.columns.end() || (!visible && found->visible && visible_count == 1)) {
-        return false;
-    }
-    found->visible = visible;
-    setTrackViewLayout(tab, std::move(layout));
-    return true;
-}
-
 void Workspace::setTrackViewLayout(ListTab& tab, ui::TrackViewLayout layout) {
     tab.view_layout = std::move(layout);
     tab.view_layout_persistence_protected = false;

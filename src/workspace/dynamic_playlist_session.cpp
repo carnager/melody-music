@@ -370,8 +370,6 @@ void DynamicPlaylistSession::discardResults() {
 }
 
 void DynamicPlaylistSession::refresh() {
-    if (!authority_valid_)
-        return;
     // Definition edits discard explicitly; refresh retains presentation anchors.
     refresh_timer_.stop();
     service_->cancel();
@@ -394,21 +392,12 @@ void DynamicPlaylistSession::stop() {
 }
 
 void DynamicPlaylistSession::libraryChanged() {
-    if (!authority_valid_ || !auto_refresh_ || draft_.source != QStringLiteral("rules") ||
-        draft_.query.isEmpty())
+    if (!auto_refresh_ || draft_.source != QStringLiteral("rules") || draft_.query.isEmpty())
         return;
     if (busy_)
         refresh_pending_ = true;
     else
         refresh_timer_.start();
-}
-
-void DynamicPlaylistSession::invalidateAuthority() {
-    authority_valid_ = false;
-    discardResults();
-    status_ = QStringLiteral(
-        "The server connection changed. Reopen Dynamic playlists for the current library.");
-    emit changed();
 }
 
 void DynamicPlaylistSession::finished(const DynamicPlaylistService::Tracks& tracks,

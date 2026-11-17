@@ -115,14 +115,4 @@ void MetadataFieldReviewBar::refresh() {
     }
 }
 
-void MetadataFieldReviewBar::setFilesToggleVisible(const bool visible) {
-    if (show_files_ != nullptr) {
-        show_files_->setVisible(visible);
-    }
-}
-
-bool MetadataFieldReviewBar::filesToggleChecked() const {
-    return show_files_ == nullptr || show_files_->isChecked();
-}
-
 } // namespace trackknife::bench

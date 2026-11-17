@@ -21,10 +21,6 @@ class TrackMatchSession;
     std::function<void(metadata::MetadataProposalSet)> accepted, std::function<void()> back,
     QWidget* parent);
 
-// The same, over a session someone else keeps -- the Identify window's.
-[[nodiscard]] QWidget* createMusicBrainzTrackMatchView(TrackMatchSession* session,
-                                                       std::function<void()> back, QWidget* parent);
-
 // Only its panes and their buttons, inside a window that names the release,
 // says how the pairing stands and stages it (Identify, ADR-0311).
 [[nodiscard]] QWidget* createMusicBrainzTrackMatchPanes(TrackMatchSession* session,

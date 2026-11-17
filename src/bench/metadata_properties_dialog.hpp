@@ -56,9 +56,6 @@ class MetadataPropertiesDialog final : public QDialog {
     Q_OBJECT
 
   signals:
-    // ADR-0183 addendum: the file list exists only after the asynchronous
-    // grid build; sidebar hosting waits for this.
-    void fileListConstructed();
     // ADR-0185/0186: the Actions menu and Edit buttons ask the bench
     // window to open Settings on a specific page.
     void openSettingsRequested(SettingsDialog::Page page);

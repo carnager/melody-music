@@ -83,9 +83,6 @@ class TrackMatchSession final : public QObject {
     [[nodiscard]] QString fitSummary() const;
     [[nodiscard]] static QString help();
     [[nodiscard]] QString status() const { return status_; }
-    // How the pairing stands: files paired, files, the album's tracks.
-    [[nodiscard]] std::size_t pairedCount() const { return paired_count_; }
-    [[nodiscard]] std::size_t fileCount() const { return own_count_; }
     [[nodiscard]] std::size_t trackCount() const { return alignment_.release_tracks.size(); }
     [[nodiscard]] bool ready() const { return ready_; }
     [[nodiscard]] const std::vector<Row>& rows() const { return rows_; }
@@ -94,8 +91,6 @@ class TrackMatchSession final : public QObject {
     [[nodiscard]] bool canUnmatch(int row) const;
     [[nodiscard]] bool canStage() const;
 
-    // A file moved from one row to another (a drag), or up or down by one.
-    void moveFile(std::size_t from, std::size_t to);
     // A file dropped on a gap: put in it, the rows around keeping their
     // places; where it was is left a gap, or goes when below the tracks.
     void fillGap(std::size_t from, std::size_t gap);
@@ -148,7 +143,6 @@ class TrackMatchSession final : public QObject {
     std::vector<Row> rows_;
     std::set<TrackKey> avoid_;
     QString status_;
-    std::size_t paired_count_{0U};
     bool ready_{false};
     core::CancellationSource cancellation_;
 };

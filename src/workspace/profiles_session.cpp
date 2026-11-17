@@ -90,8 +90,6 @@ QString ProfilesSession::layoutPatternOn(const int row) const {
     return folders.isEmpty() ? filename : folders + QLatin1Char('/') + filename;
 }
 
-QStringList ProfilesSession::destinationNames() const { return destinationNamesOn(place_); }
-
 QStringList ProfilesSession::destinationNamesOn(const int place) const {
     QStringList names;
     if (place < 0 || place >= placeCount()) {
@@ -138,12 +136,6 @@ QStringList ProfilesSession::placeNames() const {
         names.append(place.name);
     }
     return names;
-}
-
-QString ProfilesSession::placeKey(const int place) const {
-    return place >= 0 && place < static_cast<int>(places_.size())
-               ? places_[static_cast<std::size_t>(place)].key
-               : QString{};
 }
 
 int ProfilesSession::layoutRow() const {

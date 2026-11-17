@@ -63,19 +63,6 @@ enum class LocalLibraryAction { append, next, replace, new_list, request_next, r
 // to expand and where the cursor goes.
 class LibraryBrowser final : public QObject {
     Q_OBJECT
-    Q_PROPERTY(QAbstractItemModel* model READ model CONSTANT)
-    Q_PROPERTY(QString status READ status NOTIFY statusChanged)
-    Q_PROPERTY(QString queryError READ queryError NOTIFY queryErrorChanged)
-    Q_PROPERTY(QString source READ source NOTIFY sourceChanged)
-    Q_PROPERTY(bool sourceShown READ sourceShown NOTIFY sourceChanged)
-    Q_PROPERTY(QString sourceTooltip READ sourceTooltip NOTIFY sourceChanged)
-    Q_PROPERTY(bool scanning READ scanning NOTIFY scanningChanged)
-    Q_PROPERTY(bool queryMode READ queryMode WRITE setQueryMode NOTIFY searchChanged)
-    Q_PROPERTY(bool newestFirst READ newestFirst WRITE setNewestFirst NOTIFY searchChanged)
-    Q_PROPERTY(QString viewId READ viewId WRITE setViewId NOTIFY searchChanged)
-    Q_PROPERTY(QString search READ search WRITE setSearch NOTIFY searchChanged)
-    Q_PROPERTY(QVariantList roots READ roots NOTIFY rootsChanged)
-    Q_PROPERTY(QString rootsError READ rootsError NOTIFY rootsChanged)
 
   public:
     struct Root {
@@ -107,27 +94,23 @@ class LibraryBrowser final : public QObject {
     }
     [[nodiscard]] std::size_t unreadableCount() const { return unreadable_count_; }
     [[nodiscard]] bool queryMode() const { return query_mode_; }
-    [[nodiscard]] bool newestFirst() const { return newest_first_; }
     // ADR-0254: the library view shown, by its definition's id.
     [[nodiscard]] QString viewId() const { return view_id_; }
     [[nodiscard]] QString search() const { return search_; }
-    [[nodiscard]] QVariantList roots() const;
     // The library folders, as raw paths.
     [[nodiscard]] std::vector<std::string> rootPaths() const;
     [[nodiscard]] const std::vector<Root>& rootList() const { return roots_; }
     [[nodiscard]] QString rootsError() const { return roots_error_; }
     // Whether it is this computer's library, or that of an engine elsewhere,
     // whose folders are typed as that machine sees them.
-    [[nodiscard]] Q_INVOKABLE bool remote() const {
+    [[nodiscard]] bool remote() const {
         return catalogues_ != nullptr && catalogues_->role() == CatalogueSource::Role::remote;
     }
-    [[nodiscard]] Q_INVOKABLE QString name() const;
-    [[nodiscard]] Q_INVOKABLE QString engineText() const { return engine_.text(); }
+    [[nodiscard]] QString name() const;
 
     // The search, as typed: it is looked up a moment after the last key.
     void setSearch(const QString& text);
     void setQueryMode(bool enabled);
-    void setNewestFirst(bool on);
     // Shows the view `id`; one that is gone shows the artist tree.
     void setViewId(const QString& id);
     // The views were edited: the one shown is read again.
@@ -138,32 +121,34 @@ class LibraryBrowser final : public QObject {
     void previewView(const QString& id);
     // ADR-0140: the whole result of the search, kept as a list
     // (searchCommitted). Enter does it.
-    Q_INVOKABLE void commitSearch();
+    void commitSearch();
     // Everything looked up again, a moment from now; a scan is the Refresh
     // button's.
-    Q_INVOKABLE void refreshLibrary();
+    void refreshLibrary();
     // What the engine said changed (catalogue.changed): the albums whose
     // covers are asked again, or everything; the tree follows in place --
     // what is open stays open, the current row and the scroll stay.
     void applyChanges(const std::vector<std::string>& albums, bool everything);
-    Q_INVOKABLE void reload();
+    void reload();
     // The engine holding this library connected -- at startup, or again
     // after it restarted or the network came back. One that could not be
     // reached is asked again now, rather than on the next library action.
     void engineConnected();
-    Q_INVOKABLE void toggleScan();
+    void toggleScan();
     void startScan();
     void stop();
 
-    // A row's children, when it is expanded; the next page, for "Show more…".
-    Q_INVOKABLE void fetch(const QModelIndex& index);
-    Q_INVOKABLE void activate(const QModelIndex& index);
+    // A row's children, when it is expanded.
+    void fetch(const QModelIndex& index);
+    // A row activated: "Show more…" loads the next page; anything else is
+    // appended to the list.
+    void activate(const QModelIndex& index);
     // The view says what it shows, so a reload shows it again: what is
     // expanded, and where its cursor is.
-    Q_INVOKABLE void noteExpanded(const QModelIndex& index, bool expanded);
-    Q_INVOKABLE void noteCurrent(const QModelIndex& index);
+    void noteExpanded(const QModelIndex& index, bool expanded);
+    void noteCurrent(const QModelIndex& index);
     // The album rows in view, whose covers are to be loaded.
-    Q_INVOKABLE void wantCovers(const QStringList& album_keys);
+    void wantCovers(const QStringList& album_keys);
     [[nodiscard]] QImage cover(const QString& album_key) const;
     [[nodiscard]] bool hasCover(const QString& album_key) const;
     void invalidateCovers();
@@ -180,29 +165,19 @@ class LibraryBrowser final : public QObject {
     // those under a selected row left to it; at most 1,000.
     [[nodiscard]] static std::vector<persistence::LibraryEntry>
     selectedEntries(QModelIndexList indexes);
-    // The entries of `indexes`, asked for as `action` (actionRequested),
-    // appended to the list with `id` (addToListRequested), or made a new list
-    // called `name` (newListRequested).
-    Q_INVOKABLE void request(const QModelIndexList& indexes, int action);
-    Q_INVOKABLE void addToList(const QModelIndexList& indexes, const QString& id);
-    Q_INVOKABLE void addToNewList(const QModelIndexList& indexes, const QString& name);
-    // What a new list of `indexes` is called unless named: the one entry's
-    // label, or "Library selection".
-    [[nodiscard]] Q_INVOKABLE static QString newListName(const QModelIndexList& indexes);
+    // The entries of `indexes`, asked for as `action` (actionRequested).
+    void request(const QModelIndexList& indexes, int action);
 
     // ADR-0179: ratings by content identity, on the library's queue.
     void requestRatings(std::vector<std::string> hashes,
                         std::function<void(std::vector<unsigned>)> ready);
     void storeRating(std::string hash, bool album, unsigned rating);
     // A row's rating, stored and shown.
-    Q_INVOKABLE void rate(const QModelIndex& index, int rating);
+    void rate(const QModelIndex& index, int rating);
 
-    // The library's folders.
-    Q_INVOKABLE void addRoot(const QString& path);
     void addRoot(std::string raw_path);
     void removeRoot(std::string raw_path);
-    Q_INVOKABLE void removeRoot(int index);
-    Q_INVOKABLE void loadRoots();
+    void loadRoots();
 
   signals:
     void statusChanged();

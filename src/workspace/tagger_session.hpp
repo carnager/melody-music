@@ -419,8 +419,6 @@ class TaggerSession final : public QObject {
     void fetchCovers(std::vector<std::vector<std::size_t>> albums);
     [[nodiscard]] bool fetchingCovers() const { return covers_asked_ > 0U; }
 
-    // What the files open here are: how many, as read, and how long.
-    [[nodiscard]] std::size_t itemCount() const;
     // An item's file as it was read (or, until read, cached).
     [[nodiscard]] const metadata::StagedMetadataSource* itemSource(std::size_t item) const;
     // Its length: as the list knew it, else as probed here.
@@ -448,7 +446,6 @@ class TaggerSession final : public QObject {
     void folderImagesReviewed(bool accepted);
     void requestApplyStop();
     // The files a failed Apply did not finish, tried again.
-    [[nodiscard]] bool canRetry() const { return retry_plan_ != nullptr; }
     void retryUnfinished();
     [[nodiscard]] bool applyCommitted() const { return apply_committed_; }
 

@@ -976,7 +976,6 @@ void MetadataPropertiesDialog::buildGrid() {
     transformation_panel_->setParent(this);
     transformation_panel_->hide();
     root_layout_->insertWidget(root_layout_->count() - 1, metadata_splitter_, 1);
-    emit fileListConstructed();
 
     connect(fields_->selectionModel(), &QItemSelectionModel::currentChanged, this,
             &MetadataPropertiesDialog::noteFieldSelection);

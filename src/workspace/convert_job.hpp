@@ -115,7 +115,6 @@ class ConvertJob final : public QObject {
     // What is shown.
     [[nodiscard]] const std::vector<Preset>& presets() const { return presets_; }
     [[nodiscard]] int presetIndex() const;
-    [[nodiscard]] bool canAddPreset() const { return static_cast<bool>(preset_store_.load); }
     [[nodiscard]] bool canDeletePreset() const;
     [[nodiscard]] QStringList layouts() const;
     [[nodiscard]] QStringList destinations() const;
@@ -130,7 +129,6 @@ class ConvertJob final : public QObject {
     [[nodiscard]] QVariant channels() const { return channels_; }
     [[nodiscard]] int gain() const { return gain_; }
     [[nodiscard]] QString gainWarning() const;
-    [[nodiscard]] bool gainWarningRich() const { return gain_ != 0; }
     [[nodiscard]] bool embedArtwork() const { return embed_artwork_; }
     [[nodiscard]] int parallelism() const { return parallelism_; }
     [[nodiscard]] QStringList preview() const { return preview_; }

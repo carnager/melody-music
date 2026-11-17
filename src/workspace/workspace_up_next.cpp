@@ -406,18 +406,6 @@ void Workspace::returnToList() {
     }
 }
 
-void Workspace::enqueueRows(const ListTab& tab, std::vector<int> rows, const int position) {
-    std::ranges::sort(rows);
-    std::vector<LocalTrackRow> tracks;
-    for (const auto row : rows) {
-        if (row >= 0 && row < static_cast<int>(tab.model->rows().size())) {
-            tracks.push_back(tab.model->rows()[static_cast<std::size_t>(row)]);
-        }
-    }
-    enqueueLocalRequests(std::move(tracks), position, EngineKey::of(tab.document));
-    view_->refreshUpNext();
-}
-
 void Workspace::undoUpNext() {
     playback_.requests.undo();
     persistUpNext();

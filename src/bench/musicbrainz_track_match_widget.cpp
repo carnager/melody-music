@@ -1147,11 +1147,6 @@ QWidget* createMusicBrainzTrackMatchWidget(
     return widget;
 }
 
-QWidget* createMusicBrainzTrackMatchView(TrackMatchSession* session, std::function<void()> back,
-                                         QWidget* parent) {
-    return new TrackMatchWidget(session, std::move(back), parent);
-}
-
 QWidget* createMusicBrainzTrackMatchPanes(TrackMatchSession* session, QWidget* parent) {
     return new TrackMatchWidget(session, {}, parent, true);
 }

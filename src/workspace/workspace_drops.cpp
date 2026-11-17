@@ -94,47 +94,6 @@ bool Workspace::dropOnList(Dragged dragged, ListTab& target, const int insertion
     return true;
 }
 
-bool Workspace::dropOnNewList(Dragged dragged, const bool copy) {
-    if (dragged.isRows()) {
-        auto* destination = transferRowsToNewList(dragged.from_tab, dragged.from_model,
-                                                  dragged.engine, dragged.dynamic, dragged.rows,
-                                                  !copy && !dragged.dynamic, tr("Selection"));
-        if (destination != nullptr) {
-            view_->showList(*destination);
-        }
-        return destination != nullptr;
-    }
-    if (!dragged.isFiles()) {
-        return false;
-    }
-    // Named after the folder or file when it is one.
-    auto name = tr("Dropped files");
-    if (dragged.paths.size() == 1U) {
-        name = QFileInfo{QFile::decodeName(QByteArray::fromStdString(dragged.paths.front()))}
-                   .fileName();
-    } else if (dragged.paths.empty()) {
-        name = tr("Library selection");
-    }
-    auto* target = addList(persistence::ListDocument{.id = core::StableId::random(),
-                                                     .kind = persistence::ListKind::scratch,
-                                                     .name = utf8Bytes(name),
-                                                     .pinned = false,
-                                                     .dirty = false,
-                                                     .items = {},
-                                                     .engine = dragged.engine.stored()},
-                           true);
-    schedulePersist();
-    view_->showList(*target);
-    const auto id = document_text(target->document.id);
-    const QPointer self{this};
-    resolved(dragged, [self, id, engine = dragged.engine](std::vector<std::string> paths) {
-        if (self) {
-            self->addDroppedPaths(id, engine, std::move(paths));
-        }
-    });
-    return true;
-}
-
 bool Workspace::dropOnUpNext(Dragged dragged, const int position) {
     if (dragged.isRows()) {
         std::ranges::sort(dragged.rows);
@@ -161,50 +120,6 @@ bool Workspace::dropOnUpNext(Dragged dragged, const int position) {
                 self->view_->refreshUpNext();
             }
         });
-    return true;
-}
-
-bool Workspace::dropOnEngineList(Dragged dragged, const EngineKey& engine, const QString& id) {
-    if (auto* tab = tabForDocument(id); tab != nullptr) {
-        if (tab->model == dragged.from_model) {
-            return false;
-        }
-        const bool taken = dropOnList(std::move(dragged), *tab, -1, false);
-        if (taken) {
-            view_->showList(*tab);
-        }
-        return taken;
-    }
-    if (!dragged.isRows() && !dragged.isFiles()) {
-        return false;
-    }
-    // Rows of another list are copied: the list they go to is not in sight
-    // to see them arrive, so nothing leaves the one that is.
-    const QPointer self{this};
-    if (dragged.isRows()) {
-        const QPointer<LocalListModel> model{dragged.from_model};
-        const auto from_id =
-            dragged.from_tab != nullptr ? document_text(dragged.from_tab->document.id) : QString{};
-        openEngineList(engine, id, [self, model, from_id, dragged, id] {
-            if (!self || !model) {
-                return;
-            }
-            static_cast<void>(self->transferRows(
-                from_id.isEmpty() ? nullptr : self->tabForDocument(from_id), model, dragged.engine,
-                dragged.dynamic, dragged.rows, id, false, -1));
-        });
-        return true;
-    }
-    resolved(dragged, [self, engine, id, files = dragged.engine](std::vector<std::string> paths) {
-        if (!self) {
-            return;
-        }
-        self->openEngineList(engine, id, [self, id, files, paths = std::move(paths)] {
-            if (self) {
-                self->addDroppedPaths(id, files, paths);
-            }
-        });
-    });
     return true;
 }
 

@@ -140,7 +140,6 @@ class BenchMainWindow final : public QMainWindow, public WorkspaceView {
     DesktopMediaSession*& mpris_{workspace_.mpris_};
     DesktopNotifier*& notifier_{workspace_.notifier_};
     ui::ListPersistenceService*& persistence_{workspace_.persistence_};
-    std::filesystem::path& database_path_{workspace_.database_path_};
     std::vector<std::unique_ptr<EngineLink>>& engines_{workspace_.engines_};
     EngineListSync*& list_sync_{workspace_.list_sync_};
     std::vector<PendingRelocation>& pending_relocations_{workspace_.pending_relocations_};
@@ -581,7 +580,6 @@ class BenchMainWindow final : public QMainWindow, public WorkspaceView {
                               const ui::TrackViewLayout& layout);
     [[nodiscard]] ui::TrackViewLayout
     captureTrackViewLayout(const QTableView* view, const ui::TrackViewLayout& state) const;
-    void setTrackViewPresentation(ui::TrackViewPresentation presentation);
     // ADR-0282: the current tab drawn by a list view; every tab of a view
     // drawn again when it changes; a column's header sorting its list.
     void chooseListView(const QString& id);
@@ -668,7 +666,7 @@ class BenchMainWindow final : public QMainWindow, public WorkspaceView {
     void applyLocalPlaybackModes() { workspace_.applyLocalPlaybackModes(); }
     void showReplayGainPreampDialog();
     // Resolve the playing entry to its current row in `tab`, or -1 when the
-    // entry is no longer there. playback_row_ serves as the lookup hint.
+    // entry is no longer there.
     [[nodiscard]] int resolvePlaybackRow(const ListTab* tab) const {
         return workspace_.resolvePlaybackRow(tab);
     }

@@ -43,9 +43,7 @@ class ProfilesSession final : public QObject {
     [[nodiscard]] QStringList layoutNames() const;
     // A saved layout's whole pattern, its folders and filename as one path.
     [[nodiscard]] QString layoutPatternOn(int row) const;
-    [[nodiscard]] QStringList destinationNames() const;
     [[nodiscard]] QStringList placeNames() const;
-    [[nodiscard]] QString placeKey(int place) const;
     [[nodiscard]] int placeCount() const { return static_cast<int>(places_.size()); }
     // The destinations held for `place`, and what keeps it from showing
     // them -- loading, or an error -- if anything.
