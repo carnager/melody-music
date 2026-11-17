@@ -2899,44 +2899,6 @@ void bounded_preparation_apply_combines_metadata_and_relocation_transaction(
     if (!repository) {
         return;
     }
-    const std::vector documents{persistence::ListDocument{
-        .id = core::StableId::random(),
-        .kind = persistence::ListKind::scratch,
-        .name = "Combined Apply",
-        .pinned = false,
-        .dirty = true,
-        .items = {persistence::ListItem{
-            .source = persistence::ListSource::local,
-            .profile_id = std::nullopt,
-            .source_reference = source.native(),
-            .logical_reference = std::nullopt,
-            .segment = std::nullopt,
-            .source_selection = std::nullopt,
-            .duration_ms = std::nullopt,
-            .source_revision = source_read->source_revision,
-            .fields = {{.name = "title",
-                        .value = "Before combined Apply",
-                        .native_name = "TITLE",
-                        .provenance = metadata::FieldProvenance::embedded}},
-        }},
-    }};
-    CHECK(repository->replace_all(documents).has_value());
-    CHECK(repository
-              ->relocate_local_source(persistence::LocalSourceRelocation{
-                  .operation_id = core::StableId::random(),
-                  .source_reference = source.native(),
-                  .target_reference = target.native(),
-                  .previous_revision = source_read->source_revision,
-                  .published_revision = source_read->source_revision,
-                  .published_document = std::nullopt,
-              })
-              .has_value());
-    CHECK(repository->replace_all(documents).has_value());
-    const auto pre_resolved = repository->load_all();
-    CHECK(pre_resolved && pre_resolved->front().items.front().source_reference == target.native() &&
-          pre_resolved->front().items.front().source_revision == source_read->source_revision &&
-          std::filesystem::exists(source) && !std::filesystem::exists(target));
-
     auto plan = operations::assemble_preparation_plan(
         {.save_tags = true, .rename_files = true, .move_files = false, .replaygain = false}, 1U,
         metadata::MetadataWritePlan{.sources = {*source_plan}, .patch_count = 1U}, checked->plan,
@@ -2987,14 +2949,13 @@ void bounded_preparation_apply_combines_metadata_and_relocation_transaction(
     CHECK(metadata_only_callbacks == 0U && path_only_callbacks == 0U && combined_callbacks == 1U);
     CHECK(!std::filesystem::exists(source) && std::filesystem::exists(target));
     const auto reread = metadata::read_local_metadata(target.native());
-    const auto persisted = repository->load_all();
+    const auto moved =
+        repository->resolve_local_source_moves({{source.native(), source_read->source_revision}});
     CHECK(reread && reread->document.effective_values("title") ==
                         std::vector<std::string>{"Combined Apply title"});
-    CHECK(persisted && persisted->front().items.front().source_reference == target.native() &&
-          persisted->front().items.front().source_revision == reread->source_revision &&
-          std::ranges::any_of(persisted->front().items.front().fields, [](const auto& field) {
-              return field.name == "title" && field.value == "Combined Apply title";
-          }));
+    CHECK(moved && moved->size() == 1U && moved->front() &&
+          moved->front()->first == target.native() &&
+          moved->front()->second == reread->source_revision);
 }
 
 void bounded_preparation_apply_commits_metadata_when_path_is_unchanged(

@@ -504,62 +504,48 @@ void BenchMainWindowTest::Tabs::windowListTabsCloseFromTheirButtons() {
 }
 
 // ADR-0259: the window keeps which lists it has open, and a cache of their
-// rows -- not the lists. Its former copy is read once, as the migration, and
-// neither read nor written after; a tab whose engine is away opens from its
-// cache, and one whose cache is gone from its engine.
+// rows -- not the lists, which are their engine's. A tab whose engine is
+// away opens from its cache, and one whose cache is gone from its engine.
 void BenchMainWindowTest::Tabs::theWindowKeepsItsTabsNotTheLists() {
     QTemporaryDir media;
     QVERIFY(media.isValid());
     const auto path = media.filePath(QStringLiteral("kept.wav"));
     write_wave(path, wave_sample_rate / 10U);
     const auto raw_path = QFile::encodeName(path).toStdString();
-    const auto database = std::filesystem::path{
-        QFile::encodeName(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) +
-                          QStringLiteral("/lists.sqlite"))
-            .toStdString()};
-    QDir{}.mkpath(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
     const auto kept_id = core::StableId::random();
     const auto scratch_id = core::StableId::random();
-    {
-        // As an earlier release left it: the lists in the window's database.
-        auto repository = persistence::ListRepository::open(database);
-        QVERIFY(repository.has_value());
-        persistence::ListItem item;
-        item.source = persistence::ListSource::local;
-        item.source_reference = raw_path;
-        item.duration_ms = 100;
-        item.fields.push_back({.name = "title", .value = "Seeded"});
-        const std::vector<persistence::ListDocument> seeded{
-            persistence::ListDocument{.id = kept_id,
-                                      .kind = persistence::ListKind::saved,
-                                      .name = "Kept",
-                                      .pinned = true,
-                                      .dirty = false,
-                                      .items = {item},
-                                      .engine = {}},
-            persistence::ListDocument{.id = scratch_id,
-                                      .kind = persistence::ListKind::scratch,
-                                      .name = "Scratch",
-                                      .pinned = false,
-                                      .dirty = false,
-                                      .items = {},
-                                      .engine = {}}};
-        QVERIFY(repository->replace_all(seeded).has_value());
-    }
     QVERIFY(!TabStore::hasState());
     {
         BenchMainWindow window;
         window.show();
         QTRY_VERIFY(window.lists_restored_);
-        auto* kept = window.tabForDocument(QString::fromStdString(kept_id.to_string()));
+        persistence::ListItem item;
+        item.source = persistence::ListSource::local;
+        item.source_reference = raw_path;
+        item.duration_ms = 100;
+        item.fields.push_back({.name = "title", .value = "Seeded"});
+        auto* kept =
+            window.addListTab(persistence::ListDocument{.id = kept_id,
+                                                        .kind = persistence::ListKind::saved,
+                                                        .name = "Kept",
+                                                        .pinned = true,
+                                                        .dirty = false,
+                                                        .items = {item},
+                                                        .engine = {}},
+                              false);
         QVERIFY(kept != nullptr);
-        QCOMPARE(kept->document.name, std::string{"Kept"});
-        QVERIFY(kept->document.pinned);
         QCOMPARE(kept->model->rows().front().title, std::string{"Seeded"});
-        QVERIFY(window.tabForDocument(QString::fromStdString(scratch_id.to_string())) != nullptr);
+        QVERIFY(window.addListTab(persistence::ListDocument{.id = scratch_id,
+                                                            .kind = persistence::ListKind::scratch,
+                                                            .name = "Scratch",
+                                                            .pinned = false,
+                                                            .dirty = false,
+                                                            .items = {},
+                                                            .engine = {}},
+                                  false) != nullptr);
         window.persistNow(true);
         QVERIFY(TabStore::hasState());
-        // On its engine, as ADR-0233's migration has it.
+        // A saved list is its engine's.
         auto other = protocol::Client::connect(protocol::Endpoint{
             .socket = engine_.socket().toStdString(), .host = {}, .port = 0, .token = {}});
         QVERIFY(other.has_value());
@@ -568,19 +554,6 @@ void BenchMainWindowTest::Tabs::theWindowKeepsItsTabsNotTheLists() {
             5'000);
         (*other)->close();
         QVERIFY(window.close());
-    }
-    {
-        // Changed where the lists used to be: no longer read, so not seen.
-        auto repository = persistence::ListRepository::open(database);
-        QVERIFY(repository.has_value());
-        auto lists = repository->load_all();
-        QVERIFY(lists.has_value());
-        for (auto& list : *lists) {
-            if (list.id == kept_id) {
-                list.name = "Changed in the old table";
-            }
-        }
-        QVERIFY(repository->replace_all(*lists).has_value());
     }
     {
         BenchMainWindow window;
@@ -604,17 +577,6 @@ void BenchMainWindowTest::Tabs::theWindowKeepsItsTabsNotTheLists() {
         QCOMPARE(window.currentListTab()->document.id, kept_id);
         QVERIFY(window.close());
     }
-    {
-        // Nor written: the old table still says what it was changed to.
-        auto repository = persistence::ListRepository::open(database);
-        QVERIFY(repository.has_value());
-        const auto lists = repository->load_all();
-        QVERIFY(lists.has_value());
-        const auto old = std::ranges::find(*lists, kept_id, &persistence::ListDocument::id);
-        QVERIFY(old != lists->end());
-        QCOMPARE(old->name, std::string{"Changed in the old table"});
-    }
-
     // The engine away: the tab opens from its cache.
     engine_.stop();
     {

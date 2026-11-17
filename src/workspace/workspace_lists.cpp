@@ -577,10 +577,8 @@ void Workspace::restoreLists(std::vector<PreparedList> documents) {
         if (document.kind == persistence::ListKind::mpd) {
             continue;
         }
-        // As stored: saving it again writes its header, not its items --
-        // unless it is stored nowhere yet but in the lists this window kept
-        // before.
-        if (auto* tab = addList(std::move(prepared), false); tab != nullptr && !migrating_) {
+        // As stored: saving it again writes its header, not its items.
+        if (auto* tab = addList(std::move(prepared), false); tab != nullptr) {
             tab->saved = savedStateOf(*tab);
         }
     }

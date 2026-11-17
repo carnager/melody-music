@@ -2142,29 +2142,32 @@ void BenchMainWindowTest::FileWork::combinedPublicationStartupRecoversMetadataAn
     const auto database_path = std::filesystem::path{
         QFile::encodeName(base + QStringLiteral("/lists.sqlite")).toStdString()};
     const auto operation_id = core::StableId::random();
+    // A tab kept by the window, of the file at its revision before the move.
+    const auto tab_id = core::StableId::random();
+    {
+        BenchMainWindow window;
+        window.show();
+        QTRY_VERIFY(window.lists_restored_);
+        persistence::ListItem item;
+        item.source = persistence::ListSource::local;
+        item.source_reference = source_raw;
+        item.source_revision = source_read->source_revision;
+        auto* tab =
+            window.addListTab(persistence::ListDocument{.id = tab_id,
+                                                        .kind = persistence::ListKind::scratch,
+                                                        .name = "Combined recovery",
+                                                        .pinned = false,
+                                                        .dirty = false,
+                                                        .items = {item},
+                                                        .engine = {}},
+                              true);
+        QVERIFY(tab != nullptr);
+        window.persistNow(true);
+        QVERIFY(window.close());
+    }
     {
         auto repository = persistence::ListRepository::open(database_path);
         QVERIFY(repository.has_value());
-        const std::vector documents{persistence::ListDocument{
-            .id = core::StableId::random(),
-            .kind = persistence::ListKind::scratch,
-            .name = "Combined recovery",
-            .pinned = false,
-            .dirty = false,
-            .items = {persistence::ListItem{
-                .source = persistence::ListSource::local,
-                .profile_id = std::nullopt,
-                .source_reference = source_raw,
-                .logical_reference = std::nullopt,
-                .segment = std::nullopt,
-                .source_selection = std::nullopt,
-                .duration_ms = std::nullopt,
-                .source_revision = source_read->source_revision,
-                .fields = {},
-            }},
-        }};
-        QVERIFY(repository->replace_all(documents));
-
         const auto prepared =
             metadata::prepare_flac_metadata_write_copy(write_plan->sources.front(), target_raw);
         QVERIFY(prepared.has_value());
@@ -2214,13 +2217,12 @@ void BenchMainWindowTest::FileWork::combinedPublicationStartupRecoversMetadataAn
 
     BenchMainWindow window;
     window.show();
-    auto* tabs = window.findChild<QTabWidget*>(QStringLiteral("bench-tabs"));
-    QVERIFY(tabs != nullptr);
-    QTRY_COMPARE(tabs->count(), 1);
+    QTRY_VERIFY(window.lists_restored_);
     QTRY_VERIFY_WITH_TIMEOUT(!window.property("trackknife-metadata-operation-running").toBool(),
                              5'000);
-    auto* list_model =
-        qobject_cast<LocalListModel*>(qobject_cast<QTableView*>(tabs->currentWidget())->model());
+    auto* tab = window.tabForDocument(QString::fromStdString(tab_id.to_string()));
+    QVERIFY(tab != nullptr);
+    auto* list_model = tab->model;
     QVERIFY(list_model != nullptr);
     QTRY_COMPARE(list_model->rowCount(), 1);
     QTRY_COMPARE(list_model->rows().front().raw_path, target_raw);

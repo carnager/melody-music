@@ -20,17 +20,10 @@ class Workspace;
 
 namespace trackknife::ui {
 
-struct PersistedWorkspace {
-    std::vector<persistence::ListDocument> lists;
-    std::vector<persistence::ConnectionProfile> profiles;
-    std::vector<persistence::TrackViewPreset> view_presets;
-};
-
 class ListPersistenceService final : public QObject {
     Q_OBJECT
 
   public:
-    using WorkspaceCallback = std::function<void(PersistedWorkspace, QString)>;
     using CompletionCallback = std::function<void(QString)>;
     using UiStateCallback = std::function<void(QByteArray, QString)>;
     using TransformationChainsCallback =
@@ -47,9 +40,8 @@ class ListPersistenceService final : public QObject {
     ListPersistenceService(const ListPersistenceService&) = delete;
     ListPersistenceService& operator=(const ListPersistenceService&) = delete;
 
-    // ADR-0259: `lists` false once the window keeps its tabs elsewhere; the
-    // lists stored here are then not read at all.
-    void initialize(WorkspaceCallback callback, bool lists = true);
+    // Opens the database; the callback is told what failed, if anything.
+    void initialize(CompletionCallback callback);
     void loadMetadataTransformationChains(TransformationChainsCallback callback);
     void saveMetadataTransformationChain(persistence::SavedMetadataTransformationChain chain,
                                          CompletionCallback callback = {});

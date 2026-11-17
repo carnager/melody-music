@@ -18,54 +18,10 @@ unsigned Workspace::schema_version() const {
     return version ? *version : 0U;
 }
 
-core::Result<std::vector<persistence::ListDocument>> Workspace::load_all() const {
-    const std::lock_guard guard{*mutex_};
-    return repository_.load_all();
-}
-
-core::Result<void> Workspace::replace_all(std::span<const persistence::ListDocument> documents) {
-    const std::lock_guard guard{*mutex_};
-    return repository_.replace_all(documents);
-}
-
-core::Result<void>
-Workspace::save_workspace(std::span<const persistence::ListDocumentWrite> documents) {
-    const std::lock_guard guard{*mutex_};
-    return repository_.save_workspace(documents);
-}
-
-core::Result<persistence::LocalMetadataRefreshResult>
-Workspace::refresh_local_metadata(const persistence::LocalMetadataRefresh& refresh) {
-    const std::lock_guard guard{*mutex_};
-    return repository_.refresh_local_metadata(refresh);
-}
-
 core::Result<persistence::LocalSourceRelocationResult>
 Workspace::relocate_local_source(const persistence::LocalSourceRelocation& relocation) {
     const std::lock_guard guard{*mutex_};
     return repository_.relocate_local_source(relocation);
-}
-
-core::Result<std::vector<persistence::ConnectionProfile>> Workspace::load_profiles() const {
-    const std::lock_guard guard{*mutex_};
-    return repository_.load_profiles();
-}
-
-core::Result<void>
-Workspace::replace_profiles(std::span<const persistence::ConnectionProfile> profiles) {
-    const std::lock_guard guard{*mutex_};
-    return repository_.replace_profiles(profiles);
-}
-
-core::Result<std::vector<persistence::TrackViewPreset>> Workspace::load_view_presets() const {
-    const std::lock_guard guard{*mutex_};
-    return repository_.load_view_presets();
-}
-
-core::Result<void>
-Workspace::replace_view_presets(std::span<const persistence::TrackViewPreset> presets) {
-    const std::lock_guard guard{*mutex_};
-    return repository_.replace_view_presets(presets);
 }
 
 core::Result<std::vector<persistence::SavedMetadataTransformationChain>>

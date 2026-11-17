@@ -39,21 +39,8 @@ class Workspace final {
 
     [[nodiscard]] unsigned schema_version() const;
 
-    [[nodiscard]] core::Result<std::vector<persistence::ListDocument>> load_all() const;
-    [[nodiscard]] core::Result<void>
-    replace_all(std::span<const persistence::ListDocument> documents);
-    [[nodiscard]] core::Result<void>
-    save_workspace(std::span<const persistence::ListDocumentWrite> documents);
-    [[nodiscard]] core::Result<persistence::LocalMetadataRefreshResult>
-    refresh_local_metadata(const persistence::LocalMetadataRefresh& refresh);
     [[nodiscard]] core::Result<persistence::LocalSourceRelocationResult>
     relocate_local_source(const persistence::LocalSourceRelocation& relocation);
-    [[nodiscard]] core::Result<std::vector<persistence::ConnectionProfile>> load_profiles() const;
-    [[nodiscard]] core::Result<void>
-    replace_profiles(std::span<const persistence::ConnectionProfile> profiles);
-    [[nodiscard]] core::Result<std::vector<persistence::TrackViewPreset>> load_view_presets() const;
-    [[nodiscard]] core::Result<void>
-    replace_view_presets(std::span<const persistence::TrackViewPreset> presets);
     [[nodiscard]] core::Result<std::vector<persistence::SavedMetadataTransformationChain>>
     load_metadata_transformation_chains() const;
     [[nodiscard]] core::Result<void> upsert_metadata_transformation_chain(

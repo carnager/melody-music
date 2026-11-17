@@ -149,9 +149,9 @@ class LocalLibraryTest final : public QObject {
     void missingFilesOnARemountedShareArePruned();
     void aRemountedShareIsNotReadAgain();
     void aWatchersRefreshReadsOnlyWhatChanged();
-    void deletionCleanupPagesWithoutChangingWorkingLists();
+    void deletionCleanupPagesWithoutChangingLists();
     void albumIdentityKeepsEditionsSeparate();
-    void metadataAndMovesFollowTheListTransaction();
+    void movesTakeTheLibraryRowAlong();
     void scanRetainsFieldRowsAndTechnicals();
     void denseMetadataDoesNotProduceFalseMissingMatches();
     void parallelScanIndexesManyFiles();
@@ -712,7 +712,7 @@ void LocalLibraryTest::aWatchersRefreshReadsOnlyWhatChanged() {
     QVERIFY(library->query(tracks("Watched"))->entries.empty());
 }
 
-void LocalLibraryTest::deletionCleanupPagesWithoutChangingWorkingLists() {
+void LocalLibraryTest::deletionCleanupPagesWithoutChangingLists() {
     QTemporaryDir temporary;
     const std::filesystem::path base{temporary.path().toStdString()};
     const auto root = base / "music";
@@ -724,19 +724,15 @@ void LocalLibraryTest::deletionCleanupPagesWithoutChangingWorkingLists() {
     }
     auto repository = persistence::ListRepository::open(base / "state.sqlite");
     QVERIFY(repository);
-    persistence::ListDocument list{.id = core::StableId::random(),
-                                   .kind = persistence::ListKind::scratch,
-                                   .name = "Local Queue",
-                                   .pinned = false,
-                                   .dirty = false,
-                                   .items = {}};
-    persistence::ListItem item;
-    item.source = persistence::ListSource::local;
-    item.source_reference = source;
-    list.items = {item, item};
-    QVERIFY(repository->replace_all(std::vector{list}));
-    const auto saved = repository->load_all();
-    QVERIFY(saved);
+    const auto list_id = core::StableId::random();
+    persistence::EngineListItem item;
+    item.raw_path = source;
+    auto second = item;
+    second.entry_id = core::StableId::random();
+    QVERIFY(repository->save_engine_list(list_id, "Saved", persistence::EngineListKind::saved,
+                                         {item, second}, 0U, 1'000));
+    const auto saved = repository->load_engine_list(list_id);
+    QVERIFY(saved && *saved);
     auto library = persistence::LocalLibrary::open(base / "state.sqlite");
     QVERIFY(library && library->add_root(root.native()));
     persistence::LibraryScanProgress initial;
@@ -749,7 +745,7 @@ void LocalLibraryTest::deletionCleanupPagesWithoutChangingWorkingLists() {
     persistence::LibraryScanProgress clean;
     QVERIFY(library->scan({}, clean));
     QVERIFY(library->query(tracks())->entries.empty());
-    QCOMPARE(repository->load_all(), saved);
+    QCOMPARE(repository->load_engine_list(list_id), saved);
 }
 
 void LocalLibraryTest::albumIdentityKeepsEditionsSeparate() {
@@ -781,7 +777,10 @@ void LocalLibraryTest::albumIdentityKeepsEditionsSeparate() {
     QCOMPARE(grouped->entries.front().tracks, 2U);
 }
 
-void LocalLibraryTest::metadataAndMovesFollowTheListTransaction() {
+// A move takes the file's library row along, in the transaction that
+// journals it; replayed, nothing more happens; moved outside every root, the
+// row goes.
+void LocalLibraryTest::movesTakeTheLibraryRowAlong() {
     QTemporaryDir temporary;
     const std::filesystem::path base{temporary.path().toStdString()};
     const auto root = base / "music";
@@ -792,60 +791,19 @@ void LocalLibraryTest::metadataAndMovesFollowTheListTransaction() {
     QVERIFY(library->scan({}, progress));
     auto repository = persistence::ListRepository::open(base / "state.sqlite");
     QVERIFY(repository);
-    auto previous = core::observe_local_source_revision(source);
+    const auto previous = core::observe_local_source_revision(source);
     QVERIFY(previous);
-    persistence::ListDocument list{.id = core::StableId::random(),
-                                   .kind = persistence::ListKind::scratch,
-                                   .name = "Local Queue",
-                                   .pinned = false,
-                                   .dirty = false,
-                                   .items = {}};
-    persistence::ListItem item;
-    item.source = persistence::ListSource::local;
-    item.source_reference = source;
-    item.source_revision = *previous;
-    list.items.push_back(item);
-    QVERIFY(repository->replace_all(std::vector{list}));
-    QCOMPARE(fixture(root, "01.flac", "New title", "New album"), source);
-    const auto read = metadata::read_local_metadata(source);
-    QVERIFY(read);
-    const persistence::LocalMetadataRefresh refresh{.operation_id = core::StableId::random(),
-                                                    .source_reference = source,
-                                                    .previous_revision = *previous,
-                                                    .published_revision = read->source_revision,
-                                                    .document = read->document};
-    sqlite3* db = nullptr;
-    QCOMPARE(sqlite3_open((base / "state.sqlite").c_str(), &db), SQLITE_OK);
-    QCOMPARE(
-        sqlite3_exec(db,
-                     "CREATE TRIGGER reject_library_refresh BEFORE UPDATE ON local_library_tracks "
-                     "BEGIN SELECT RAISE(ABORT,'injected index failure'); END",
-                     nullptr, nullptr, nullptr),
-        SQLITE_OK);
-    QVERIFY(!repository->refresh_local_metadata(refresh));
-    QCOMPARE(repository->load_all()->front().items.front().source_revision,
-             std::optional{*previous});
-    QCOMPARE(library->query(tracks("First song"))->entries.size(), 1U);
-    QVERIFY(library->query(tracks("New title"))->entries.empty());
-    QCOMPARE(sqlite3_exec(db, "DROP TRIGGER reject_library_refresh", nullptr, nullptr, nullptr),
-             SQLITE_OK);
-    sqlite3_close(db);
-    QVERIFY(repository->refresh_local_metadata(refresh));
-    QCOMPARE(library->query(tracks("New title"))->entries.size(), 1U);
-    QVERIFY(library->query(tracks("First song"))->entries.empty());
-    QVERIFY(repository->refresh_local_metadata(refresh)->already_applied);
     const auto target = (root / "renamed.flac").native();
     std::filesystem::rename(std::filesystem::path{source}, std::filesystem::path{target});
     persistence::LocalSourceRelocation relocation{.operation_id = core::StableId::random(),
                                                   .source_reference = source,
                                                   .target_reference = target,
-                                                  .previous_revision = read->source_revision,
+                                                  .previous_revision = *previous,
                                                   .published_revision =
                                                       *core::observe_local_source_revision(target),
                                                   .published_document = std::nullopt};
     QVERIFY(repository->relocate_local_source(relocation));
     QCOMPARE(library->paths(tracks())->front(), target);
-    QCOMPARE(repository->load_all()->front().items.front().source_reference, target);
     QVERIFY(repository->relocate_local_source(relocation)->already_applied);
     const auto outside = (base / "outside.flac").native();
     std::filesystem::rename(std::filesystem::path{target}, std::filesystem::path{outside});
@@ -854,7 +812,6 @@ void LocalLibraryTest::metadataAndMovesFollowTheListTransaction() {
     relocation.target_reference = outside;
     QVERIFY(repository->relocate_local_source(relocation));
     QVERIFY(library->query(tracks())->entries.empty());
-    QCOMPARE(repository->load_all()->front().items.front().source_reference, outside);
 }
 
 // ADR-0150: the scan retains every bounded tag value in the field table

@@ -547,11 +547,14 @@ void Workspace::pumpProbeQueue() {
                 std::vector<LocalTrackRow> rows;
                 metadata::MetadataDocument document;
                 std::optional<core::LocalSourceRevision> source_revision;
-                if (auto read = metadata::read_local_metadata(job.raw_path, cancellation); read) {
+                auto read = metadata::read_local_metadata(job.raw_path, cancellation);
+                if (read) {
                     document = std::move(read->document);
                     source_revision = read->source_revision;
                 }
-                if (auto probe = formats::probe_local_media(job.raw_path, cancellation); probe) {
+                auto probe = formats::probe_local_media(job.raw_path, cancellation);
+                const bool unreadable = !read && !probe;
+                if (probe) {
                     append_missing_probed_metadata(document, probe->tags);
                     fallback = whole_file_row(*probe, document, source_revision);
                     rows = subsong_rows(*probe, document, source_revision);
@@ -574,7 +577,8 @@ void Workspace::pumpProbeQueue() {
                 }
                 outcomes.push_back(ProbeOutcome{.job = std::move(job),
                                                 .rows = std::move(rows),
-                                                .whole_file_fallback = std::move(fallback)});
+                                                .whole_file_fallback = std::move(fallback),
+                                                .unreadable = unreadable});
             }
             return outcomes;
         }));
@@ -589,6 +593,10 @@ void Workspace::finishProbeBatch() {
     for (auto& outcome : outcomes) {
         auto* tab = tabForDocument(outcome.job.document_id);
         if (tab == nullptr) {
+            continue;
+        }
+        if (outcome.unreadable &&
+            tab->model->keepUnreadable(outcome.job.raw_path, outcome.job.hint_row)) {
             continue;
         }
         const auto current_count = static_cast<std::size_t>(tab->model->rowCount());

@@ -179,17 +179,6 @@ struct EngineList {
     friend bool operator==(const EngineList&, const EngineList&) = default;
 };
 
-struct ConnectionProfile {
-    core::StableId id;
-    std::string name;
-    std::string host;
-    unsigned port{6600U};
-    std::optional<std::string> local_music_root;
-    bool auto_connect{false};
-
-    friend bool operator==(const ConnectionProfile&, const ConnectionProfile&) = default;
-};
-
 struct TrackViewPreset {
     std::string binding;
     std::string header_state;
@@ -260,38 +249,18 @@ struct LocalListeningHistory {
 [[nodiscard]] std::string local_listening_track_hash(const std::string& source_id,
                                                      const ListItem& source);
 
-struct LocalMetadataRefresh {
-    core::StableId operation_id;
-    std::string source_reference;
-    core::LocalSourceRevision previous_revision;
-    core::LocalSourceRevision published_revision;
-    metadata::MetadataDocument document;
-};
-
-struct LocalMetadataRefreshResult {
-    std::size_t affected_occurrences{0U};
-    bool already_applied{false};
-
-    friend bool operator==(const LocalMetadataRefreshResult&,
-                           const LocalMetadataRefreshResult&) = default;
-};
-
 struct LocalSourceRelocation {
     core::StableId operation_id;
     std::string source_reference;
     std::string target_reference;
     core::LocalSourceRevision previous_revision;
     core::LocalSourceRevision published_revision;
-    // Present only when publication changed embedded content. The same
-    // transaction then replaces embedded/stream occurrence fields and the
-    // destination metadata cache instead of copying stale source metadata.
+    // Present only when publication changed embedded content: the library
+    // row is then described from it rather than copied from the source's.
     std::optional<metadata::MetadataDocument> published_document;
 };
 
 struct LocalSourceRelocationResult {
-    std::size_t affected_occurrences{0U};
-    bool cache_rekeyed{false};
-    bool metadata_refreshed{false};
     bool already_applied{false};
 
     friend bool operator==(const LocalSourceRelocationResult&,
@@ -309,28 +278,11 @@ class ListRepository final {
     [[nodiscard]] static core::Result<ListRepository> open(const std::filesystem::path& path);
 
     [[nodiscard]] core::Result<unsigned> schema_version() const;
-    [[nodiscard]] core::Result<std::vector<ListDocument>> load_all() const;
-    [[nodiscard]] core::Result<void> replace_all(std::span<const ListDocument> documents);
-    // The workspace's lists as they are now, writing items only where they
-    // changed: a save costs what changed, not the size of every list -- two
-    // kept searches of 66,841 tracks had every save rewrite 3.2 million rows.
-    [[nodiscard]] core::Result<void> save_workspace(std::span<const ListDocumentWrite> documents);
-    // Atomically refreshes every local occurrence of one physical source and
-    // its source cache. The operation identity makes recovery replay a no-op.
-    [[nodiscard]] core::Result<LocalMetadataRefreshResult>
-    refresh_local_metadata(const LocalMetadataRefresh& refresh);
-    // Atomically re-keys every revision-matching local occurrence and its
-    // source cache. When published_document is present, the same transaction
-    // also replaces embedded/stream occurrence fields and the destination
-    // cache with the published document. Durable relocation history prevents
-    // a delayed workspace snapshot from resurrecting earlier path or metadata
-    // state and makes recovery replay a no-op.
+    // Records a file's move -- for resolve_local_source_moves -- and moves
+    // its library row and listening history with it, in one transaction.
+    // The operation identity makes recovery's replay a no-op.
     [[nodiscard]] core::Result<LocalSourceRelocationResult>
     relocate_local_source(const LocalSourceRelocation& relocation);
-    [[nodiscard]] core::Result<std::vector<ConnectionProfile>> load_profiles() const;
-    [[nodiscard]] core::Result<void> replace_profiles(std::span<const ConnectionProfile> profiles);
-    [[nodiscard]] core::Result<std::vector<TrackViewPreset>> load_view_presets() const;
-    [[nodiscard]] core::Result<void> replace_view_presets(std::span<const TrackViewPreset> presets);
     [[nodiscard]] core::Result<std::vector<SavedMetadataTransformationChain>>
     load_metadata_transformation_chains() const;
     [[nodiscard]] core::Result<void>
@@ -454,13 +406,5 @@ class ListRepository final {
 
     std::unique_ptr<Impl> implementation_;
 };
-
-// ADR-0339: Melody's presets -- naming layouts, destinations, encoder
-// presets, tagging scripts -- and the lists an older release kept there for
-// the window, moved once from the database they shared with this computer's
-// engine (`from`) into Melody's own (`to`): only when `to` does not exist
-// yet and `from` does. True when they were copied; `from` is left as it was.
-[[nodiscard]] core::Result<bool> adopt_presets(const std::filesystem::path& from,
-                                               const std::filesystem::path& to);
 
 } // namespace trackknife::persistence
