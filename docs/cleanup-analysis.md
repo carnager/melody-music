@@ -92,8 +92,9 @@ Not dead, though a scan says so: Qt overrides (`renderItem`, `tabSizeHint`,
   496, `LocalAuditionService::Impl` 1,163, titleformat `Evaluator` 929;
   `metadata_commit.cpp` 4,099 and `file_publication.cpp` 3,329 lines, the
   latter with parallel same-/cross-filesystem commit and recovery functions.
-- `bench_main_window_test` is one class of 262 cases split by size, not by
-  feature, over 8 files (21k lines).
+- ~~`bench_main_window_test` is one class of 262 cases split by size, not by
+  feature, over 8 files (21k lines).~~ Done 2026-11-17: a program for each
+  feature, `tests/window_*_test.cpp`, sharing `window_test.hpp`.
 
 ## Tier 5 -- the direction's own work (AGENTS.md)
 

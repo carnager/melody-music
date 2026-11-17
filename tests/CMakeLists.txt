@@ -951,20 +951,6 @@ if(MELODY_BUILD_UI)
         Qt6::Test trackknife_project_options trackknife_project_warnings)
     add_test(NAME lastfm-service COMMAND trackknife_lastfm_service_tests)
     set_tests_properties(lastfm-service PROPERTIES TIMEOUT 30)
-    # In several files, compiled side by side: as one it was an 18,000-line
-    # file that every build waited half a minute for, last.
-    qt_add_executable(
-        trackknife_bench_main_window_tests
-        bench_main_window_test.hpp
-        bench_main_window_test.cpp
-        bench_main_window_test_2.cpp
-        bench_main_window_test_3.cpp
-        bench_main_window_test_4.cpp
-        bench_main_window_test_5.cpp
-        bench_main_window_test_6.cpp
-        bench_main_window_test_7.cpp
-        bench_main_window_test_8.cpp
-    )
     if(APPLE)
         qt_add_executable(trackknife_now_playing_macos_tests now_playing_macos_test.mm)
         set_source_files_properties(now_playing_macos_test.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
@@ -997,34 +983,66 @@ if(MELODY_BUILD_UI)
         missingFilesOnARemountedShareArePruned)
     set_tests_properties(local-library-mounts PROPERTIES TIMEOUT 60 ENVIRONMENT
         "QT_QPA_PLATFORM=offscreen;LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/lsan.supp")
+    # The window's tests: a program for each feature, so that a case added or
+    # changed rebuilds its feature's file alone. What they share is
+    # window_test.hpp and the fixture, built once.
+    qt_add_library(trackknife_window_test_fixture STATIC window_test.hpp window_test.cpp)
     target_compile_definitions(
-        trackknife_bench_main_window_tests
-        PRIVATE MELODY_AUDIO_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/audio"
-                MELODY_ENGINE_BINARY="$<TARGET_FILE:trackknife_engine_daemon>"
-                MELODY_AGENT_BINARY="$<TARGET_FILE:melody_agent>"
+        trackknife_window_test_fixture
+        PUBLIC MELODY_AUDIO_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/audio"
+               MELODY_ENGINE_BINARY="$<TARGET_FILE:trackknife_engine_daemon>"
+               MELODY_AGENT_BINARY="$<TARGET_FILE:melody_agent>"
     )
-    add_dependencies(trackknife_bench_main_window_tests trackknife_engine_daemon melody_agent)
+    add_dependencies(trackknife_window_test_fixture trackknife_engine_daemon melody_agent)
     target_link_libraries(
-        trackknife_bench_main_window_tests
-        PRIVATE Trackknife::BenchUi Qt6::Network Qt6::Test PkgConfig::SQLITE3
-                trackknife_project_options trackknife_project_warnings
+        trackknife_window_test_fixture
+        PUBLIC Trackknife::BenchUi Qt6::Network Qt6::Test PkgConfig::SQLITE3
+        PRIVATE trackknife_project_options trackknife_project_warnings
     )
-    # The window's cases start an engine each and run for minutes in one
-    # process; as shares (qtest_shard.hpp) they run side by side. Each process
-    # has a home of its own, so the shares cannot meet.
-    set(MELODY_BENCH_MAIN_WINDOW_SHARDS 12 CACHE STRING
-        "Processes ctest runs the main window tests as")
-    math(EXPR last_shard "${MELODY_BENCH_MAIN_WINDOW_SHARDS} - 1")
-    foreach(shard RANGE ${last_shard})
-        add_test(NAME bench-main-window-${shard} COMMAND trackknife_bench_main_window_tests)
-        set_tests_properties(
-            bench-main-window-${shard}
-            PROPERTIES
-                TIMEOUT 600
-                ENVIRONMENT
-                    "QT_QPA_PLATFORM=offscreen;LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/lsan.supp;MELODY_TEST_SHARD=${shard}/${MELODY_BENCH_MAIN_WINDOW_SHARDS}"
-        )
-    endforeach()
+    # Each case starts an engine and a window; a feature with many runs as
+    # several processes at once (qtest_shard.hpp), each with a home of its own.
+    function(melody_window_test name shards)
+        set(target trackknife_window_${name}_tests)
+        qt_add_executable(${target} window_${name}_test.cpp)
+        target_link_libraries(${target} PRIVATE trackknife_window_test_fixture Trackknife::BenchUi
+            trackknife_project_options trackknife_project_warnings)
+        string(REPLACE "_" "-" test "window-${name}")
+        set(environment "QT_QPA_PLATFORM=offscreen"
+            "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/lsan.supp")
+        if(shards EQUAL 1)
+            add_test(NAME ${test} COMMAND ${target})
+            set_tests_properties(${test} PROPERTIES TIMEOUT 600 ENVIRONMENT "${environment}")
+            return()
+        endif()
+        math(EXPR last "${shards} - 1")
+        foreach(shard RANGE ${last})
+            add_test(NAME ${test}-${shard} COMMAND ${target})
+            set_tests_properties(${test}-${shard} PROPERTIES TIMEOUT 600 ENVIRONMENT
+                "${environment};MELODY_TEST_SHARD=${shard}/${shards}")
+        endforeach()
+    endfunction()
+    melody_window_test(artwork 1)
+    melody_window_test(convert 1)
+    melody_window_test(desktop 1)
+    melody_window_test(dynamic 1)
+    melody_window_test(engine_lists 2)
+    melody_window_test(file_work 1)
+    melody_window_test(library 1)
+    melody_window_test(list_editing 1)
+    melody_window_test(list_views 1)
+    melody_window_test(look 1)
+    melody_window_test(musicbrainz 1)
+    melody_window_test(panels 1)
+    melody_window_test(playback 4)
+    melody_window_test(plugins 2)
+    melody_window_test(remote_engines 2)
+    melody_window_test(replaygain 1)
+    melody_window_test(search 1)
+    melody_window_test(settings 2)
+    melody_window_test(tabs 1)
+    melody_window_test(tagger 1)
+    melody_window_test(tagger_edits 1)
+    melody_window_test(up_next 2)
     qt_add_executable(trackknife_m3u8_tests m3u8_test.cpp)
     target_link_libraries(trackknife_m3u8_tests PRIVATE Trackknife::BenchUi Qt6::Test
         trackknife_project_options trackknife_project_warnings)
