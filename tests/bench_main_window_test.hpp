@@ -20,6 +20,7 @@
 #include "bench/local_library_panel.hpp"
 #include "bench/local_list_edit_bar.hpp"
 #include "bench/local_list_model.hpp"
+#include "bench/lyrics_look_dialog.hpp"
 #include "bench/lyrics_panel.hpp"
 #include "bench/metadata_artwork_section.hpp"
 #include "bench/metadata_grid_model.hpp"
@@ -550,6 +551,7 @@ class BenchMainWindowTest final : public QObject {
     void mprisOrderAndCoverFollowTheWorkspace();
     void longJobsKeepTheComputerAwake();
     void lyricsPanelFollowsThePosition();
+    void lyricsPanelLooksAreChosenAndAdjusted();
     void windowListTabsCloseFromTheirButtons();
     void localListOrderingActionsRespectAuthorityAndPersist();
     void portablePlaylistImportsPreserveAuthorityAndPersist();

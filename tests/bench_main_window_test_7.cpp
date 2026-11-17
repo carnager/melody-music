@@ -1228,6 +1228,109 @@ void BenchMainWindowTest::mprisOrderAndCoverFollowTheWorkspace() {
     QFile::remove(second);
 }
 
+// ADR-0353: the panel draws in a look chosen from its heading, each look
+// with a font, size and colours of its own, previewed as they change.
+void BenchMainWindowTest::lyricsPanelLooksAreChosenAndAdjusted() {
+    QSettings{}.remove(QStringLiteral("lyrics/look"));
+    QSettings{}.remove(QStringLiteral("lyrics/looks"));
+    LyricsPanel panel;
+    panel.resize(300, 400);
+    panel.show();
+    auto* lines = panel.findChild<QListWidget*>(QStringLiteral("lyrics-lines"));
+    QVERIFY(lines != nullptr);
+    QCOMPARE(panel.look(), LyricsLook::page);
+    metadata::Lyrics synced{
+        .source = "sidecar", .synced = true, .lines = {}, .declared_length_ms = {}};
+    for (int line = 0; line < 8; ++line) {
+        synced.lines.push_back({.time_ms = line * 1'000, .text = "Line " + std::to_string(line)});
+    }
+    panel.showLyrics(synced);
+    panel.setPosition(2'100, false);
+    QCOMPARE(panel.currentLine(), 2);
+
+    // Page, as it always was: centred, the line sung bold, the rest dimmed alike.
+    QVERIFY(lines->item(2)->font().bold() && !lines->item(3)->font().bold());
+    QVERIFY((lines->item(2)->textAlignment() & Qt::AlignHCenter) != 0);
+    QCOMPARE(lines->item(3)->foreground().color(), lines->item(6)->foreground().color());
+    const auto page_size = lines->item(3)->font().pointSizeF();
+
+    // Chosen from the heading's menu, and kept.
+    auto* stage = panel.findChild<QAction*>(QStringLiteral("lyrics-look-stage"));
+    QVERIFY(stage != nullptr && panel.lookMenu()->actions().contains(stage));
+    stage->trigger();
+    QCOMPARE(panel.look(), LyricsLook::stage);
+    QCOMPARE(readLyricsLook(), LyricsLook::stage);
+    QVERIFY(lines->item(3)->font().pointSizeF() > page_size);
+    QVERIFY(lines->item(2)->font().pointSizeF() > lines->item(3)->font().pointSizeF());
+    // Lines recede the further they are from the one sung.
+    QVERIFY(lines->item(3)->foreground().color().alphaF() >
+            lines->item(6)->foreground().color().alphaF());
+    QCOMPARE(lines->item(1)->foreground().color().alphaF(),
+             lines->item(3)->foreground().color().alphaF());
+
+    // Reading: left, the line sung only in the accent.
+    panel.setLook(LyricsLook::reading);
+    QVERIFY((lines->item(2)->textAlignment() & Qt::AlignLeft) != 0);
+    QVERIFY(!lines->item(2)->font().bold());
+    QCOMPARE(lines->item(2)->foreground().color(), panel.palette().color(QPalette::Highlight));
+    QCOMPARE(lines->item(5)->foreground().color(), panel.palette().color(QPalette::Text));
+
+    // A look's own colours and size, kept for it alone.
+    LyricsLookSettings mine;
+    mine.sung = QColor{0xc0, 0x40, 0x20};
+    mine.lines = QColor{0x20, 0x40, 0x60};
+    mine.size_percent = 150;
+    panel.setLookSettings(mine);
+    QCOMPARE(lines->item(2)->foreground().color(), mine.sung);
+    QCOMPARE(lines->item(5)->foreground().color(), mine.lines);
+    QCOMPARE(readLyricsLookSettings(LyricsLook::reading), mine);
+    QCOMPARE(readLyricsLookSettings(LyricsLook::page), LyricsLookSettings{});
+    panel.setLook(LyricsLook::page);
+    QCOMPARE(panel.lookSettings(), LyricsLookSettings{});
+    QCOMPARE(lines->item(3)->font().pointSizeF(), page_size);
+    panel.setLook(LyricsLook::reading);
+    QCOMPARE(panel.lookSettings(), mine);
+
+    // The dialog draws each change at once; Cancel goes back, OK keeps.
+    {
+        LyricsLookDialog dialog{&panel};
+        auto changed = mine;
+        changed.sung = QColor{0x10, 0xa0, 0x10};
+        dialog.change(changed);
+        QCOMPARE(lines->item(2)->foreground().color(), changed.sung);
+        QCOMPARE(readLyricsLookSettings(LyricsLook::reading), mine);
+        dialog.reject();
+        QCOMPARE(lines->item(2)->foreground().color(), mine.sung);
+    }
+    {
+        LyricsLookDialog dialog{&panel};
+        auto changed = mine;
+        changed.sung = QColor{};
+        changed.font_family = QStringLiteral("Serif");
+        dialog.change(changed);
+        dialog.accept();
+        QCOMPARE(readLyricsLookSettings(LyricsLook::reading), changed);
+        QCOMPARE(lines->item(2)->foreground().color(), panel.palette().color(QPalette::Highlight));
+    }
+
+    // Sleeve: the playing album's cover behind the words, light on it.
+    panel.setLook(LyricsLook::sleeve);
+    QVERIFY(!panel.showsCover());
+    QImage cover{64, 64, QImage::Format_RGB32};
+    cover.fill(QColor{0x20, 0x60, 0xe0});
+    panel.setCover(cover);
+    QVERIFY(panel.showsCover());
+    const auto shot = panel.grab().toImage();
+    const auto ground = shot.pixelColor(shot.width() / 2, shot.height() - 4);
+    QVERIFY2(ground.blue() > ground.red() + 20, qPrintable(ground.name()));
+    QVERIFY(lines->item(5)->foreground().color().lightnessF() > 0.8F);
+    panel.setCover({});
+    QVERIFY(!panel.showsCover());
+
+    QSettings{}.remove(QStringLiteral("lyrics/look"));
+    QSettings{}.remove(QStringLiteral("lyrics/looks"));
+}
+
 // ADR-0276: the line being sung is highlighted, carried on between the
 // engine's reports while it plays, and a click on a line seeks there.
 void BenchMainWindowTest::lyricsPanelFollowsThePosition() {
