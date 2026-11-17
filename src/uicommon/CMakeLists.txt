@@ -31,3 +31,5 @@ target_link_libraries(
 )
 target_include_directories(trackknife_ui_common PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/..")
 target_compile_features(trackknife_ui_common PUBLIC cxx_std_23)
+
+melody_precompile_ui_headers(trackknife_ui_common)

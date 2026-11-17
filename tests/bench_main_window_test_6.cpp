@@ -608,7 +608,12 @@ void BenchMainWindowTest::metadataServiceSettingsAndCompactPages() {
     // The remote engine: none, until one is named. This computer's engine
     // (the fixture's) is not configured here (ADR-0227).
     QVERIFY(engine_socket->text().isEmpty());
-    engine_socket->setText(QStringLiteral("/run/user/1000/melodyd.sock"));
+    // Nowhere an engine runs: Save connects to it, and the key below is
+    // handed to whatever answers there.
+    const auto elsewhere = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation) +
+                           QStringLiteral("/no-engine-here.sock");
+    QVERIFY(!QFile::exists(elsewhere));
+    engine_socket->setText(elsewhere);
     // ADR-0286: one password for every engine -- none of its own to give.
     QVERIFY(dialog->findChild<QLineEdit*>(QStringLiteral("bench-settings-engine-token")) ==
             nullptr);
@@ -658,7 +663,7 @@ void BenchMainWindowTest::metadataServiceSettingsAndCompactPages() {
         ->click();
     QTRY_VERIFY(lifetime.isNull());
     QCOMPARE(QSettings{}.value(QLatin1String(SettingsDialog::library_engine_socket_key)).toString(),
-             QStringLiteral("/run/user/1000/melodyd.sock"));
+             elsewhere);
     QCOMPARE(QSettings{}.value(QLatin1String(SettingsDialog::acoustid_client_key)).toString(),
              QStringLiteral("test-client-key"));
     action->trigger();

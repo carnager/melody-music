@@ -1440,36 +1440,6 @@ void BenchMainWindowTest::dynamicPlaylistsAskTheEngineToPick() {
 }
 
 void BenchMainWindowTest::dynamicPlaylistCatalogAndEditor() {
-    // The settings the window kept its rules in before ADR-0349: still read,
-    // to hand them to each engine once.
-    DynamicPlaylistDefinition local{.id = QStringLiteral("favorites"),
-                                    .name = QStringLiteral("Favorites"),
-                                    .profile = QStringLiteral("local"),
-                                    .group_by = QStringLiteral("%albumartist%"),
-                                    .groups = 4,
-                                    .per_group = 2};
-    QVERIFY(saveDynamicPlaylists(local.profile, {local}));
-    auto loaded = loadDynamicPlaylists(local.profile);
-    QVERIFY(loaded);
-    QCOMPARE(loaded->size(), 1);
-    QCOMPARE(loaded->front().query, local.query);
-    QCOMPARE(loaded->front().group_by, local.group_by);
-    QCOMPARE(loaded->front().groups, 4);
-    QCOMPARE(loaded->front().per_group, 2);
-    // Groups need an expression to group by.
-    auto ungroupable = local;
-    ungroupable.group_by.clear();
-    QVERIFY(!saveDynamicPlaylists(local.profile, {ungroupable}));
-    QVERIFY(loadDynamicPlaylists(QStringLiteral("mpd/other"))->isEmpty());
-    QVERIFY(!saveDynamicPlaylists(QStringLiteral("mpd/other"), {local}));
-    QVERIFY(saveDynamicPlaylists(local.profile, {local}));
-    QSettings{}.setValue(QStringLiteral("dynamic-playlists/v1/mpd/future"),
-                         QByteArray{"{\"version\":99,\"definitions\":[]}"});
-    QVERIFY(!loadDynamicPlaylists(QStringLiteral("mpd/future")));
-    QSettings{}.remove(QStringLiteral("dynamic-playlists/v1/mpd/future"));
-    // Handed to this test's engine as the window reaches it.
-    QSettings{}.remove(QStringLiteral("dynamic-playlists/handed-v1"));
-
     BenchMainWindow window;
     window.show();
     QTRY_VERIFY(window.findChild<LocalLibraryPanel*>());
@@ -1480,16 +1450,9 @@ void BenchMainWindowTest::dynamicPlaylistCatalogAndEditor() {
     QVERIFY(dialog);
     auto* catalog = dialog->findChild<QComboBox*>(QStringLiteral("dynamic-catalog"));
     QVERIFY(catalog);
-    // "New", the seven that ship, and the one handed over -- the engine's.
-    QTRY_COMPARE_WITH_TIMEOUT(catalog->count(), 9, 5'000);
-    QCOMPARE(catalog->itemText(8), QStringLiteral("Favorites"));
-    {
-        const auto handed = window.localPlayback()->dynamicRules();
-        QCOMPARE(handed.size(), 8);
-        QCOMPARE(handed.back().id, local.id);
-        QCOMPARE(handed.back().groups, 4);
-        QVERIFY(handed.front().shipped());
-    }
+    // "New" and the seven that ship -- the engine's.
+    QTRY_COMPARE_WITH_TIMEOUT(catalog->count(), 8, 5'000);
+    QVERIFY(window.localPlayback()->dynamicRules().front().shipped());
     auto* save = dialog->findChild<QPushButton*>(QStringLiteral("dynamic-save"));
     auto* remove = dialog->findChild<QPushButton*>(QStringLiteral("dynamic-remove"));
     // A shipped rule is used and copied, not changed or removed.
@@ -1501,24 +1464,23 @@ void BenchMainWindowTest::dynamicPlaylistCatalogAndEditor() {
     QCOMPARE(save->text(), QStringLiteral("Save as copy"));
     dialog->findChild<QSpinBox*>(QStringLiteral("dynamic-per-group"))->setValue(2);
     save->click();
-    QTRY_COMPARE(catalog->count(), 10);
+    QTRY_COMPARE(catalog->count(), 9);
     QCOMPARE(catalog->itemText(catalog->currentIndex()), QStringLiteral("Random album (copy)"));
     QVERIFY(remove->isEnabled());
-    // The engine keeps it, and the window's settings stay as they were.
-    QTRY_COMPARE(window.localPlayback()->dynamicRules().size(), 9);
+    // The engine keeps it.
+    QTRY_COMPARE(window.localPlayback()->dynamicRules().size(), 8);
     QCOMPARE(window.localPlayback()->dynamicRules().back().per_group, 2);
     QCOMPARE(window.localPlayback()->dynamicRules()[1].per_group, 0);
-    QCOMPARE(loadDynamicPlaylists(QStringLiteral("local"))->size(), 1);
     remove->click();
-    QTRY_COMPARE(catalog->count(), 9);
-    QTRY_COMPARE(window.localPlayback()->dynamicRules().size(), 8);
+    QTRY_COMPARE(catalog->count(), 8);
+    QTRY_COMPARE(window.localPlayback()->dynamicRules().size(), 7);
     catalog->setCurrentIndex(0);
     emit catalog->activated(0);
     dialog->findChild<QLineEdit*>(QStringLiteral("dynamic-name"))->setText(QStringLiteral("Rock"));
     dialog->findChild<QLineEdit*>(QStringLiteral("dynamic-query"))
         ->setText(QStringLiteral("genre HAS rock"));
     save->click();
-    QTRY_COMPARE(catalog->count(), 10);
+    QTRY_COMPARE(catalog->count(), 9);
     dialog->findChild<QPushButton*>(QStringLiteral("dynamic-refresh"))->click();
     auto* status = dialog->findChild<QLabel*>(QStringLiteral("dynamic-status"));
     QTRY_VERIFY(status->text().startsWith(QStringLiteral("0 tracks")));
@@ -1554,13 +1516,8 @@ void BenchMainWindowTest::dynamicPlaylistCatalogAndEditor() {
     action->trigger();
     dialog = window.findChild<DynamicPlaylistDialog*>();
     QVERIFY(dialog);
-    QCOMPARE(dialog->findChild<QComboBox*>(QStringLiteral("dynamic-catalog"))->count(), 10);
+    QCOMPARE(dialog->findChild<QComboBox*>(QStringLiteral("dynamic-catalog"))->count(), 9);
     dialog->close();
-    // Handed once: the engine keeps its own from now on.
-    QVERIFY(QSettings{}
-                .value(QStringLiteral("dynamic-playlists/handed-v1/") + EngineKey::local().text())
-                .toBool());
-    QSettings{}.remove(QStringLiteral("dynamic-playlists/v1/local"));
 }
 
 // ADR-0141: a fresh sidecar beside the file projects onto probed rows

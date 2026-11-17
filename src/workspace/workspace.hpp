@@ -371,9 +371,7 @@ class Workspace final : public QObject {
     // window's old rules once it has told its own.
     void followContinuations(EngineLink& engine);
     // ADR-0349: the rules this window kept before go to `engine`, once.
-    void handOldDynamicRules(EngineLink& engine);
     // The engines being handed them now.
-    QSet<QString> handing_rules_;
     // Last explicitly played local list; transport stop does not release it.
     QString active_local_list_id_;
 

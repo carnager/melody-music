@@ -237,22 +237,6 @@ int main(const int argc, char** argv) {
         require(answer(dispatcher, "dynamic.delete", Json{{"id", "no-user"}}).contains("id"),
                 "and removed");
 
-        // Handed over: only what the engine does not know.
-        const auto adopted = answer(
-            dispatcher, "dynamic.adopt",
-            Json{{"rules",
-                  Json::array({Json{{"id", "loved"}, {"name", "Other"}, {"source", "loved"}},
-                               Json{{"id", "new"}, {"name", "New"}, {"query", "ALL"}},
-                               Json{{"id", "shipped:unrated"}, {"name", "Mine"}, {"query", "ALL"}},
-                               Json{{"id", "broken"}, {"name", "Broken"}, {"query", "((("}}})}});
-        require(adopted.at("adopted") == 1, "one new rule taken");
-        require(rules.find("loved")->name == "Loved", "a known rule is left as it is");
-        require(rules.find("shipped:unrated")->name == "Unrated", "a shipped one too");
-        require(!rules.find("broken"), "an invalid one is not taken");
-        require(answer(dispatcher, "dynamic.delete", Json{{"id", "new"}}).at("id") == "new",
-                "a rule is removed");
-        require(!call(dispatcher, "dynamic.delete", Json{{"id", "new"}}).result, "and is gone");
-
         // Played: the queue is the rule's selection, playing.
         const auto played = answer(dispatcher, "dynamic.play", Json{{"id", saved_id}});
         require(played.at("tracks") == 2, "the rule's limit");

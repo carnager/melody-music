@@ -1168,3 +1168,16 @@ set_tests_properties(
 
 # Every test apart from the user running it (cmake/TestIsolation.cmake).
 melody_isolate_tests()
+
+# The window's tests parse Qt and the standard library once, precompiled
+# (cmake/pch/ui.hpp), as the window's own code does -- not beside the
+# force-included qtry_narrowing.hpp, which would come before it.
+if(MELODY_QTRY_KEEPS_ITS_TYPES)
+    get_property(test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(target IN LISTS test_targets)
+        get_target_property(linked ${target} LINK_LIBRARIES)
+        if(linked MATCHES "Trackknife::(BenchUi|Workspace)")
+            melody_precompile_ui_headers(${target})
+        endif()
+    endforeach()
+endif()

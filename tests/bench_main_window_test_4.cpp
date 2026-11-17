@@ -2190,7 +2190,8 @@ void BenchMainWindowTest::theWindowFollowsAnEngineStartedElsewhere() {
     };
     QTRY_VERIFY2(marked(album[1]), "the playing row is not marked");
     QVERIFY(!marked(album[0]) && !marked(album[2]));
-    QTest::qWait(1'500);
+    // Past two of the engine's state reports.
+    QTest::qWait(1'100);
     QVERIFY2(marked(album[1]), "the playing row lost its mark");
     // The tags the other client gave are the engine's still: the window,
     // following, neither showed filenames nor sent its rows back in their
@@ -2268,7 +2269,8 @@ void BenchMainWindowTest::aListReplacedOnTheFollowedEngineMarksWhatPlays() {
     QTRY_VERIFY(tab->model->rowOfEntry(id(album[0]), -1) >= 0);
     QTRY_VERIFY2(marked(album[0]), "the new list's playing row is not marked");
     QVERIFY2(!marked(album[1]), "the row where the old track was is marked instead");
-    QTest::qWait(1'500);
+    // Past two of the engine's state reports.
+    QTest::qWait(1'100);
     QVERIFY2(marked(album[0]), "the playing row lost its mark");
     static_cast<void>((*other)->call("playback.stop"));
     (*other)->close();

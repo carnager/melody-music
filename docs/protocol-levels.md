@@ -59,7 +59,8 @@ ADR-0349: the dynamic playlist rules are the engine's.
   changed.
 - `dynamic.delete {id}`; a list continuing with the rule ends.
 - `dynamic.adopt {rules}` answers `{adopted}`: the rules whose ids the
-  engine does not know yet are kept, the others left as they are.
+  engine does not know yet are kept, the others left as they are. Removed
+  2026-11-17 with the hand-over it served (ADR-0349 amendment).
 - `dynamic.play {id}`: the queue replaced with the rule's selection from the
   engine's library, of no list, playing from its first track; answers
   `{playing, tracks}`. A Last.fm rule, or one that finds nothing, is

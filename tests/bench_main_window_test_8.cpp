@@ -2256,44 +2256,37 @@ void BenchMainWindowTest::autoAdvancesOncePerFinishedTrack() {
     QCOMPARE(*refreshed, 1U);
 
     // Each two-second track advances exactly one row, and transitions are
-    // gapless: the player never reports "ended" (7) between tracks — that
-    // state may only appear once the final track finishes.
-    bool ended_between_tracks = false;
-    {
-        const QDeadlineTimer advance_deadline{5'000};
-        int last_state = -1;
-        int ticks = 0;
-        while (!current(1) && !advance_deadline.hasExpired()) {
-            const auto state = window.property("trackknife-player-state").toInt();
-            ended_between_tracks = ended_between_tracks || state == 7;
-            if (state != last_state || ++ticks % 20 == 0) {
-                qInfo() << "player state" << state << "position"
-                        << window.property("trackknife-player-position").toLongLong() << "buffered"
-                        << window.property("trackknife-player-buffered").toLongLong() << "callbacks"
-                        << window.property("trackknife-player-callbacks").toLongLong() << "output"
-                        << window.property("trackknife-player-outputstate").toInt();
-                last_state = state;
-            }
+    // gapless: the engine never reports "stopped" between tracks -- that
+    // may only come once the final track finishes.
+    const auto stopped = [&window] {
+        return window.localPlayback() != nullptr &&
+               window.localPlayback()->state().status == QStringLiteral("stopped");
+    };
+    // The row is marked as the play is asked; the engine says so a moment later.
+    QTRY_VERIFY_WITH_TIMEOUT(window.localPlayback() != nullptr &&
+                                 window.localPlayback()->state().status ==
+                                     QStringLiteral("playing"),
+                             5'000);
+    bool stopped_between_tracks = false;
+    const auto follow_until = [&](const int row) {
+        const QDeadlineTimer row_deadline{5'000};
+        while (!current(row) && !row_deadline.hasExpired()) {
+            stopped_between_tracks = stopped_between_tracks || stopped();
             QTest::qWait(50);
         }
-    }
+    };
+    follow_until(1);
     QVERIFY(current(1));
     QTest::qWait(300);
     QVERIFY(current(1));
     QVERIFY(!current(2));
-    {
-        const QDeadlineTimer second_deadline{5'000};
-        while (!current(2) && !second_deadline.hasExpired()) {
-            ended_between_tracks =
-                ended_between_tracks || window.property("trackknife-player-state").toInt() == 7;
-            QTest::qWait(50);
-        }
-    }
+    follow_until(2);
     QVERIFY(current(2));
-    QVERIFY(!ended_between_tracks);
+    QVERIFY(!stopped_between_tracks);
 
     // The end of the list stays ended: no wrap-around back to the first row.
-    QTest::qWait(2'700);
+    QTRY_VERIFY_WITH_TIMEOUT(stopped(), 5'000);
+    QTest::qWait(300);
     QVERIFY(current(2));
     QVERIFY(!current(0));
 }

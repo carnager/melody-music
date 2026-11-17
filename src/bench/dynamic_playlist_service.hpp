@@ -14,14 +14,6 @@
 
 namespace trackknife::bench {
 
-// The definitions the window kept in its settings before ADR-0349, by
-// profile, independently versioned from ordinary playlists. No key or
-// password is stored in a definition, and no shipped one. They are handed to
-// each engine once; the engines keep the rules now.
-core::Result<QVector<DynamicPlaylistDefinition>> loadDynamicPlaylists(const QString& profile);
-core::Result<void> saveDynamicPlaylists(const QString& profile,
-                                        const QVector<DynamicPlaylistDefinition>& definitions);
-
 // A rule refreshed into tracks. ADR-0350: the engine picks -- from its
 // library, or what Last.fm suggests that its library has -- and this shows
 // what it picked.

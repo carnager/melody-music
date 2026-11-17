@@ -3392,8 +3392,9 @@ fi
         return label == nullptr ? QString{} : label->text();
     };
     QTRY_COMPARE_WITH_TIMEOUT(title(), QStringLiteral("run 3"), 10'000);
-    // Not asked since: the third answer did not ask.
-    QTest::qWait(2'500);
+    // Not asked since: the third answer did not ask (the others asked
+    // again after a second).
+    QTest::qWait(1'500);
     QFile told{asked};
     QVERIFY(told.open(QIODevice::ReadOnly));
     QCOMPARE(told.readAll().count('\n'), 3);

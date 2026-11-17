@@ -78,3 +78,11 @@ an engine's library and played by that engine. Lists are the engine's
 - `bench-main-window`: the editor lists, saves and removes the engine's
   rules; the window's old rules reach the engine once.
 - Home Assistant: the rules browsed as playlists and played.
+
+## Amendment, 2026-11-17: no hand-over
+
+Every engine the user has received the window's old rules long ago, and
+every user runs the latest of both. The window no longer reads the rules it
+kept in its settings, and `dynamic.adopt` is gone; an engine reached for the
+first time starts with the rules that ship. The settings keys
+(`dynamic-playlists/v1/…`, `handed-v1/…`, `adopted-v1`) are left unread.
