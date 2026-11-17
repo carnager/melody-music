@@ -9,6 +9,7 @@
 #include "bench/remote_engines.hpp"
 #include "bench/settings_dialog.hpp"
 
+#include <QDir>
 #include <QFile>
 #include <QProcess>
 #include <QRegularExpression>
@@ -535,9 +536,18 @@ void EngineLauncherTest::anOutdatedEngineIsSeenAndStopped() {
     Scratch scratch;
     QVERIFY(scratch.directory.isValid());
     // Its own copy of the program, so the test can replace it as a rebuild
-    // does without touching the build tree's.
-    const auto program = scratch.directory.filePath(QStringLiteral("melodyd"));
-    QVERIFY(QFile::copy(QStringLiteral(MELODY_ENGINE_BINARY), program));
+    // does without touching the build tree's. Beside it on disk, not in
+    // /tmp: a debug engine is over a hundred megabytes, copied three times.
+    QTemporaryDir programs{QStringLiteral(QT_TESTCASE_BUILDDIR) +
+                           QStringLiteral("/engine-launcher-programs-XXXXXX")};
+    QVERIFY(programs.isValid());
+    const auto copy = [](const QString& to) {
+        QFile source{QStringLiteral(MELODY_ENGINE_BINARY)};
+        return source.copy(to) ? QString{} : source.errorString();
+    };
+    const auto program = programs.filePath(QStringLiteral("melodyd"));
+    auto copied = copy(program);
+    QVERIFY2(copied.isEmpty(), qPrintable(copied));
     const auto saved = qgetenv("MELODY_ENGINE");
     qputenv("MELODY_ENGINE", program.toLocal8Bit());
     const auto restore = qScopeGuard([saved] { qputenv("MELODY_ENGINE", saved); });
@@ -547,7 +557,8 @@ void EngineLauncherTest::anOutdatedEngineIsSeenAndStopped() {
 
     // Rebuilt: a new file where the old one was, the old one still running.
     QVERIFY(QFile::remove(program));
-    QVERIFY(QFile::copy(QStringLiteral(MELODY_ENGINE_BINARY), program));
+    copied = copy(program);
+    QVERIFY2(copied.isEmpty(), qPrintable(copied));
     QVERIFY(localEngineOutdated(scratch.engine));
     QVERIFY(restartLocalEngine(scratch.engine).has_value());
     QVERIFY(!localEngineOutdated(scratch.engine));
@@ -561,8 +572,9 @@ void EngineLauncherTest::anOutdatedEngineIsSeenAndStopped() {
 
     // Not the program this build would start -- a window of a build tree
     // beside the installed engine: outdated where the window starts it...
-    const auto other = scratch.directory.filePath(QStringLiteral("melodyd-other"));
-    QVERIFY(QFile::copy(QStringLiteral(MELODY_ENGINE_BINARY), other));
+    const auto other = programs.filePath(QStringLiteral("melodyd-other"));
+    copied = copy(other);
+    QVERIFY2(copied.isEmpty(), qPrintable(copied));
     QVERIFY(connectLocalEngine(scratch.engine).has_value());
     qputenv("MELODY_ENGINE", other.toLocal8Bit());
     QVERIFY(localEngineOutdated(scratch.engine));
