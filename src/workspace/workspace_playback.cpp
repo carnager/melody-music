@@ -311,7 +311,7 @@ void Workspace::syncEngineQueue() {
         for (const auto& row : shown) {
             overrides.push_back(local_replay_gain_override(row));
         }
-        if (before && playback->engineLevel() >= 15) {
+        if (before) {
             playback->editQueue(*before, shown, overrides, document_text(id));
         } else {
             playback->replaceQueue(shown, overrides, document_text(id));

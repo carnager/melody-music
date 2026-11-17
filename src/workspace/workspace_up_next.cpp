@@ -309,14 +309,9 @@ void Workspace::restoreUpNext() {
                                    !playback_.requests.active();
             if (untouched) {
                 // Saved before the engine was: whose the tab it returns to is.
-                // An older release said only whether it was the remote's.
                 if (state.contains(QStringLiteral("engine"))) {
                     up_next_engine_ =
                         EngineKey::fromText(state.value(QStringLiteral("engine")).toString());
-                } else if (state.contains(QStringLiteral("remote"))) {
-                    up_next_engine_ = state.value(QStringLiteral("remote")).toBool()
-                                          ? EngineKey::remote()
-                                          : EngineKey::local();
                 } else if (const auto* returns_to =
                                tabForDocument(state.value(QStringLiteral("document")).toString())) {
                     up_next_engine_ = EngineKey::of(returns_to->document);
@@ -404,18 +399,6 @@ void Workspace::returnToList() {
     if (asking && playingOnEngine()) {
         transport_->next();
     }
-}
-
-void Workspace::enqueueRows(const ListTab& tab, std::vector<int> rows, const int position) {
-    std::ranges::sort(rows);
-    std::vector<LocalTrackRow> tracks;
-    for (const auto row : rows) {
-        if (row >= 0 && row < static_cast<int>(tab.model->rows().size())) {
-            tracks.push_back(tab.model->rows()[static_cast<std::size_t>(row)]);
-        }
-    }
-    enqueueLocalRequests(std::move(tracks), position, EngineKey::of(tab.document));
-    view_->refreshUpNext();
 }
 
 void Workspace::undoUpNext() {

@@ -49,19 +49,7 @@ Workspace::~Workspace() {
 }
 
 void Workspace::start() {
-    // ADR-0287: the database is the engine's, in its folder -- taken over
-    // from where Trackknife kept it before an engine is asked for, so neither
-    // this window nor the engine it starts opens an empty one beside it. An
-    // engine of before still running there keeps it, and this follows.
     isolateTestEngineState();
-    if (core::environment_variable("MELODY_STATE_DIR") == nullptr) {
-        if (const auto adopted =
-                core::adopt_legacy_engine_state(core::default_engine_state_directory());
-            !adopted) {
-            qWarning().noquote() << "The engine's files stay where they were:"
-                                 << QString::fromStdString(adopted.error().message);
-        }
-    }
     // ADR-0339: Melody's presets are its own -- not the engine's database,
     // which this window no longer opens -- shared with melody-cli; taken
     // over once from the database they shared with this computer's engine.
@@ -74,8 +62,6 @@ void Workspace::start() {
         qWarning().noquote() << "The presets stay with the engine:"
                              << QString::fromStdString(adopted.error().message);
     }
-    // ADR-0258: one set of dynamic playlists, whichever backend saved them.
-    adoptDynamicPlaylists(QStringLiteral("local"));
     connectLocalEngine();
     persistence_ = new ui::ListPersistenceService(database_path_, this);
     persistence_timer_ = new QTimer(this);

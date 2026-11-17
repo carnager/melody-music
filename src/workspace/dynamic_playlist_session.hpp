@@ -87,9 +87,8 @@ class DynamicPlaylistSession final : public QObject {
     [[nodiscard]] QString shuffleTip() const;
 
     [[nodiscard]] QString status() const { return status_; }
-    [[nodiscard]] bool canRefresh() const { return authority_valid_ && !busy_; }
+    [[nodiscard]] bool canRefresh() const { return !busy_; }
     [[nodiscard]] bool canOpen() const { return open_enabled_; }
-    [[nodiscard]] bool authorityValid() const { return authority_valid_; }
     [[nodiscard]] const DynamicPlaylistService::Tracks& tracks() const { return tracks_; }
     [[nodiscard]] LocalListModel* results() const { return results_; }
     [[nodiscard]] QString playlistName() const { return draft_.name.trimmed(); }
@@ -118,7 +117,6 @@ class DynamicPlaylistSession final : public QObject {
     void stop();
     // The library searched changed: rules refresh.
     void libraryChanged();
-    void invalidateAuthority();
     // While the window is shown: rules refresh now and then.
     void setShown(bool shown) { shown_ = shown; }
 
@@ -158,7 +156,6 @@ class DynamicPlaylistSession final : public QObject {
     bool loading_{false};
     bool busy_{false};
     bool refresh_pending_{false};
-    bool authority_valid_{true};
     bool open_enabled_{false};
     bool shown_{true};
     DynamicPlaylistService* service_;

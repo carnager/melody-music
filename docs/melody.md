@@ -268,16 +268,7 @@ and uploads nothing.
 
 ## Going back to an older melodyd
 
-A newer `melodyd` moves its database forward on start, and an older one
-then refuses it ("created by a newer application version"). To go back:
-
-1. Stop the engine and copy its `lists.sqlite` somewhere safe.
-2. Read the schema the database is at:
-   `sqlite3 lists.sqlite "SELECT version FROM schema_version"`.
-3. For every migration above the one the older release knows, newest
-   first, apply its down file from `src/persistence/migrations` of the
-   newer release: `sqlite3 lists.sqlite < 0051_engine_list_drafts.down.sql`.
-4. Start the older engine.
-
-A down migration loses only what its release added -- drafts, say, become
-ordinary working lists.
+A `melodyd` opens a database only at its own schema version; one made by a
+newer release is refused ("created by a newer application version"). Keep
+the `lists.sqlite` of the release you go back to, or start that release
+with an empty state directory.

@@ -285,16 +285,6 @@ bool TrackMatchSession::canStage() const {
            std::ranges::any_of(assignments_, [](const auto& value) { return value.has_value(); });
 }
 
-void TrackMatchSession::moveFile(const std::size_t from, const std::size_t to) {
-    if (!ready_ || from >= slots_.size() || to >= slots_.size() || from == to) {
-        return;
-    }
-    const auto local = slots_[from];
-    slots_.erase(slots_.begin() + static_cast<std::ptrdiff_t>(from));
-    slots_.insert(slots_.begin() + static_cast<std::ptrdiff_t>(to), local);
-    refresh(to);
-}
-
 bool TrackMatchSession::isGap(const std::size_t row) const {
     return ready_ && row < alignment_.release_tracks.size() && row < slots_.size() &&
            !slots_[row].has_value();
@@ -511,7 +501,6 @@ void TrackMatchSession::refresh(const std::optional<std::size_t> selected) {
         }
         rows_.push_back(std::move(entry));
     }
-    paired_count_ = count + taken;
     status_ = tr("%1 files paired · %2 files unmatched · %3 album tracks without a file. "
                  "Pairings are suggestions until you Stage matches.")
                   .arg(count + taken)

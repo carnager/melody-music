@@ -210,7 +210,6 @@ int main(int argc, char** argv) {
             return 0;
         }
     }
-    trackknife::bench::adoptTrackknifeNames();
     const auto restore_notice = trackknife::bench::applyPendingWorkspaceRestore();
 
     // ADR-0247: the colours chosen, with a style that paints them.

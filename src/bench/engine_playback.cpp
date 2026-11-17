@@ -950,16 +950,6 @@ EnginePlayback::queueCalls(const std::vector<LocalTrackRow>& rows,
         }
         return params;
     };
-    // An engine before level 15 takes a queue whole, as it always did.
-    if (engine_level_.load() < 15) {
-        auto whole = protocol::Json::array();
-        for (auto& entry : entries) {
-            whole.push_back(std::move(entry));
-        }
-        calls.emplace_back(QStringLiteral("playback.replace_queue"),
-                           with_list(protocol::Json{{"entries", std::move(whole)}}));
-        return calls;
-    }
     // ADR-0286: in parts, each within a line: the first replaces the queue,
     // each after it is inserted after the last entry so far.
     auto part = protocol::Json::array();

@@ -43,7 +43,6 @@ class EngineFolderSession final : public QObject {
     [[nodiscard]] bool canGoUp() const;
     [[nodiscard]] bool canChoose() const;
     [[nodiscard]] bool canMake() const;
-    [[nodiscard]] bool showsHidden() const { return show_hidden_; }
     // The folder Choose takes, as raw bytes: `row` in the one shown, or
     // (-1) the one shown.
     [[nodiscard]] std::string choice(int row) const;

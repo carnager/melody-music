@@ -112,9 +112,6 @@ class ArtworkSession final : public QObject, public TaggerArtwork {
     [[nodiscard]] bool canSave() const;
     [[nodiscard]] bool canDiscard() const;
     [[nodiscard]] bool canUndoSelected() const;
-    // The files' front cover, as the compact cover shows it.
-    [[nodiscard]] QImage frontImage() const { return shown_front_; }
-    [[nodiscard]] bool frontMixed() const { return shown_front_mixed_; }
     [[nodiscard]] bool frontEditable() const { return add_available_ && mutationIdle(); }
     [[nodiscard]] bool canRemoveFront() const;
 
@@ -137,7 +134,6 @@ class ArtworkSession final : public QObject, public TaggerArtwork {
 
     // The cover picker.
     [[nodiscard]] bool openPicker();
-    [[nodiscard]] bool pickerOpen() const { return picker_open_; }
     [[nodiscard]] const std::vector<PickerRow>& pickerRows() const { return picker_rows_; }
     [[nodiscard]] QString pickerStatus() const { return picker_status_; }
     // The row to start on, once there are rows; -1 for none.
@@ -221,8 +217,6 @@ class ArtworkSession final : public QObject, public TaggerArtwork {
     QFutureWatcher<core::Result<QString>> paste_watcher_;
     QImage front_image_;
     bool front_mixed_{false};
-    QImage shown_front_;
-    bool shown_front_mixed_{false};
     core::CancellationSource preview_cancellation_;
     std::size_t preview_generation_{0U};
     std::size_t preview_job_generation_{0U};

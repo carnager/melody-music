@@ -86,11 +86,6 @@ class QueueTableView final : public QTableView {
     void setLocalUrlDropCallback(std::function<bool(const QList<QUrl>&, int)> callback);
     void setLocalFilesDropCallback(std::function<bool(const LocalFilesMimeData&, int)> callback);
 
-    // Maps a drop position to the row content should be inserted before.
-    // Above/on the hovered row inserts before it, below inserts after it, and
-    // empty space appends.
-    [[nodiscard]] int dropInsertionRow(const QPoint& position,
-                                       DropIndicatorPosition indicator) const;
     // Resolves the actual drag target from row geometry. The upper half inserts
     // before, the lower half inserts after, and an album header targets the
     // beginning of that album. This is also the row painted by the custom

@@ -537,14 +537,9 @@ class Workspace final : public QObject {
     // reordered, another's moved there (copied when `copy`, or from a
     // dynamic result), files added. False when it cannot take them.
     bool dropOnList(Dragged dragged, ListTab& target, int insertion_row, bool copy);
-    // Dropped where no list is: a new list of them, shown.
-    bool dropOnNewList(Dragged dragged, bool copy);
     // Dropped on Up Next before `position` (-1: the end): tracks, not
     // folders or files from elsewhere.
     bool dropOnUpNext(Dragged dragged, int position);
-    // Dropped on a list in the lists pane: open here, as on its tab; not
-    // open, copied into it once it is.
-    bool dropOnEngineList(Dragged dragged, const EngineKey& engine, const QString& id);
     // Files of `files_engine` added to the list `id` before `row` (-1: the
     // end), as that list's engine sees them.
     void addDroppedPaths(const QString& id, const EngineKey& files_engine,
@@ -595,8 +590,6 @@ class Workspace final : public QObject {
     // A list's columns as chosen now -- what was saved is replaced -- and
     // one of them shown or hidden; the last shown is not hidden (false).
     void setTrackViewLayout(ListTab& tab, ui::TrackViewLayout layout);
-    bool setColumnVisible(ListTab& tab, ui::TrackViewLayout layout, const QString& id,
-                          bool visible);
     // ADR-0233: another client's version of a list open here. A row that is
     // the same entry of the same file keeps what is already known of it.
     void adoptEngineList(const persistence::ListDocument& document);
@@ -699,10 +692,6 @@ class Workspace final : public QObject {
     // lists an older release made for "the remote".
     void connectLocalEngine();
     // ADR-0286: the working lists an engine set aside, offered once a run.
-    void offerRetiredLists(const EngineKey& key);
-    void openRetiredLists(const EngineKey& key, const QStringList& ids, qsizetype from);
-    void dropRetiredLists(const EngineKey& key, const QStringList& ids);
-    QSet<QString> retired_offered_;
     void connectRemoteEngine(const RemoteEngineSetting& setting, bool first);
     // Settings changed: engines no longer listed let go, new ones connected.
     void syncRemoteEngines();
@@ -820,8 +809,6 @@ class Workspace final : public QObject {
     // Up Next's last edit taken back.
     void undoUpNext();
     void returnToList();
-    // A list's `rows` asked for: at the front (0), the end (-1) or `position`.
-    void enqueueRows(const ListTab& tab, std::vector<int> rows, int position);
     // Its rows, covers and the engine's requests brought up to date; true
     // when the rows were replaced.
     bool syncUpNextModel();

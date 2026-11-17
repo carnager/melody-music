@@ -20,67 +20,6 @@
 
 namespace trackknife::bench {
 
-namespace {
-
-// The same place under Trackknife's name (ADR-0287): each of the path's last
-// two components that is the application's name now, the old one.
-[[nodiscard]] QString underOldName(const QString& path) {
-    const auto name = QCoreApplication::applicationName();
-    auto parts = QDir::cleanPath(path).split(QLatin1Char('/'));
-    for (auto index = parts.size() - 1; index >= 0 && index >= parts.size() - 2; --index) {
-        if (parts[index] == name) {
-            parts[index] = QStringLiteral("trackknife");
-        } else if (parts[index].startsWith(name + QLatin1Char('.'))) {
-            // The settings file, melody.conf or however its format names it.
-            parts[index] = QStringLiteral("trackknife") + parts[index].sliced(name.size());
-        }
-    }
-    return parts.join(QLatin1Char('/'));
-}
-
-} // namespace
-
-void adoptTrackknifeNames() {
-    // ADR-0287: settings, the window's data and its cache move from
-    // Trackknife's names, once. The data folder was the engine's too: only
-    // the window's own entries move here, the engine moves its own.
-    const auto new_settings = QSettings{}.fileName();
-    if (const auto old_settings = underOldName(new_settings); old_settings != new_settings &&
-                                                              !QFile::exists(new_settings) &&
-                                                              QFile::exists(old_settings)) {
-        QDir{}.mkpath(QFileInfo{new_settings}.absolutePath());
-        if (QFile::rename(old_settings, new_settings)) {
-            // The rating backup copy kept under the name it had by default
-            // then, so no file is written again for the new default.
-            QSettings settings;
-            if (settings.value(QLatin1String(SettingsKeys::rating_backup_key), false).toBool() &&
-                !settings.contains(QLatin1String(SettingsKeys::rating_backup_tag_key))) {
-                settings.setValue(QLatin1String(SettingsKeys::rating_backup_tag_key),
-                                  QStringLiteral("TRACKKNIFE_RATING"));
-            }
-        }
-    }
-    const auto new_data = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    if (const QDir old_data{underOldName(new_data)};
-        old_data.path() != new_data && old_data.exists()) {
-        QDir{}.mkpath(new_data);
-        for (const auto& name : old_data.entryList(QDir::AllEntries | QDir::NoDotAndDotDot)) {
-            const bool windows =
-                name == QStringLiteral("tabs") || name == QStringLiteral("lastfm-v1.json") ||
-                name == QStringLiteral("melodyd.log") || name.startsWith(QStringLiteral("before-"));
-            if (windows && !QFileInfo::exists(new_data + QLatin1Char('/') + name)) {
-                QDir{}.rename(old_data.filePath(name), new_data + QLatin1Char('/') + name);
-            }
-        }
-    }
-    const auto new_cache = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-    if (const auto old_cache = underOldName(new_cache);
-        old_cache != new_cache && !QDir{new_cache}.exists() && QDir{old_cache}.exists()) {
-        QDir{}.mkpath(QFileInfo{new_cache}.absolutePath());
-        QDir{}.rename(old_cache, new_cache);
-    }
-}
-
 void isolateTestEngineState() {
     if (!QStandardPaths::isTestModeEnabled()) {
         return;

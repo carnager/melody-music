@@ -50,11 +50,6 @@ class ListPersistenceService final : public QObject {
     // ADR-0259: `lists` false once the window keeps its tabs elsewhere; the
     // lists stored here are then not read at all.
     void initialize(WorkspaceCallback callback, bool lists = true);
-    void saveWorkspace(std::vector<persistence::ListDocumentWrite> lists,
-                       std::vector<persistence::TrackViewPreset> presets,
-                       CompletionCallback callback = {});
-    void saveProfiles(std::vector<persistence::ConnectionProfile> profiles,
-                      CompletionCallback callback = {});
     void loadMetadataTransformationChains(TransformationChainsCallback callback);
     void saveMetadataTransformationChain(persistence::SavedMetadataTransformationChain chain,
                                          CompletionCallback callback = {});
@@ -73,30 +68,12 @@ class ListPersistenceService final : public QObject {
     void loadUiState(QString key, UiStateCallback callback);
     void saveUiState(QString key, QByteArray value, CompletionCallback callback = {});
     void backupDatabase(std::filesystem::path destination, CompletionCallback callback);
-    void recordLocalListen(persistence::ListItem source, core::StableId occurrence_id,
-                           std::int64_t played_at_ms, CompletionCallback callback);
-
-    // Window shutdown is the only blocking persistence boundary. Database work
-    // still runs on the service thread and the call guarantees durable edits.
-    [[nodiscard]] QString saveWorkspaceAndWait(std::vector<persistence::ListDocumentWrite> lists,
-                                               std::vector<persistence::TrackViewPreset> presets);
-    // Called from a mutation worker after physical publication. The SQLite
-    // transaction stays on the serialized persistence thread.
-    [[nodiscard]] core::Result<persistence::LocalMetadataRefreshResult>
-    refreshLocalMetadataAndWait(persistence::LocalMetadataRefresh refresh);
-    [[nodiscard]] core::Result<persistence::LocalSourceRelocationResult>
-    relocateLocalSourceAndWait(persistence::LocalSourceRelocation relocation);
-
-  signals:
-    void listeningHistoryChanged();
 
   private:
     struct State;
     QThread* thread_{nullptr};
     QObject* worker_{nullptr};
     std::shared_ptr<State> state_;
-    unsigned pending_listens_{0};
-    unsigned pending_resume_writes_{0};
 };
 
 } // namespace trackknife::ui

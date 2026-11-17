@@ -50,6 +50,11 @@ class Workspace;
 void register_list_methods(protocol::Dispatcher& dispatcher, Workspace& workspace, EventSink sink,
                            Player& player, const LocalCatalogue* catalogue = nullptr);
 
+// playback.edit_queue alone: what changes the queue in place needs only the
+// player. Registered with the list methods; a dispatcher of playback alone
+// can have it too.
+void register_queue_edit_methods(protocol::Dispatcher& dispatcher, Player& player);
+
 // A list item as the protocol says it, both ways (ADR-0256), and one for an
 // indexed track, named from the library -- for the playlist folder
 // (ADR-0296) as for list.from_query.

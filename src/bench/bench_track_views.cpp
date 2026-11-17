@@ -223,10 +223,6 @@ BenchMainWindow::captureTrackViewLayout(const QTableView* view,
     return layout;
 }
 
-void BenchMainWindow::setTrackViewPresentation(const ui::TrackViewPresentation presentation) {
-    chooseListView(ui::trackViewPresentationId(presentation));
-}
-
 void BenchMainWindow::chooseListView(const QString& id) {
     auto* tab = currentListTab();
     const auto definition = findListView(id);

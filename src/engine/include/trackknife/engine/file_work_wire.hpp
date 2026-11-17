@@ -128,8 +128,6 @@ decode_path_preflight(const Json& value);
 [[nodiscard]] core::Result<operations::PreparationPlan> decode_preparation_plan(const Json& value);
 
 [[nodiscard]] Json encode(const operations::FilePublicationCommitResult& commit);
-[[nodiscard]] core::Result<operations::FilePublicationCommitResult>
-decode_publication_commit(const Json& value);
 
 [[nodiscard]] Json encode(const operations::FilePublicationApplyResult& result);
 [[nodiscard]] core::Result<operations::FilePublicationApplyResult>
@@ -150,8 +148,6 @@ decode_undo_outcomes(const Json& value);
 
 // Naming layouts and move destinations as saved: {id, profile}.
 [[nodiscard]] Json encode(const persistence::SavedOutputLayoutProfile& saved);
-[[nodiscard]] core::Result<persistence::SavedOutputLayoutProfile>
-decode_saved_layout(const Json& value);
 [[nodiscard]] Json encode(const persistence::SavedDestinationProfile& saved);
 [[nodiscard]] core::Result<persistence::SavedDestinationProfile>
 decode_saved_destination(const Json& value);

@@ -360,7 +360,6 @@ class BenchMainWindowTest final : public QObject {
     void anotherEngineAtTheSameAddressLeavesTheOldOnesLists();
     void theListsPanelShowsEveryListAndTakesDrops();
     void aScratchTabNeverReachesItsEngine();
-    void listsLeftOnTheEngineAreOfferedOnce();
     void theTabStoreKeepsWhatItCannotRead();
     void aRestoreTakesBackOnlyWhatIsTicked();
     void aPlayingTabsEditsReachTheQueueAsEdits();

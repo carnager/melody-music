@@ -454,29 +454,6 @@ int main(int argc, char** argv) {
         std::cerr << "melodyd: another engine is using " << state_directory.string() << "\n";
         return EXIT_FAILURE;
     }
-    // ADR-0287: the default folder takes over an engine's state from where
-    // it was kept under Trackknife's name, once, before anything is opened.
-    if (state_directory == trackknife::core::default_engine_state_directory() &&
-        trackknife::core::environment_variable("MELODY_STATE_DIR") == nullptr) {
-        if (const auto adopted = trackknife::core::adopt_legacy_engine_state(state_directory);
-            !adopted) {
-            const auto legacy = trackknife::core::legacy_engine_state_directory();
-            if (adopted.error().code == trackknife::core::ErrorCode::conflict) {
-                // An engine of before still has it: starting empty beside it
-                // would only hide the library.
-                std::cerr << "melodyd: " << adopted.error().message << ", " << legacy.string()
-                          << "; stop it first\n";
-                return EXIT_FAILURE;
-            }
-            std::cerr << "melodyd: could not move the engine's files to "
-                      << state_directory.string() << ": " << adopted.error().message
-                      << "; running from " << legacy.string() << "\n";
-            state_directory = legacy;
-        } else if (*adopted > 0U) {
-            std::cerr << "melodyd: moved the engine's files to " << state_directory.string()
-                      << "\n";
-        }
-    }
     if (!hold_lock(std::filesystem::path{socket_path.string() + ".lock"})) {
         std::cerr << "melodyd: another engine is starting on " << socket_path.string() << "\n";
         return EXIT_FAILURE;

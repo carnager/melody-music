@@ -127,17 +127,6 @@ void LocalListModel::replaceRows(std::vector<LocalTrackRow> rows, const bool rem
     }
 }
 
-void LocalListModel::appendPaths(std::vector<std::string> raw_paths, const int insertion_row) {
-    std::vector<LocalTrackRow> rows;
-    rows.reserve(raw_paths.size());
-    for (auto& raw : raw_paths) {
-        LocalTrackRow row;
-        row.raw_path = std::move(raw);
-        rows.push_back(std::move(row));
-    }
-    appendRows(std::move(rows), insertion_row);
-}
-
 void LocalListModel::applyTechnicals(const std::string& raw_path,
                                      const LocalTrackTechnicals& technicals) {
     bool changed = false;

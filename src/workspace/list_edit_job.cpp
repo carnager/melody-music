@@ -66,12 +66,6 @@ void ListEditJob::sort(const QString& expression, const bool descending) {
 
 void ListEditJob::reverse() { start({.kind = lists::EditKind::reverse, .expression = {}}); }
 
-void ListEditJob::shuffleAlbums() {
-    start({.kind = lists::EditKind::shuffle_albums,
-           .expression = {},
-           .seed = QRandomGenerator::global()->generate()});
-}
-
 void ListEditJob::removeDuplicates() {
     start({.kind = lists::EditKind::remove_duplicates, .expression = {}});
 }

@@ -34,8 +34,6 @@ enum class PreparationPlanIssueKind : std::uint8_t {
     replaygain_unavailable,
 };
 
-[[nodiscard]] std::string_view preparation_plan_issue_kind_name(PreparationPlanIssueKind kind);
-
 struct PreparationPlanIssue {
     PreparationPlanIssueKind kind{PreparationPlanIssueKind::no_effect};
     bool blocking{true};

@@ -87,3 +87,11 @@ level's additions are listed in `docs/protocol-levels.md`.
   newer, other protocol, no level at all.
 - Trackknife, `melody-cli` and the Android client refuse another protocol
   with that message and warn once about an older level.
+
+## Amendment, 2026-11-17: no older engines
+
+Every user runs the latest client and engine, so a client no longer uses an
+engine of an older level "without what it lacks": it treats it as it does
+another protocol -- not used, said once, the engine named to update. The
+paths kept for engines below levels 15 and 24 are gone, and none are
+written again. A newer engine still serves an older client.

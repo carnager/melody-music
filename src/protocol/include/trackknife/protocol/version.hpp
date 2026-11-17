@@ -25,12 +25,12 @@ struct PeerVersion {
 };
 [[nodiscard]] PeerVersion peer_version(const Json& engine_info);
 
+// A client uses an engine of its own protocol at its own level or newer,
+// and no other: every user runs the latest of both, so no client keeps a
+// path for what an older engine lacked.
 enum class Compatibility {
-    // The same protocol and level, or a newer level: everything works.
     full,
-    // The same protocol at a lower level: what it lacks does not work.
-    older_engine,
-    // Another protocol: nothing can be relied on.
+    // Another protocol, or an older level: not used.
     incompatible,
 };
 [[nodiscard]] Compatibility compatibility(PeerVersion engine);

@@ -724,19 +724,6 @@ void QueueTableView::setLocalUrlDropCallback(
     local_url_drop_callback_ = std::move(callback);
 }
 
-int QueueTableView::dropInsertionRow(const QPoint& position,
-                                     const DropIndicatorPosition indicator) const {
-    const auto hovered = indexAt(position);
-    if (!hovered.isValid()) {
-        return model()->rowCount();
-    }
-    auto row = hovered.row();
-    if (indicator == QAbstractItemView::BelowItem) {
-        ++row;
-    }
-    return row;
-}
-
 int QueueTableView::resolvedDropInsertionRow(const QPoint& position) const {
     if (model() == nullptr) {
         return 0;

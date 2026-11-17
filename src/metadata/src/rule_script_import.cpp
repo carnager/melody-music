@@ -55,28 +55,6 @@ struct Node {
     return std::string{first, last};
 }
 
-[[nodiscard]] std::string escape_argument_literal(const std::string_view value) {
-    std::string result;
-    result.reserve(value.size());
-    for (const auto character : value) {
-        if (character == '$' || character == '%' || character == ',' || character == '(' ||
-            character == ')' || character == '\\') {
-            result.push_back('\\');
-        }
-        result.push_back(character);
-    }
-    return result;
-}
-
-[[nodiscard]] core::Error export_error(const core::ErrorCode code, std::string message,
-                                       const std::size_t action_index) {
-    return core::Error{
-        .code = code,
-        .message = std::move(message),
-        .context = {{.key = "action", .value = std::to_string(action_index)}},
-    };
-}
-
 [[nodiscard]] bool layout_only(const std::string_view value) {
     return std::ranges::all_of(value, ascii_space);
 }
@@ -717,71 +695,6 @@ import_metadata_rule_script(const std::string_view source,
         translator.translate(syntax);
     }
     return result;
-}
-
-core::Result<std::string>
-export_metadata_rule_script(const std::span<const MetadataTransformationAction> actions) {
-    if (actions.empty()) {
-        return std::unexpected(export_error(core::ErrorCode::invalid_argument,
-                                            "Raw cleanup source requires at least one action", 0U));
-    }
-
-    std::string source;
-    for (std::size_t index = 0U; index < actions.size(); ++index) {
-        auto line = std::visit(
-            [index](const auto& action) -> core::Result<std::string> {
-                using Action = std::decay_t<decltype(action)>;
-                const auto target = [&] {
-                    if constexpr (std::is_same_v<Action, MetadataCaptureValuesAction> ||
-                                  std::is_same_v<Action, MetadataBlocklistFieldsAction> ||
-                                  std::is_same_v<Action, MetadataAllowlistFieldsAction>) {
-                        return std::string{};
-                    } else {
-                        return escape_argument_literal(action.target_field);
-                    }
-                }();
-                if constexpr (std::is_same_v<Action, MetadataRemoveFieldAction>) {
-                    if (action.match_mode == MetadataFieldMatchMode::exact_native) {
-                        return "$delete(" + target + ')';
-                    }
-                } else if constexpr (std::is_same_v<Action, MetadataRemoveFieldIfAction>) {
-                    if (action.match_mode == MetadataFieldMatchMode::exact_native &&
-                        action.dialect == titleformat::DialectVersion{}) {
-                        return "$if(" + action.condition + ",$delete(" + target + "))";
-                    }
-                } else if constexpr (std::is_same_v<Action, MetadataFormatValueAction>) {
-                    if (action.dialect == titleformat::DialectVersion{}) {
-                        return "$set(" + target + ',' + action.source + ')';
-                    }
-                } else if constexpr (std::is_same_v<Action, MetadataKeepFirstCharactersAction>) {
-                    if (!action.target_field.contains('%')) {
-                        return "$set(" + target + ",$left(%" + action.target_field + "%," +
-                               std::to_string(action.character_count) + "))";
-                    }
-                }
-                return std::unexpected(export_error(
-                    core::ErrorCode::unsupported,
-                    "This typed transformation step is not representable by the raw cleanup "
-                    "script subset",
-                    index));
-            },
-            actions[index]);
-        if (!line) {
-            return std::unexpected(std::move(line.error()));
-        }
-        if (!source.empty()) {
-            source.push_back('\n');
-        }
-        source += *line;
-    }
-
-    const auto round_trip = import_metadata_rule_script(source);
-    if (round_trip.has_errors() || !std::ranges::equal(round_trip.actions, actions)) {
-        return std::unexpected(export_error(
-            core::ErrorCode::unsupported,
-            "The typed transformation cannot round-trip through raw cleanup source", 0U));
-    }
-    return source;
 }
 
 } // namespace trackknife::metadata

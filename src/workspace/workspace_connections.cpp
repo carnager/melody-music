@@ -98,7 +98,6 @@ void Workspace::connectLocalEngine() {
         list_sync_->reconnected(localPlayback());
         flushEngineRelocations();
         view_->engineListsChanged();
-        offerRetiredLists(EngineKey::local());
         QTimer::singleShot(0, this, [this] { renewOutdatedLocalEngine(); });
         // What it is doing now is not news; a start after this is.
         rememberEngineState(localPlayback());
@@ -112,7 +111,6 @@ void Workspace::connectLocalEngine() {
     });
     if (localPlayback()->active()) {
         QTimer::singleShot(0, this, [this] { renewOutdatedLocalEngine(); });
-        QTimer::singleShot(0, this, [this] { offerRetiredLists(EngineKey::local()); });
         // An engine starts with its own defaults and has never heard of this
         // window's settings, so they are handed over the moment the connection
         // exists. This runs after the transport is built, which is why sending
@@ -281,7 +279,6 @@ void Workspace::connectRemoteEngine(const RemoteEngineSetting& setting, const bo
             list_sync_->reconnected(link->playback);
             flushEngineRelocations();
             view_->engineListsChanged();
-            offerRetiredLists(link->key);
         });
     }
     connect(link->playback, &EnginePlayback::changed, this, [this, link] {
@@ -510,8 +507,7 @@ void Workspace::checkMissing(const QString& document_id, std::vector<std::string
             seen.emplace(row.raw_path, *row.source_revision);
         }
     }
-    const bool resolves = playbackOf(EngineKey::of(tab->document)) != nullptr &&
-                          playbackOf(EngineKey::of(tab->document))->engineLevel() >= 15;
+    const bool resolves = playbackOf(EngineKey::of(tab->document)) != nullptr;
     const QPointer self{this};
     static_cast<void>(QtConcurrent::run(
         [self, work, document_id, paths = std::move(paths), seen = std::move(seen), resolves] {
@@ -891,79 +887,4 @@ void Workspace::flushEngineRelocations() {
 // ADR-0286: the working lists an engine set aside when tabs became this
 // window's -- tabs of earlier, of this window or another -- offered once a
 // run: opened as tabs, or discarded. Neither, they are offered again.
-void Workspace::offerRetiredLists(const EngineKey& key) {
-    auto* engine = playbackOf(key);
-    if (engine == nullptr || engine->engineLevel() < 15 || retired_offered_.contains(key.text())) {
-        return;
-    }
-    retired_offered_.insert(key.text());
-    engine->request(QStringLiteral("list.retired"), protocol::Json::object(),
-                    [this, key](const core::Result<protocol::Json>& answer) {
-                        if (!answer) {
-                            return;
-                        }
-                        QStringList names;
-                        QStringList ids;
-                        for (const auto& list : answer->value("lists", protocol::Json::array())) {
-                            ids << QString::fromStdString(list.value("id", std::string{}));
-                            names << QString::fromUtf8(list.value("name", std::string{}));
-                        }
-                        if (ids.isEmpty()) {
-                            return;
-                        }
-                        view_->offerRetiredLists(engineName(key), names,
-                                                 [this, key, ids](const RetiredChoice choice) {
-                                                     if (choice == RetiredChoice::open) {
-                                                         openRetiredLists(key, ids, 0);
-                                                     } else if (choice == RetiredChoice::discard) {
-                                                         dropRetiredLists(key, ids);
-                                                     }
-                                                 });
-                    });
-}
-
-void Workspace::openRetiredLists(const EngineKey& key, const QStringList& ids,
-                                 const qsizetype from) {
-    auto* engine = playbackOf(key);
-    if (engine == nullptr) {
-        return;
-    }
-    if (from >= ids.size()) {
-        dropRetiredLists(key, ids);
-        schedulePersist();
-        return;
-    }
-    engine->request(
-        QStringLiteral("list.retired_get"), protocol::Json{{"id", ids[from].toStdString()}},
-        [this, key, ids, from](const core::Result<protocol::Json>& answer) {
-            if (answer) {
-                if (auto document = EngineListSync::documentFromAnswer(*answer, key)) {
-                    // A tab of this window's from now on, never sent anywhere.
-                    document->kind = persistence::ListKind::scratch;
-                    document->dirty = false;
-                    if (tabForDocument(QString::fromStdString(document->id.to_string())) ==
-                        nullptr) {
-                        if (auto* added = addList(std::move(*document), from == 0)) {
-                            describeEngineRows(*added);
-                        }
-                    }
-                }
-            }
-            openRetiredLists(key, ids, from + 1);
-        });
-}
-
-void Workspace::dropRetiredLists(const EngineKey& key, const QStringList& ids) {
-    auto* engine = playbackOf(key);
-    if (engine == nullptr) {
-        return;
-    }
-    auto named = protocol::Json::array();
-    for (const auto& id : ids) {
-        named.push_back(id.toStdString());
-    }
-    engine->request(QStringLiteral("list.retired_drop"), protocol::Json{{"ids", std::move(named)}},
-                    [](const core::Result<protocol::Json>&) {});
-}
-
 } // namespace trackknife::bench

@@ -1863,10 +1863,6 @@ void TaggerSession::finishProposals() {
     emit proposalsSettled(true);
 }
 
-std::size_t TaggerSession::itemCount() const {
-    return grid_model_ != nullptr ? grid_model_->selection().item_count() : 0U;
-}
-
 const metadata::StagedMetadataSource* TaggerSession::itemSource(const std::size_t item) const {
     if (grid_model_ == nullptr || item >= grid_model_->selection().item_count()) {
         return nullptr;

@@ -21,9 +21,6 @@ namespace trackknife::bench {
 core::Result<QVector<DynamicPlaylistDefinition>> loadDynamicPlaylists(const QString& profile);
 core::Result<void> saveDynamicPlaylists(const QString& profile,
                                         const QVector<DynamicPlaylistDefinition>& definitions);
-// ADR-0258: moves definitions saved under any other profile -- the retired
-// MPD backend kept its own -- into `profile`, once.
-void adoptDynamicPlaylists(const QString& profile);
 
 // A rule refreshed into tracks. ADR-0350: the engine picks -- from its
 // library, or what Last.fm suggests that its library has -- and this shows

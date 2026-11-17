@@ -243,38 +243,28 @@ void Workspace::describeEngineRowsFrom(const QString& document_id,
         done();
         return;
     }
-    // ADR-0286: by path -- a tab is no list of the engine's -- from an engine
-    // of level 15; by entry of the engine's list from one older.
-    const bool by_path = engine->engineLevel() >= 15;
+    // ADR-0286: by path -- a tab is no list of the engine's.
     auto asked = protocol::Json::array();
     std::vector<std::string> asked_entries;
     {
         std::unordered_map<std::string, std::string> path_of;
-        if (by_path) {
-            for (const auto& row : tab->model->rows()) {
-                path_of.emplace(row.entry_id.to_string(), row.raw_path);
-            }
+        for (const auto& row : tab->model->rows()) {
+            path_of.emplace(row.entry_id.to_string(), row.raw_path);
         }
         for (auto index = from; index < std::min(entries.size(), from + part); ++index) {
             const auto entry = entries[index].to_string();
-            if (!by_path) {
-                asked.push_back(entry);
-            } else if (const auto path = path_of.find(entry); path != path_of.end()) {
+            if (const auto path = path_of.find(entry); path != path_of.end()) {
                 asked.push_back(protocol::encode_raw_path(path->second));
                 asked_entries.push_back(entry);
             }
         }
     }
     engine->request(
-        by_path ? QStringLiteral("catalogue.describe") : QStringLiteral("list.describe"),
-        by_path ? protocol::Json{{"paths", std::move(asked)}}
-                : protocol::Json{{"id", document_id.toStdString()}, {"entries", std::move(asked)}},
+        QStringLiteral("catalogue.describe"), protocol::Json{{"paths", std::move(asked)}},
         [this, document_id, entries = std::move(entries), from, done,
          asked_entries =
              std::move(asked_entries)](const core::Result<protocol::Json>& answer) mutable {
             auto* target = tabForDocument(document_id);
-            // An engine from before ADR-0259 does not describe: the rows keep
-            // the names they were saved with.
             if (target == nullptr || !answer) {
                 done();
                 return;
@@ -289,10 +279,11 @@ void Workspace::describeEngineRowsFrom(const QString& document_id,
             for (std::size_t index = 0; index < items.size(); ++index) {
                 const auto& item = items[index];
                 const auto library = item.find("library");
-                // By path, the answers come in the order asked.
-                const auto entry = index < asked_entries.size()
-                                       ? asked_entries[index]
-                                       : item.value("entry", std::string{});
+                // The answers come in the order asked.
+                if (index >= asked_entries.size()) {
+                    break;
+                }
+                const auto& entry = asked_entries[index];
                 const auto at = row_of.find(entry);
                 if (library == item.end() || library->is_null() || at == row_of.end()) {
                     continue;
@@ -1018,20 +1009,6 @@ void Workspace::renameList(ListTab& tab, const QString& name) {
     }
     tab.document.name = utf8Bytes(trimmed);
     markTabDirty(tab);
-}
-
-bool Workspace::setColumnVisible(ListTab& tab, ui::TrackViewLayout layout, const QString& id,
-                                 const bool visible) {
-    // The last column shown stays.
-    const auto visible_count =
-        std::ranges::count(layout.columns, true, &ui::TrackViewColumnLayout::visible);
-    const auto found = std::ranges::find(layout.columns, id, &ui::TrackViewColumnLayout::id);
-    if (found == layout.columns.end() || (!visible && found->visible && visible_count == 1)) {
-        return false;
-    }
-    found->visible = visible;
-    setTrackViewLayout(tab, std::move(layout));
-    return true;
 }
 
 void Workspace::setTrackViewLayout(ListTab& tab, ui::TrackViewLayout layout) {

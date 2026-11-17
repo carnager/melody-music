@@ -22,7 +22,7 @@ void BenchMainWindow::showDynamicPlaylists() {
     const auto from = workspace_.libraryKey();
     if (auto* existing = findChild<DynamicPlaylistDialog*>()) {
         // One open on a library since moved is made anew.
-        if (existing->authorityValid() && existing->engine() == from) {
+        if (existing->engine() == from) {
             existing->show();
             existing->raise();
             existing->activateWindow();
@@ -143,13 +143,11 @@ void BenchMainWindow::showDynamicPlaylists() {
         scoped->setShortcuts(original->shortcuts());
         scoped->setShortcutContext(Qt::WidgetWithChildrenShortcut);
         result_view->addAction(scoped);
-        connect(scoped, &QAction::triggered, dialog, [this, dialog, prepend] {
-            if (dialog->authorityValid())
-                enqueueUpNext(dialog->view(), prepend);
-        });
+        connect(scoped, &QAction::triggered, dialog,
+                [this, dialog, prepend] { enqueueUpNext(dialog->view(), prepend); });
     }
     connect(dialog, &DynamicPlaylistDialog::playRequested, this, [this, dialog, layout](int row) {
-        if (!dialog->authorityValid() || row < 0)
+        if (row < 0)
             return;
         const auto name = dialog->playlistName().isEmpty()
                               ? tr("Dynamic playback")
@@ -239,8 +237,6 @@ void BenchMainWindow::showDynamicPlaylists() {
                 menu.exec(view->viewport()->mapToGlobal(position));
             });
     // Rules follow changes to the library they read, and only that one.
-    connect(persistence_, &ui::ListPersistenceService::listeningHistoryChanged, dialog,
-            &DynamicPlaylistDialog::libraryChanged);
     for (const auto& engine : engines_) {
         auto* library = engine->library;
         if (library == nullptr)

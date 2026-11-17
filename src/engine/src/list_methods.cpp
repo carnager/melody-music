@@ -419,6 +419,74 @@ void announce_list_change(const EventSink& sink, const persistence::EngineListSu
     sink(protocol::Event{.name = "list.changed", .data = std::move(data)});
 }
 
+void register_queue_edit_methods(protocol::Dispatcher& dispatcher, Player& player) {
+    // ADR-0286: the queue changed in place, with list.edit's edits -- how a
+    // tab kept in a client sends a long list in parts, and its edits after.
+    // An edit naming an entry the queue no longer holds -- consumed while it
+    // was on its way -- leaves that entry out rather than refusing the rest;
+    // an insert placed after one is placed at the end.
+    dispatcher.on("playback.edit_queue", [&player](const Json& params) -> core::Result<Json> {
+        const auto list = params.value("list", std::string{});
+        const auto asked = params.find("edits");
+        if (asked == params.end() || !asked->is_array()) {
+            return std::unexpected(bad_params("edits must be a list", "edits"));
+        }
+        std::vector<persistence::ListEdit> edits;
+        edits.reserve(asked->size());
+        for (const auto& value : *asked) {
+            auto parsed = edit_from_json(value);
+            if (!parsed) {
+                return std::unexpected(std::move(parsed.error()));
+            }
+            edits.push_back(std::move(*parsed));
+        }
+        auto edited =
+            player.edit_queue(list, [&edits](std::vector<QueueEntry>& queue) -> core::Result<void> {
+                std::set<core::StableId> held;
+                for (const auto& entry : queue) {
+                    held.insert(entry.entry_id);
+                }
+                std::optional<core::StableId> last =
+                    queue.empty() ? std::nullopt : std::optional{queue.back().entry_id};
+                for (auto& edit : edits) {
+                    std::erase_if(edit.entries, [&held](const core::StableId& entry) {
+                        return !held.contains(entry);
+                    });
+                    if (edit.kind == persistence::ListEdit::Kind::update) {
+                        std::erase_if(edit.items, [&held](const persistence::EngineListItem& item) {
+                            return !held.contains(item.entry_id);
+                        });
+                    }
+                    if (edit.after && !held.contains(*edit.after)) {
+                        edit.after = last;
+                    }
+                    if (edit.kind == persistence::ListEdit::Kind::insert) {
+                        for (const auto& item : edit.items) {
+                            held.insert(item.entry_id);
+                            last = item.entry_id;
+                        }
+                    } else if (edit.kind == persistence::ListEdit::Kind::remove) {
+                        for (const auto& entry : edit.entries) {
+                            held.erase(entry);
+                        }
+                    }
+                }
+                return persistence::apply_list_edits(
+                    queue, edits, [](const QueueEntry& entry) { return entry.entry_id; },
+                    [](const persistence::EngineListItem& item) { return queue_entry(item); });
+            });
+        if (!edited) {
+            return std::unexpected(std::move(edited.error()));
+        }
+        if (!*edited) {
+            return std::unexpected(core::Error{.code = core::ErrorCode::conflict,
+                                               .message = "the queue plays another list",
+                                               .context = {}});
+        }
+        return Json{{"queue_revision", player.state().queue_revision}};
+    });
+}
+
 void register_list_methods(protocol::Dispatcher& dispatcher, Workspace& workspace, EventSink sink,
                            Player& player, const LocalCatalogue* catalogue) {
     // Every client hears of every change, so a list open in two places is
@@ -781,64 +849,6 @@ void register_list_methods(protocol::Dispatcher& dispatcher, Workspace& workspac
             return summary_json(*made);
         });
 
-    // ADR-0259: the draft of a saved list -- the one there is, or a new one.
-    // ADR-0286: the working lists and drafts schema 56 set aside, for a
-    // client to offer once, read whole, and drop once dealt with.
-    dispatcher.on("list.retired", [&workspace](const Json&) -> core::Result<Json> {
-        auto lists = workspace.load_retired_engine_lists();
-        if (!lists) {
-            return std::unexpected(std::move(lists.error()));
-        }
-        auto rendered = Json::array();
-        for (const auto& summary : *lists) {
-            rendered.push_back(summary_json(summary));
-        }
-        return Json{{"lists", std::move(rendered)}};
-    });
-    dispatcher.on("list.retired_get", [&workspace](const Json& params) -> core::Result<Json> {
-        auto id = required_id(params);
-        if (!id) {
-            return std::unexpected(std::move(id.error()));
-        }
-        auto list = workspace.load_retired_engine_list(*id);
-        if (!list) {
-            return std::unexpected(std::move(list.error()));
-        }
-        if (!*list) {
-            return std::unexpected(core::Error{.code = core::ErrorCode::not_found,
-                                               .message = "there is no such retired list",
-                                               .context = {}});
-        }
-        auto rendered = summary_json((*list)->summary);
-        auto items = Json::array();
-        for (const auto& item : (*list)->items) {
-            items.push_back(item_json(item));
-        }
-        rendered["items"] = std::move(items);
-        return rendered;
-    });
-    dispatcher.on("list.retired_drop", [&workspace](const Json& params) -> core::Result<Json> {
-        const auto ids = params.find("ids");
-        if (ids == params.end() || !ids->is_array()) {
-            return std::unexpected(bad_params("ids names the retired lists to drop", "ids"));
-        }
-        std::vector<core::StableId> parsed;
-        for (const auto& value : *ids) {
-            auto id = value.is_string()
-                          ? core::StableId::parse(value.get<std::string>())
-                          : core::Result<core::StableId>{std::unexpected(core::Error{})};
-            if (!id) {
-                return std::unexpected(bad_params("a list is named by its identity", "ids"));
-            }
-            parsed.push_back(*id);
-        }
-        auto dropped = workspace.drop_retired_engine_lists(parsed);
-        if (!dropped) {
-            return std::unexpected(std::move(dropped.error()));
-        }
-        return Json{{"dropped", *dropped}};
-    });
-
     // ADR-0286: what the library knows of files, by path, as list.describe
     // answers for a list's entries -- for a tab kept in a client.
     dispatcher.on("catalogue.describe", [catalogue](const Json& params) -> core::Result<Json> {
@@ -916,71 +926,7 @@ void register_list_methods(protocol::Dispatcher& dispatcher, Workspace& workspac
             return Json{{"items", std::move(items)}};
         });
 
-    // ADR-0286: the queue changed in place, with list.edit's edits -- how a
-    // tab kept in a client sends a long list in parts, and its edits after.
-    // An edit naming an entry the queue no longer holds -- consumed while it
-    // was on its way -- leaves that entry out rather than refusing the rest;
-    // an insert placed after one is placed at the end.
-    dispatcher.on("playback.edit_queue", [&player](const Json& params) -> core::Result<Json> {
-        const auto list = params.value("list", std::string{});
-        const auto asked = params.find("edits");
-        if (asked == params.end() || !asked->is_array()) {
-            return std::unexpected(bad_params("edits must be a list", "edits"));
-        }
-        std::vector<persistence::ListEdit> edits;
-        edits.reserve(asked->size());
-        for (const auto& value : *asked) {
-            auto parsed = edit_from_json(value);
-            if (!parsed) {
-                return std::unexpected(std::move(parsed.error()));
-            }
-            edits.push_back(std::move(*parsed));
-        }
-        auto edited =
-            player.edit_queue(list, [&edits](std::vector<QueueEntry>& queue) -> core::Result<void> {
-                std::set<core::StableId> held;
-                for (const auto& entry : queue) {
-                    held.insert(entry.entry_id);
-                }
-                std::optional<core::StableId> last =
-                    queue.empty() ? std::nullopt : std::optional{queue.back().entry_id};
-                for (auto& edit : edits) {
-                    std::erase_if(edit.entries, [&held](const core::StableId& entry) {
-                        return !held.contains(entry);
-                    });
-                    if (edit.kind == persistence::ListEdit::Kind::update) {
-                        std::erase_if(edit.items, [&held](const persistence::EngineListItem& item) {
-                            return !held.contains(item.entry_id);
-                        });
-                    }
-                    if (edit.after && !held.contains(*edit.after)) {
-                        edit.after = last;
-                    }
-                    if (edit.kind == persistence::ListEdit::Kind::insert) {
-                        for (const auto& item : edit.items) {
-                            held.insert(item.entry_id);
-                            last = item.entry_id;
-                        }
-                    } else if (edit.kind == persistence::ListEdit::Kind::remove) {
-                        for (const auto& entry : edit.entries) {
-                            held.erase(entry);
-                        }
-                    }
-                }
-                return persistence::apply_list_edits(
-                    queue, edits, [](const QueueEntry& entry) { return entry.entry_id; },
-                    [](const persistence::EngineListItem& item) { return queue_entry(item); });
-            });
-        if (!edited) {
-            return std::unexpected(std::move(edited.error()));
-        }
-        if (!*edited) {
-            return std::unexpected(core::Error{.code = core::ErrorCode::conflict,
-                                               .message = "the queue plays another list",
-                                               .context = {}});
-        }
-        return Json{{"queue_revision", player.state().queue_revision}};
-    });
+    register_queue_edit_methods(dispatcher, player);
 
     dispatcher.on("list.relocate", [&workspace, changed](const Json& params) -> core::Result<Json> {
         const auto moves = params.find("moves");

@@ -473,13 +473,6 @@ void LibraryBrowser::setQueryMode(const bool enabled) {
     reload();
 }
 
-void LibraryBrowser::setNewestFirst(const bool on) {
-    if (on == newest_first_) {
-        return;
-    }
-    setViewId(on ? recent_library_view_id : default_library_view_id);
-}
-
 void LibraryBrowser::adoptView(const QString& id, const bool remember) {
     const auto views = libraryViews();
     auto found = std::ranges::find(views, id, &LibraryViewDefinition::id);
@@ -772,15 +765,6 @@ void LibraryBrowser::reload() {
         loadChildren(QPersistentModelIndex{index}, query);
         emit expandRequested(index);
     }
-}
-
-void LibraryBrowser::fetch(const QModelIndex& index) {
-    auto* item = index.isValid() ? model_->rowAt(index) : nullptr;
-    if (item == nullptr || item->loaded || !item->query) {
-        return;
-    }
-    item->loaded = true;
-    loadChildren(QPersistentModelIndex{index}, *item->query);
 }
 
 void LibraryBrowser::noteExpanded(const QModelIndex& index, const bool expanded) {
@@ -1238,6 +1222,15 @@ void LibraryBrowser::loadFilterChildren(const QPersistentModelIndex& parent,
              true});
 }
 
+void LibraryBrowser::fetch(const QModelIndex& index) {
+    auto* item = index.isValid() ? model_->rowAt(index) : nullptr;
+    if (item == nullptr || item->loaded || !item->query) {
+        return;
+    }
+    item->loaded = true;
+    loadChildren(QPersistentModelIndex{index}, *item->query);
+}
+
 void LibraryBrowser::activate(const QModelIndex& index) {
     auto* item = index.isValid() ? model_->rowAt(index) : nullptr;
     if (item == nullptr) {
@@ -1260,26 +1253,6 @@ void LibraryBrowser::request(const QModelIndexList& indexes, const int action) {
     }
     if (!entries.empty()) {
         emit actionRequested(std::move(entries), static_cast<LocalLibraryAction>(action));
-    }
-}
-
-void LibraryBrowser::addToNewList(const QModelIndexList& indexes, const QString& name) {
-    auto entries = selectedEntries(indexes);
-    if (!entries.empty()) {
-        emit newListRequested(std::move(entries), name);
-    }
-}
-
-QString LibraryBrowser::newListName(const QModelIndexList& indexes) {
-    const auto entries = selectedEntries(indexes);
-    return entries.size() == 1U ? QString::fromStdString(entries.front().label)
-                                : tr("Library selection");
-}
-
-void LibraryBrowser::addToList(const QModelIndexList& indexes, const QString& id) {
-    auto entries = selectedEntries(indexes);
-    if (!entries.empty()) {
-        emit addToListRequested(std::move(entries), id);
     }
 }
 
@@ -1532,15 +1505,6 @@ void LibraryBrowser::commitSearch() {
              }});
 }
 
-QVariantList LibraryBrowser::roots() const {
-    QVariantList list;
-    for (const auto& root : roots_) {
-        list.push_back(QVariantMap{{QStringLiteral("label"), root.label},
-                                   {QStringLiteral("tooltip"), root.tooltip}});
-    }
-    return list;
-}
-
 std::vector<std::string> LibraryBrowser::rootPaths() const {
     std::vector<std::string> paths;
     paths.reserve(roots_.size());
@@ -1548,12 +1512,6 @@ std::vector<std::string> LibraryBrowser::rootPaths() const {
         paths.push_back(root.raw_path);
     }
     return paths;
-}
-
-void LibraryBrowser::addRoot(const QString& path) {
-    if (!path.trimmed().isEmpty()) {
-        addRoot(QFile::encodeName(path.trimmed()).toStdString());
-    }
 }
 
 void LibraryBrowser::addRoot(std::string raw_path) {
@@ -1576,12 +1534,6 @@ void LibraryBrowser::addRoot(std::string raw_path) {
                  roots_error_ = outcome.error;
                  emit rootsChanged();
              }});
-}
-
-void LibraryBrowser::removeRoot(const int index) {
-    if (index >= 0 && index < static_cast<int>(roots_.size())) {
-        removeRoot(roots_[static_cast<std::size_t>(index)].raw_path);
-    }
 }
 
 void LibraryBrowser::removeRoot(std::string raw_path) {

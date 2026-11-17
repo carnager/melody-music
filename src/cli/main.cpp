@@ -1389,12 +1389,6 @@ int run(const Options& options) {
         // given -- as the shell gave them, the engine's own paths.
         Json params = Json::object();
         if (words.size() > 1U) {
-            // An engine before level 24 would scan all of it instead.
-            if (const auto info = call(*client, "engine.info");
-                trackknife::protocol::peer_version(info).level < 24) {
-                fail("this engine is too old to update only some paths; update it, or run "
-                     "update without paths");
-            }
             auto paths = Json::array();
             for (std::size_t index = 1; index < words.size(); ++index) {
                 std::error_code error;

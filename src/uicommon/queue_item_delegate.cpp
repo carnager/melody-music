@@ -196,11 +196,6 @@ void paintAlbumHeader(QPainter* painter, const QRect& rect, const QPalette& pale
     painter->restore();
 }
 
-int trackRowLines(const QObject* view) {
-    const auto lines = view != nullptr ? view->property(track_row_lines_property) : QVariant{};
-    return lines.isValid() ? std::clamp(lines.toInt(), 1, 3) : 1;
-}
-
 QFont trackSecondLineFont(const QFont& font) {
     auto smaller = font;
     smaller.setWeight(QFont::Normal);

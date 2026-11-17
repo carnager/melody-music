@@ -36,7 +36,6 @@ enum class CommandKind {
     queue_next,
     queue_network_stream,
     clear_next,
-    relocate_source,
 };
 
 struct Command {
@@ -50,11 +49,7 @@ struct Command {
     int volume_percent{100};
     std::optional<std::string> target;
     PlaybackBufferDurationConfig buffer;
-    LocalAuditionSourceRelocation relocation;
-    std::size_t relocated_pending_commands{0U};
     std::optional<formats::ReplayGainInfo> replay_gain_override;
-    std::shared_ptr<std::promise<core::Result<LocalAuditionSourceRelocationResult>>>
-        relocation_completion;
     std::uint64_t occurrence_token{0U};
     std::optional<core::LocalSourceRevision> restore_revision{};
     std::int64_t restore_position_ms{0};
@@ -179,8 +174,7 @@ struct LocalAuditionService::Impl {
                        pending.kind != CommandKind::set_replay_gain &&
                        pending.kind != CommandKind::set_replay_gain_info &&
                        pending.kind != CommandKind::set_replay_gain_preamps &&
-                       pending.kind != CommandKind::set_target &&
-                       pending.kind != CommandKind::relocate_source;
+                       pending.kind != CommandKind::set_target;
             });
         } else if (command.kind == CommandKind::seek || command.kind == CommandKind::seek_seconds) {
             std::erase_if(commands, [](const Command& pending) {
@@ -236,64 +230,6 @@ struct LocalAuditionService::Impl {
         commands.push_back(std::move(command));
         command_ready.notify_one();
         return {};
-    }
-
-    [[nodiscard]] core::Result<LocalAuditionSourceRelocationResult>
-    relocate_source_and_wait(LocalAuditionSourceRelocation relocation) {
-        if (std::this_thread::get_id() == worker.get_id()) {
-            return std::unexpected(core::Error{
-                .code = core::ErrorCode::invariant,
-                .message = "local audition source relocation cannot wait on its own worker",
-                .context = {},
-            });
-        }
-        auto completion =
-            std::make_shared<std::promise<core::Result<LocalAuditionSourceRelocationResult>>>();
-        auto completed = completion->get_future();
-        std::size_t relocated_pending_commands = 0U;
-        {
-            std::lock_guard lock{command_mutex};
-            if (worker.get_stop_token().stop_requested()) {
-                return std::unexpected(core::Error{
-                    .code = core::ErrorCode::cancelled,
-                    .message = "local audition stopped before source relocation",
-                    .context = {},
-                });
-            }
-            if (commands.size() >= config.command_capacity) {
-                return std::unexpected(core::Error{
-                    .code = core::ErrorCode::limit_exceeded,
-                    .message = "local audition command queue is full",
-                    .context = {{.key = "capacity",
-                                 .value = std::to_string(config.command_capacity)}},
-                });
-            }
-            for (auto& pending : commands) {
-                if ((pending.kind == CommandKind::load_and_play ||
-                     pending.kind == CommandKind::queue_next) &&
-                    pending.raw_path == relocation.source_raw_path) {
-                    pending.raw_path = relocation.target_raw_path;
-                    pending.relocation = relocation;
-                    ++relocated_pending_commands;
-                }
-            }
-            commands.push_back(Command{
-                .kind = CommandKind::relocate_source,
-                .raw_path = {},
-                .selection = {},
-                .segment = std::nullopt,
-                .target_sample = 0,
-                .volume_percent = 100,
-                .target = {},
-                .buffer = {},
-                .relocation = std::move(relocation),
-                .relocated_pending_commands = relocated_pending_commands,
-                .replay_gain_override = {},
-                .relocation_completion = completion,
-            });
-        }
-        command_ready.notify_one();
-        return completed.get();
     }
 
     [[nodiscard]] LocalAuditionSnapshot snapshot() const {
@@ -584,15 +520,6 @@ struct LocalAuditionService::Impl {
                 return;
             }
         }
-        if (local_source && command.relocation.target_raw_path == current_path &&
-            *observed_revision != command.relocation.target_revision) {
-            fail(core::Error{
-                .code = core::ErrorCode::conflict,
-                .message = "relocated local audition source no longer has its published revision",
-                .context = {{.key = "path", .value = core::escape_raw_path(current_path)}},
-            });
-            return;
-        }
         std::shared_ptr<core::CancellationSource> cancellation;
         {
             std::lock_guard lock{cancellation_mutex};
@@ -840,17 +767,6 @@ struct LocalAuditionService::Impl {
             }
             observed_revision = *observed;
         }
-        if (local_source && command.relocation.target_raw_path == path &&
-            *observed_revision != command.relocation.target_revision) {
-            source->clear_next();
-            clear_pending_next();
-            publish(core::Error{
-                .code = core::ErrorCode::conflict,
-                .message = "relocated gapless source no longer has its published revision",
-                .context = {{.key = "path", .value = core::escape_raw_path(path)}},
-            });
-            return;
-        }
         // A rejected continuation (format change, unreadable file) is not a
         // playback failure: next_raw_path simply stays empty and the caller
         // falls back to an ordinary load at end-of-track.
@@ -884,54 +800,6 @@ struct LocalAuditionService::Impl {
             clear_pending_next();
         }
         publish();
-    }
-
-    void relocate_source(Command command) {
-        acknowledge_transitions();
-        LocalAuditionSourceRelocationResult result{
-            .active_sources_relocated = 0U,
-            .queued_sources_relocated = 0U,
-            .pending_commands_relocated = command.relocated_pending_commands,
-            .revision_conflicts = 0U,
-            .already_applied = false,
-        };
-        const auto& relocation = command.relocation;
-        if (source && current_path == relocation.source_raw_path) {
-            if (current_revision && *current_revision == relocation.source_revision) {
-                current_path = relocation.target_raw_path;
-                current_revision = relocation.target_revision;
-                result.active_sources_relocated = 1U;
-            } else {
-                ++result.revision_conflicts;
-            }
-        } else if (source && current_path == relocation.target_raw_path) {
-            if (current_revision && *current_revision == relocation.target_revision) {
-                result.already_applied = true;
-            } else {
-                ++result.revision_conflicts;
-            }
-        }
-        if (!pending_next_path.empty() && pending_next_path == relocation.source_raw_path) {
-            if (pending_next_revision && *pending_next_revision == relocation.source_revision) {
-                pending_next_path = relocation.target_raw_path;
-                pending_next_revision = relocation.target_revision;
-                result.queued_sources_relocated = 1U;
-            } else {
-                ++result.revision_conflicts;
-            }
-        } else if (!pending_next_path.empty() && pending_next_path == relocation.target_raw_path) {
-            if (pending_next_revision && *pending_next_revision == relocation.target_revision) {
-                result.already_applied = true;
-            } else {
-                ++result.revision_conflicts;
-            }
-        }
-        result.already_applied = result.already_applied && result.active_sources_relocated == 0U &&
-                                 result.queued_sources_relocated == 0U &&
-                                 result.pending_commands_relocated == 0U &&
-                                 result.revision_conflicts == 0U;
-        publish();
-        command.relocation_completion->set_value(result);
     }
 
     void clear_next_source() {
@@ -1166,9 +1034,6 @@ struct LocalAuditionService::Impl {
         case CommandKind::clear_next:
             clear_next_source();
             break;
-        case CommandKind::relocate_source:
-            relocate_source(std::move(command));
-            break;
         }
     }
 
@@ -1384,10 +1249,7 @@ core::Result<void> LocalAuditionService::load_selected_and_play(
                                             .volume_percent = 100,
                                             .target = {},
                                             .buffer = {},
-                                            .relocation = {},
-                                            .relocated_pending_commands = 0U,
-                                            .replay_gain_override = replay_gain_override,
-                                            .relocation_completion = {}});
+                                            .replay_gain_override = replay_gain_override});
 }
 
 core::Result<void> LocalAuditionService::load_network_stream_and_play(
@@ -1406,10 +1268,7 @@ core::Result<void> LocalAuditionService::load_network_stream_and_play(
         .volume_percent = 100,
         .target = {},
         .buffer = {},
-        .relocation = {},
-        .relocated_pending_commands = 0U,
         .replay_gain_override = replay_gain_override,
-        .relocation_completion = {},
     });
 }
 
@@ -1433,10 +1292,7 @@ core::Result<void> LocalAuditionService::load_selected_segment_and_play(
                                             .volume_percent = 100,
                                             .target = {},
                                             .buffer = {},
-                                            .relocation = {},
-                                            .relocated_pending_commands = 0U,
-                                            .replay_gain_override = replay_gain_override,
-                                            .relocation_completion = {}});
+                                            .replay_gain_override = replay_gain_override});
 }
 
 core::Result<void> LocalAuditionService::queue_gapless_next(std::string raw_path) {
@@ -1457,10 +1313,7 @@ core::Result<void> LocalAuditionService::queue_gapless_next_selected(
                                             .volume_percent = 100,
                                             .target = {},
                                             .buffer = {},
-                                            .relocation = {},
-                                            .relocated_pending_commands = 0U,
                                             .replay_gain_override = replay_gain_override,
-                                            .relocation_completion = {},
                                             .occurrence_token = occurrence_token});
 }
 
@@ -1480,10 +1333,7 @@ core::Result<void> LocalAuditionService::queue_gapless_network_stream(
         .volume_percent = 100,
         .target = {},
         .buffer = {},
-        .relocation = {},
-        .relocated_pending_commands = 0U,
         .replay_gain_override = replay_gain_override,
-        .relocation_completion = {},
         .occurrence_token = occurrence_token,
     });
 }
@@ -1509,10 +1359,7 @@ core::Result<void> LocalAuditionService::queue_gapless_next_selected_segment(
                                             .volume_percent = 100,
                                             .target = {},
                                             .buffer = {},
-                                            .relocation = {},
-                                            .relocated_pending_commands = 0U,
                                             .replay_gain_override = replay_gain_override,
-                                            .relocation_completion = {},
                                             .occurrence_token = occurrence_token});
 }
 
@@ -1525,10 +1372,7 @@ core::Result<void> LocalAuditionService::clear_gapless_next() {
                                             .volume_percent = 100,
                                             .target = {},
                                             .buffer = {},
-                                            .relocation = {},
-                                            .relocated_pending_commands = 0U,
-                                            .replay_gain_override = {},
-                                            .relocation_completion = {}});
+                                            .replay_gain_override = {}});
 }
 
 core::Result<void> LocalAuditionService::play() {
@@ -1540,10 +1384,7 @@ core::Result<void> LocalAuditionService::play() {
                                             .volume_percent = 100,
                                             .target = {},
                                             .buffer = {},
-                                            .relocation = {},
-                                            .relocated_pending_commands = 0U,
-                                            .replay_gain_override = {},
-                                            .relocation_completion = {}});
+                                            .replay_gain_override = {}});
 }
 
 core::Result<void> LocalAuditionService::pause() {
@@ -1555,10 +1396,7 @@ core::Result<void> LocalAuditionService::pause() {
                                             .volume_percent = 100,
                                             .target = {},
                                             .buffer = {},
-                                            .relocation = {},
-                                            .relocated_pending_commands = 0U,
-                                            .replay_gain_override = {},
-                                            .relocation_completion = {}});
+                                            .replay_gain_override = {}});
 }
 
 core::Result<void> LocalAuditionService::stop() {
@@ -1570,10 +1408,7 @@ core::Result<void> LocalAuditionService::stop() {
                                             .volume_percent = 100,
                                             .target = {},
                                             .buffer = {},
-                                            .relocation = {},
-                                            .relocated_pending_commands = 0U,
-                                            .replay_gain_override = {},
-                                            .relocation_completion = {}});
+                                            .replay_gain_override = {}});
 }
 
 core::Result<void> LocalAuditionService::seek_to_sample(const std::int64_t target_sample) {
@@ -1588,10 +1423,7 @@ core::Result<void> LocalAuditionService::seek_to_sample(const std::int64_t targe
                                             .volume_percent = 100,
                                             .target = {},
                                             .buffer = {},
-                                            .relocation = {},
-                                            .relocated_pending_commands = 0U,
-                                            .replay_gain_override = {},
-                                            .relocation_completion = {}});
+                                            .replay_gain_override = {}});
 }
 
 core::Result<void> LocalAuditionService::seek_to_seconds(const double target_seconds) {
@@ -1650,10 +1482,7 @@ core::Result<void> LocalAuditionService::set_volume_percent(const int percent) {
                                             .volume_percent = percent,
                                             .target = {},
                                             .buffer = {},
-                                            .relocation = {},
-                                            .relocated_pending_commands = 0U,
-                                            .replay_gain_override = {},
-                                            .relocation_completion = {}});
+                                            .replay_gain_override = {}});
 }
 
 core::Result<void>
@@ -1671,10 +1500,7 @@ LocalAuditionService::set_buffer_config(const PlaybackBufferDurationConfig buffe
                                             .volume_percent = 100,
                                             .target = {},
                                             .buffer = buffer_config,
-                                            .relocation = {},
-                                            .relocated_pending_commands = 0U,
-                                            .replay_gain_override = {},
-                                            .relocation_completion = {}});
+                                            .replay_gain_override = {}});
 }
 
 core::Result<void> LocalAuditionService::refresh_output_devices() {
@@ -1686,10 +1512,7 @@ core::Result<void> LocalAuditionService::refresh_output_devices() {
                                             .volume_percent = 100,
                                             .target = {},
                                             .buffer = {},
-                                            .relocation = {},
-                                            .relocated_pending_commands = 0U,
-                                            .replay_gain_override = {},
-                                            .relocation_completion = {}});
+                                            .replay_gain_override = {}});
 }
 
 core::Result<void> LocalAuditionService::set_output_target(std::optional<std::string> target) {
@@ -1705,75 +1528,7 @@ core::Result<void> LocalAuditionService::set_output_target(std::optional<std::st
                                             .volume_percent = 100,
                                             .target = std::move(target),
                                             .buffer = {},
-                                            .relocation = {},
-                                            .relocated_pending_commands = 0U,
-                                            .replay_gain_override = {},
-                                            .relocation_completion = {}});
-}
-
-core::Result<LocalAuditionSourceRelocationResult>
-LocalAuditionService::relocate_source_and_wait(LocalAuditionSourceRelocation relocation) {
-    if (relocation.source_raw_path.empty() || relocation.target_raw_path.empty()) {
-        return std::unexpected(
-            invalid_config("local audition source relocation paths must not be empty"));
-    }
-    if (relocation.source_raw_path.find('\0') != std::string::npos ||
-        relocation.target_raw_path.find('\0') != std::string::npos) {
-        return std::unexpected(
-            invalid_config("local audition source relocation paths must not contain NUL bytes"));
-    }
-    if (relocation.source_raw_path == relocation.target_raw_path) {
-        return std::unexpected(
-            invalid_config("local audition source relocation paths must be distinct"));
-    }
-    if (relocation.source_revision.inode == 0U || relocation.target_revision.inode == 0U) {
-        return std::unexpected(
-            invalid_config("local audition source relocation revisions must identify a file"));
-    }
-    return implementation_->relocate_source_and_wait(std::move(relocation));
-}
-
-core::Result<LocalAuditionSourceRelocationResult>
-LocalAuditionService::commit_source_relocation_and_wait(
-    LocalAuditionSourceRelocation relocation,
-    const LocalAuditionDependentStateCommitter& dependent_state_committer) {
-    if (!dependent_state_committer) {
-        return std::unexpected(
-            invalid_config("local audition source relocation requires dependent-state commit"));
-    }
-    auto relocated = relocate_source_and_wait(relocation);
-    if (!relocated) {
-        return std::unexpected(std::move(relocated.error()));
-    }
-    auto dependent = dependent_state_committer();
-    if (dependent) {
-        return relocated;
-    }
-
-    const auto audio_binding = snapshot();
-    const bool target_audio_binding =
-        (audio_binding.raw_path == relocation.target_raw_path && audio_binding.source_revision &&
-         *audio_binding.source_revision == relocation.target_revision) ||
-        (audio_binding.next_raw_path == relocation.target_raw_path &&
-         audio_binding.next_source_revision &&
-         *audio_binding.next_source_revision == relocation.target_revision);
-    if (target_audio_binding) {
-        auto compensated = relocate_source_and_wait(LocalAuditionSourceRelocation{
-            .source_raw_path = std::move(relocation.target_raw_path),
-            .target_raw_path = std::move(relocation.source_raw_path),
-            .source_revision = relocation.target_revision,
-            .target_revision = relocation.source_revision,
-        });
-        if (!compensated) {
-            dependent.error().context.push_back(
-                {.key = "audio_compensation_error", .value = compensated.error().message});
-        } else if (compensated->revision_conflicts > 0U) {
-            dependent.error().context.push_back(
-                {.key = "audio_compensation_error",
-                 .value = "a relocated player binding changed before compensation"});
-        }
-    }
-    return std::unexpected(std::move(dependent.error()));
+                                            .replay_gain_override = {}});
 }
 
 core::Result<void> LocalAuditionService::clear() {
@@ -1785,10 +1540,7 @@ core::Result<void> LocalAuditionService::clear() {
                                             .volume_percent = 100,
                                             .target = {},
                                             .buffer = {},
-                                            .relocation = {},
-                                            .relocated_pending_commands = 0U,
-                                            .replay_gain_override = {},
-                                            .relocation_completion = {}});
+                                            .replay_gain_override = {}});
 }
 
 std::string_view playback_buffer_preset_id(const PlaybackBufferPreset preset) noexcept {

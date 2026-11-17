@@ -238,7 +238,6 @@ check(a.call("list.draft", {"of": kept["id"]})["error"]["code"] == "unsupported"
 check(a.call("list.edit", {"id": kept["id"], "revision": kept["revision"], "edits": [],
                            "kind": "working"})["error"]["code"] == "unsupported",
       "nor does a saved list become a working one")
-check(a.call("list.retired")["result"]["lists"] == [], "a new engine set no working lists aside")
 check(a.call("list.delete", {"id": kept["id"]})["result"]["deleted"] is True, "the list is deleted")
 def heard_of(client, ids):
     # The list.changed events another client hears, by list: deleted or not.

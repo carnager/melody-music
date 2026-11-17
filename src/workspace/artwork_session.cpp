@@ -366,8 +366,6 @@ ArtworkSession::~ArtworkSession() {
 void ArtworkSession::setStatus(const QString& text) { status_ = text; }
 
 void ArtworkSession::showFront(const QImage& image, const bool mixed) {
-    shown_front_ = image;
-    shown_front_mixed_ = mixed;
     emit frontCoverChanged(image, mixed);
 }
 
