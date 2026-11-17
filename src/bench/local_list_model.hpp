@@ -221,6 +221,12 @@ class LocalListModel final : public QAbstractTableModel {
     // several logical chapter rows. The first row keeps the original model
     // position and any following rows are inserted directly after it.
     bool applyProbeRows(const std::string& raw_path, int hint_row, std::vector<LocalTrackRow> rows);
+    // A row whose file could not be read at all -- moved, or on a share not
+    // mounted -- stays as it was if it was seen before: its revision kept,
+    // the move journal can still be asked where it went (ADR-0286). Only it
+    // is not read again. False for a row never seen, to be filled from its
+    // file name instead.
+    [[nodiscard]] bool keepUnreadable(const std::string& raw_path, int hint_row);
     // ADR-0259: the row at `row`, when it is still entry `entry`, takes what
     // its engine's library knows of its file; its place, identity and the
     // part of the file it plays stay. False when it is not that entry.

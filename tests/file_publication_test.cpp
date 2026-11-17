@@ -496,46 +496,6 @@ void realPublicationCommitsTheAllOccurrenceRelocationTransaction() {
     auto repository_result = persistence::ListRepository::open(state_path);
     require(repository_result.has_value(), "relocation integration repository must open");
     auto repository = std::move(*repository_result);
-    const std::vector documents{
-        persistence::ListDocument{
-            .id = core::StableId::random(),
-            .kind = persistence::ListKind::scratch,
-            .name = "First",
-            .pinned = false,
-            .dirty = false,
-            .items = {persistence::ListItem{
-                .source = persistence::ListSource::local,
-                .profile_id = std::nullopt,
-                .source_reference = source.native(),
-                .logical_reference = std::nullopt,
-                .segment = std::nullopt,
-                .source_selection = std::nullopt,
-                .duration_ms = std::nullopt,
-                .source_revision = source_revision,
-                .fields = {{"title", "First"}},
-            }},
-        },
-        persistence::ListDocument{
-            .id = core::StableId::random(),
-            .kind = persistence::ListKind::saved,
-            .name = "Duplicate",
-            .pinned = true,
-            .dirty = false,
-            .items = {persistence::ListItem{
-                .source = persistence::ListSource::local,
-                .profile_id = std::nullopt,
-                .source_reference = source.native(),
-                .logical_reference = std::string{"cue-v1\0track", 12U},
-                .segment = persistence::ListItemSegment{.start_sample = 0, .end_sample = 1},
-                .source_selection = std::nullopt,
-                .duration_ms = std::nullopt,
-                .source_revision = source_revision,
-                .fields = {{"title", "Logical"}},
-            }},
-        },
-    };
-    require(repository.replace_all(documents).has_value(),
-            "relocation integration occurrences must persist");
     auto journal = open_journal(directory, "state.sqlite3");
     const auto committed = operations::commit_same_filesystem_publication(
         checked, 0U, journal,
@@ -553,17 +513,13 @@ void realPublicationCommitsTheAllOccurrenceRelocationTransaction() {
     require(committed.has_value() && !std::filesystem::exists(source) &&
                 read_file(target) == "physical relocation bytes",
             "physical publication and dependent state must complete together");
-    auto loaded = repository.load_all();
-    require(loaded && (*loaded)[0].items[0].source_reference == target.native() &&
-                (*loaded)[1].items[0].source_reference == target.native() &&
-                (*loaded)[0].items[0].source_revision == committed->target_revision,
-            "the real executor callback must re-key every persisted occurrence");
-    require(repository.replace_all(documents).has_value(),
-            "a pre-publication workspace snapshot may arrive after commit");
-    loaded = repository.load_all();
-    require(loaded && (*loaded)[0].items[0].source_reference == target.native() &&
-                (*loaded)[1].items[0].source_reference == target.native(),
-            "publication relocation history must suppress stale source paths");
+    const auto where = [&repository, &source, &source_revision] {
+        auto resolved = repository.resolve_local_source_moves({{source.native(), source_revision}});
+        return resolved && resolved->size() == 1U ? resolved->front() : std::nullopt;
+    };
+    require(where() && where()->first == target.native() &&
+                where()->second == committed->target_revision,
+            "the real executor callback must journal the move for clients to follow");
 
     const auto undone = operations::undo_same_filesystem_publication(
         committed->journal_id, journal,
@@ -581,16 +537,7 @@ void realPublicationCommitsTheAllOccurrenceRelocationTransaction() {
     require(undone && read_file(source) == "physical relocation bytes" &&
                 !std::filesystem::exists(target),
             "real dependent-state relocation must also commit the reverse publication");
-    loaded = repository.load_all();
-    require(loaded && (*loaded)[0].items[0].source_reference == source.native() &&
-                (*loaded)[1].items[0].source_reference == source.native(),
-            "undo must atomically return every persisted occurrence to the original path");
-    require(repository.replace_all(documents).has_value(),
-            "a snapshot from before publication may be saved after undo");
-    loaded = repository.load_all();
-    require(loaded && (*loaded)[0].items[0].source_reference == source.native() &&
-                (*loaded)[1].items[0].source_reference == source.native(),
-            "ordered relocation history must converge through publication and undo");
+    require(!where(), "undo journals the way back: the file is where it was seen");
 }
 
 void completedSameFilesystemPublicationCanBeUndoneIdempotently() {

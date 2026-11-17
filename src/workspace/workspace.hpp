@@ -168,6 +168,8 @@ class Workspace final : public QObject {
         ProbeJob job;
         std::vector<LocalTrackRow> rows;
         LocalTrackRow whole_file_fallback;
+        // Neither its tags nor its stream could be read.
+        bool unreadable{false};
     };
     struct ArtworkJob {
         QString key;
@@ -305,9 +307,6 @@ class Workspace final : public QObject {
     std::unique_ptr<TabStore> tab_store_;
     // The tab that was shown when the window last closed.
     std::optional<core::StableId> restored_active_;
-    // ADR-0259: the tabs restored come from the lists this window used to
-    // keep, so none of them is in the tab store yet.
-    bool migrating_{false};
     QFutureWatcher<DiscoveryOutcome> discovery_watcher_;
     QString discovery_target_document_;
     int discovery_insertion_row_{-1};

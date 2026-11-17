@@ -767,13 +767,11 @@ void BenchMainWindowTest::Settings::aRestoreTakesBackOnlyWhatIsTicked() {
     {
         auto repository = persistence::ListRepository::open(live);
         QVERIFY(repository.has_value());
-        const std::vector changed{persistence::ListDocument{.id = core::StableId::random(),
-                                                            .kind = persistence::ListKind::scratch,
-                                                            .name = "Changed since",
-                                                            .pinned = false,
-                                                            .dirty = false,
-                                                            .items = {}}};
-        QVERIFY(repository->replace_all(changed).has_value());
+        QVERIFY(repository
+                    ->save_search(persistence::SavedSearch{.id = core::StableId::random(),
+                                                           .name = "Changed since",
+                                                           .expression = "artist IS x"})
+                    .has_value());
     }
     const auto backed_up_tabs =
         QSettings{backup + QStringLiteral(".settings.ini"), QSettings::IniFormat}.value(
@@ -795,7 +793,7 @@ void BenchMainWindowTest::Settings::aRestoreTakesBackOnlyWhatIsTicked() {
         auto original = persistence::ListRepository::open(
             std::filesystem::path{QFile::encodeName(backup).toStdString()});
         QVERIFY(restored.has_value() && original.has_value());
-        QCOMPARE(restored->load_all().value(), original->load_all().value());
+        QCOMPARE(restored->load_saved_searches().value(), original->load_saved_searches().value());
     }
     QCOMPARE(QSettings{}.value(QStringLiteral("test/restore-probe")).toString(),
              QStringLiteral("backed up"));

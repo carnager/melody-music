@@ -54,8 +54,7 @@ class TabStore {
     TabStore(const TabStore&) = delete;
     TabStore& operator=(const TabStore&) = delete;
 
-    // Whether this window has kept its tabs here yet; before, they are in
-    // the database it kept lists in (the migration).
+    // Whether this window has kept its tabs here yet.
     [[nodiscard]] static bool hasState();
     [[nodiscard]] static State loadState();
     static void saveState(const State& state);

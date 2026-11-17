@@ -725,6 +725,24 @@ bool LocalListModel::applyProbeRows(const std::string& raw_path, const int hint_
     return true;
 }
 
+bool LocalListModel::keepUnreadable(const std::string& raw_path, const int hint_row) {
+    const auto is_provisional = [&raw_path](const LocalTrackRow& row) {
+        return row.raw_path == raw_path && !row.probed;
+    };
+    auto target = rows_.end();
+    if (hint_row >= 0 && hint_row < static_cast<int>(rows_.size()) &&
+        is_provisional(rows_[static_cast<std::size_t>(hint_row)])) {
+        target = rows_.begin() + hint_row;
+    } else {
+        target = std::ranges::find_if(rows_, is_provisional);
+    }
+    if (target == rows_.end() || !target->source_revision) {
+        return false;
+    }
+    target->probed = true;
+    return true;
+}
+
 core::Result<std::size_t>
 LocalListModel::applyCommittedMetadata(const std::string& raw_path,
                                        const metadata::MetadataDocument& document,

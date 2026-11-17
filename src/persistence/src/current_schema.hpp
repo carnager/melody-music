@@ -4,24 +4,17 @@
 
 namespace trackknife::persistence::detail {
 
-// The whole state schema, version 57, as one script: what every migration
-// up to 57 made of an empty database, written out (ADR-0354). A database
-// is created from it; one at another version is not opened.
-inline constexpr unsigned current_schema_version = 57U;
+// The whole state schema, version 58, as one script (ADR-0354). A database
+// is created from it; one at another version is not opened. 58 dropped the
+// lists, profiles, view presets and metadata cache the window kept before
+// its tabs were its own (ADR-0259, ADR-0286), and the lists retired by 56.
+inline constexpr unsigned current_schema_version = 58U;
 
 inline constexpr const char* current_schema_sql = R"sql(
-CREATE TABLE list_documents (id TEXT PRIMARY KEY NOT NULL, kind INTEGER NOT NULL, name BLOB NOT NULL, pinned INTEGER NOT NULL CHECK(pinned IN (0,1)), dirty INTEGER NOT NULL CHECK(dirty IN (0,1)), position INTEGER NOT NULL UNIQUE, remote INTEGER NOT NULL DEFAULT 0, engine TEXT NOT NULL DEFAULT '');
-CREATE TABLE list_items (document_id TEXT NOT NULL REFERENCES list_documents(id) ON DELETE CASCADE, position INTEGER NOT NULL, source INTEGER NOT NULL, profile_id TEXT, source_reference BLOB NOT NULL, duration_ms INTEGER, logical_reference BLOB, segment_start_sample INTEGER, segment_end_sample INTEGER, selected_audio_stream INTEGER, codec_subsong_index INTEGER, observed_device BLOB, observed_inode BLOB, observed_size BLOB, observed_mtime_seconds BLOB, observed_mtime_nanoseconds BLOB, entry_id TEXT, PRIMARY KEY(document_id, position));
-CREATE TABLE list_item_fields (document_id TEXT NOT NULL, item_position INTEGER NOT NULL, position INTEGER NOT NULL, name BLOB NOT NULL, value BLOB NOT NULL, native_name BLOB NOT NULL DEFAULT X'', provenance INTEGER NOT NULL DEFAULT 0 CHECK(provenance BETWEEN 0 AND 5), language BLOB, description BLOB, PRIMARY KEY(document_id, item_position, position), FOREIGN KEY(document_id, item_position) REFERENCES list_items(document_id, position) ON DELETE CASCADE);
-CREATE TABLE connection_profiles (id TEXT PRIMARY KEY NOT NULL, name BLOB NOT NULL, host BLOB NOT NULL, port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535), local_music_root BLOB, auto_connect INTEGER NOT NULL CHECK(auto_connect IN (0,1)), position INTEGER NOT NULL UNIQUE);
-CREATE TABLE track_view_presets (binding BLOB PRIMARY KEY NOT NULL, header_state BLOB NOT NULL, position INTEGER NOT NULL UNIQUE);
 CREATE TABLE operation_journal_occurrences (journal_id TEXT NOT NULL REFERENCES operation_journal(id) ON DELETE CASCADE, position INTEGER NOT NULL, item_index INTEGER NOT NULL, PRIMARY KEY(journal_id, position));
 CREATE TABLE operation_journal_changes (journal_id TEXT NOT NULL REFERENCES operation_journal(id) ON DELETE CASCADE, position INTEGER NOT NULL, field_index INTEGER NOT NULL, canonical_name BLOB NOT NULL, property_name BLOB NOT NULL, original_present INTEGER NOT NULL CHECK(original_present IN (0,1)), patch_kind INTEGER NOT NULL CHECK(patch_kind BETWEEN 0 AND 1), exact_native_name BLOB, PRIMARY KEY(journal_id, position));
 CREATE TABLE operation_journal_values (journal_id TEXT NOT NULL, change_position INTEGER NOT NULL, value_kind INTEGER NOT NULL CHECK(value_kind BETWEEN 0 AND 1), position INTEGER NOT NULL, value BLOB NOT NULL, PRIMARY KEY(journal_id, change_position, value_kind, position), FOREIGN KEY(journal_id, change_position) REFERENCES operation_journal_changes(journal_id, position) ON DELETE CASCADE);
 CREATE TABLE operation_journal_intents (journal_id TEXT NOT NULL, change_position INTEGER NOT NULL, position INTEGER NOT NULL, item_index INTEGER NOT NULL, PRIMARY KEY(journal_id, change_position, position), FOREIGN KEY(journal_id, change_position) REFERENCES operation_journal_changes(journal_id, position) ON DELETE CASCADE);
-CREATE TABLE local_metadata_cache (source_reference BLOB PRIMARY KEY NOT NULL, previous_device BLOB NOT NULL, previous_inode BLOB NOT NULL, previous_size BLOB NOT NULL, previous_mtime_seconds BLOB NOT NULL, previous_mtime_nanoseconds BLOB NOT NULL, published_device BLOB NOT NULL, published_inode BLOB NOT NULL, published_size BLOB NOT NULL, published_mtime_seconds BLOB NOT NULL, published_mtime_nanoseconds BLOB NOT NULL);
-CREATE TABLE local_metadata_cache_fields (source_reference BLOB NOT NULL REFERENCES local_metadata_cache(source_reference) ON DELETE CASCADE, position INTEGER NOT NULL, name BLOB NOT NULL, value BLOB NOT NULL, native_name BLOB NOT NULL, provenance INTEGER NOT NULL CHECK(provenance BETWEEN 0 AND 5), language BLOB, description BLOB, PRIMARY KEY(source_reference, position));
-CREATE TABLE local_metadata_refreshes (operation_id TEXT PRIMARY KEY NOT NULL, source_reference BLOB NOT NULL, previous_device BLOB NOT NULL, previous_inode BLOB NOT NULL, previous_size BLOB NOT NULL, previous_mtime_seconds BLOB NOT NULL, previous_mtime_nanoseconds BLOB NOT NULL, published_device BLOB NOT NULL, published_inode BLOB NOT NULL, published_size BLOB NOT NULL, published_mtime_seconds BLOB NOT NULL, published_mtime_nanoseconds BLOB NOT NULL, affected_occurrences INTEGER NOT NULL CHECK(affected_occurrences > 0));
 CREATE TABLE metadata_operation_backups (journal_id TEXT PRIMARY KEY NOT NULL REFERENCES operation_journal(id) ON DELETE CASCADE, state INTEGER NOT NULL CHECK(state BETWEEN 0 AND 4), undo_id TEXT, completed_at_unix_seconds INTEGER NOT NULL, updated_at_unix_seconds INTEGER NOT NULL, error_code INTEGER, error_message BLOB);
 CREATE TABLE metadata_transformation_chains (id TEXT PRIMARY KEY NOT NULL, schema_version INTEGER NOT NULL CHECK(schema_version = 1), name BLOB NOT NULL UNIQUE, automatic INTEGER NOT NULL DEFAULT 0 CHECK(automatic IN (0,1)));
 CREATE TABLE output_layout_profiles (id TEXT PRIMARY KEY NOT NULL, schema_version INTEGER NOT NULL CHECK(schema_version = 1), name BLOB NOT NULL UNIQUE, dialect BLOB NOT NULL, dialect_version INTEGER NOT NULL, compiler_schema INTEGER NOT NULL, relative_directory_expression BLOB NOT NULL, basename_expression BLOB NOT NULL, sanitization_policy BLOB NOT NULL, sanitization_version INTEGER NOT NULL);
@@ -29,7 +22,7 @@ CREATE TABLE destination_profiles (id TEXT PRIMARY KEY NOT NULL, schema_version 
 CREATE TABLE file_publication_journal (id TEXT PRIMARY KEY NOT NULL, state INTEGER NOT NULL CHECK(state BETWEEN 0 AND 7), publication_kind INTEGER NOT NULL CHECK(publication_kind BETWEEN 1 AND 2), source_path BLOB NOT NULL, target_path BLOB NOT NULL, prepared_path BLOB NOT NULL, expected_device BLOB NOT NULL, expected_inode BLOB NOT NULL, expected_size BLOB NOT NULL, expected_mtime_seconds BLOB NOT NULL, expected_mtime_nanoseconds BLOB NOT NULL, prepared_device BLOB, prepared_inode BLOB, prepared_size BLOB, prepared_mtime_seconds BLOB, prepared_mtime_nanoseconds BLOB, target_device BLOB, target_inode BLOB, target_size BLOB, target_mtime_seconds BLOB, target_mtime_nanoseconds BLOB, error_code INTEGER, error_message BLOB, reverses_id TEXT REFERENCES file_publication_journal(id), content_kind INTEGER NOT NULL DEFAULT 0 CHECK(content_kind BETWEEN 0 AND 1));
 CREATE TABLE file_publication_journal_occurrences (journal_id TEXT NOT NULL REFERENCES file_publication_journal(id) ON DELETE CASCADE, position INTEGER NOT NULL, item_index INTEGER NOT NULL, PRIMARY KEY(journal_id, position));
 CREATE TABLE file_publication_journal_directories (journal_id TEXT NOT NULL REFERENCES file_publication_journal(id) ON DELETE CASCADE, position INTEGER NOT NULL, raw_path BLOB NOT NULL, PRIMARY KEY(journal_id, position));
-CREATE TABLE local_source_relocations (sequence INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL UNIQUE, source_reference BLOB NOT NULL, target_reference BLOB NOT NULL, previous_device BLOB NOT NULL, previous_inode BLOB NOT NULL, previous_size BLOB NOT NULL, previous_mtime_seconds BLOB NOT NULL, previous_mtime_nanoseconds BLOB NOT NULL, published_device BLOB NOT NULL, published_inode BLOB NOT NULL, published_size BLOB NOT NULL, published_mtime_seconds BLOB NOT NULL, published_mtime_nanoseconds BLOB NOT NULL, affected_occurrences INTEGER NOT NULL CHECK(affected_occurrences > 0), cache_rekeyed INTEGER NOT NULL CHECK(cache_rekeyed IN (0,1)), metadata_refreshed INTEGER NOT NULL DEFAULT 0 CHECK(metadata_refreshed IN (0,1)), CHECK(source_reference != target_reference));
+CREATE TABLE local_source_relocations (sequence INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL UNIQUE, source_reference BLOB NOT NULL, target_reference BLOB NOT NULL, previous_device BLOB NOT NULL, previous_inode BLOB NOT NULL, previous_size BLOB NOT NULL, previous_mtime_seconds BLOB NOT NULL, previous_mtime_nanoseconds BLOB NOT NULL, published_device BLOB NOT NULL, published_inode BLOB NOT NULL, published_size BLOB NOT NULL, published_mtime_seconds BLOB NOT NULL, published_mtime_nanoseconds BLOB NOT NULL, CHECK(source_reference != target_reference));
 CREATE TABLE musicbrainz_response_cache (url BLOB PRIMARY KEY NOT NULL, body BLOB NOT NULL, fetched_at_unix_seconds INTEGER NOT NULL CHECK(fetched_at_unix_seconds >= 0));
 CREATE TABLE encoder_presets (id TEXT PRIMARY KEY NOT NULL, preset_id BLOB NOT NULL, preset_version INTEGER NOT NULL CHECK(preset_version >= 1), display_name BLOB NOT NULL UNIQUE, codec_name BLOB NOT NULL, container_name BLOB NOT NULL, file_extension BLOB NOT NULL, lossless INTEGER NOT NULL CHECK(lossless IN (0, 1)), bit_rate INTEGER, vbr_quality INTEGER, sample_format_hint BLOB NOT NULL);
 CREATE TABLE local_library_roots (raw_path BLOB PRIMARY KEY NOT NULL, available INTEGER NOT NULL DEFAULT 0 CHECK(available IN (0,1)), error TEXT NOT NULL DEFAULT '', scan_token TEXT NOT NULL DEFAULT '');
@@ -166,37 +159,6 @@ CREATE TABLE file_publication_backups (
     error_code INTEGER,
     error_message BLOB
 , kept_path BLOB, kept_device BLOB, kept_inode BLOB, kept_size BLOB, kept_mtime_seconds BLOB, kept_mtime_nanoseconds BLOB);
-CREATE TABLE retired_engine_lists(
-  id TEXT,
-  name,
-  kind INT,
-  revision INT,
-  created_ms INT,
-  modified_ms INT,
-  draft_of TEXT,
-  draft_base INT
-);
-CREATE TABLE retired_engine_list_items(
-  list_id TEXT,
-  position INT,
-  entry_id TEXT,
-  raw_path,
-  logical_reference,
-  segment_start_sample INT,
-  segment_end_sample INT,
-  audio_stream_index INT,
-  subsong_index INT,
-  duration_ms INT,
-  title,
-  artist,
-  album,
-  album_artist,
-  date,
-  track_gain_db REAL,
-  track_peak REAL,
-  album_gain_db REAL,
-  album_peak REAL
-);
 CREATE TABLE local_library_mounts (mount_point BLOB PRIMARY KEY NOT NULL,
     filesystem TEXT NOT NULL, source BLOB NOT NULL);
 CREATE TRIGGER local_library_revision_insert AFTER INSERT ON local_library_tracks
@@ -215,7 +177,6 @@ WHEN OLD.title IS NOT NEW.title OR OLD.artist IS NOT NEW.artist OR OLD.album IS 
 BEGIN
     UPDATE local_library_revision SET revision = revision + 1;
 END;
-CREATE INDEX list_item_fields_item ON list_item_fields(document_id, item_position, position);
 CREATE INDEX metadata_operation_backups_state_time ON metadata_operation_backups(state, completed_at_unix_seconds DESC);
 CREATE INDEX file_publication_journal_state ON file_publication_journal(state);
 CREATE INDEX local_source_relocations_source ON local_source_relocations(source_reference, sequence);
@@ -231,15 +192,13 @@ CREATE INDEX local_library_album_rating_hash ON local_library_tracks(album_ratin
 CREATE INDEX operation_journal_state ON operation_journal(state);
 CREATE INDEX local_listening_history_last_played
     ON local_listening_history(last_played_ms DESC);
-CREATE UNIQUE INDEX list_items_entry ON list_items(document_id, entry_id);
 CREATE INDEX local_library_added ON local_library_tracks(added);
 CREATE INDEX engine_list_items_path ON engine_list_items(raw_path);
 CREATE UNIQUE INDEX engine_lists_draft ON engine_lists(draft_of) WHERE draft_of IS NOT NULL;
 CREATE INDEX file_publication_backups_state_time
     ON file_publication_backups(state, completed_at_unix_seconds DESC);
 CREATE INDEX local_library_album_date ON local_library_tracks(album_key, date);
-CREATE INDEX retired_engine_list_items_list ON retired_engine_list_items(list_id, position);
-UPDATE schema_version SET version = 57;
+UPDATE schema_version SET version = 58;
 )sql";
 
 } // namespace trackknife::persistence::detail

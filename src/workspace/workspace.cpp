@@ -51,17 +51,10 @@ Workspace::~Workspace() {
 void Workspace::start() {
     isolateTestEngineState();
     // ADR-0339: Melody's presets are its own -- not the engine's database,
-    // which this window no longer opens -- shared with melody-cli; taken
-    // over once from the database they shared with this computer's engine.
+    // which this window no longer opens -- shared with melody-cli.
     database_path_ = core::presets_database_path();
     std::error_code ignored;
     std::filesystem::create_directories(database_path_.parent_path(), ignored);
-    if (auto adopted = persistence::adopt_presets(core::engine_state_directory() / "lists.sqlite",
-                                                  database_path_);
-        !adopted) {
-        qWarning().noquote() << "The presets stay with the engine:"
-                             << QString::fromStdString(adopted.error().message);
-    }
     connectLocalEngine();
     persistence_ = new ui::ListPersistenceService(database_path_, this);
     persistence_timer_ = new QTimer(this);
@@ -72,42 +65,13 @@ void Workspace::start() {
         refreshNewRatings();
     });
     tab_store_ = std::make_unique<TabStore>();
-    // ADR-0259: once this window keeps its tabs itself, the lists it stored
-    // before are not read again.
-    const bool kept = TabStore::hasState();
-    persistence_->initialize(
-        [this, kept](ui::PersistedWorkspace workspace, QString error) {
-            if (!error.isEmpty()) {
-                view_->showMessage(QStringLiteral("List restore failed: %1").arg(error), 5'000);
-            }
-            if (kept) {
-                restoreFromTabStore();
-                return;
-            }
-            // The migration: this window's lists as it stored them, one last
-            // time; the first save keeps them as tabs.
-            migrating_ = true;
-            restored_track_view_layouts_.clear();
-            for (const auto& preset : workspace.view_presets) {
-                restored_track_view_layouts_.insert(
-                    displayText(preset.binding),
-                    QByteArray{preset.header_state.data(),
-                               static_cast<qsizetype>(preset.header_state.size())});
-            }
-            // The lists' rows are made off this thread: on a big list that
-            // was seconds of a window that took no clicks. The rest of the
-            // start follows once they are in.
-            auto* preparing = new QFutureWatcher<std::vector<PreparedList>>(this);
-            connect(preparing, &QFutureWatcherBase::finished, this, [this, preparing, error] {
-                preparing->deleteLater();
-                restoreLists(preparing->future().takeResult());
-                restoredWorkspace(error);
-            });
-            preparing->setFuture(QtConcurrent::run([lists = std::move(workspace.lists)]() mutable {
-                return prepareLists(std::move(lists));
-            }));
-        },
-        !kept);
+    // ADR-0259: the window keeps its tabs itself (TabStore).
+    persistence_->initialize([this](const QString& error) {
+        if (!error.isEmpty()) {
+            view_->showMessage(QStringLiteral("List restore failed: %1").arg(error), 5'000);
+        }
+        restoreFromTabStore();
+    });
 }
 
 void Workspace::restoreFromTabStore() {

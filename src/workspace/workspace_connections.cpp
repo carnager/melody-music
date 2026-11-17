@@ -546,6 +546,9 @@ void Workspace::checkMissing(const QString& document_id, std::vector<std::string
                             moved[index]->revision)) {
                         std::erase(still_missing, asked[index].first);
                         followed = true;
+                        // Moved by a write, perhaps of its tags too: read
+                        // where it is now.
+                        self->readRowsAgain(moved[index]->raw_path);
                     }
                 }
                 found->model->setMissing(paths, still_missing);

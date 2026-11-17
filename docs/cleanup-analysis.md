@@ -17,7 +17,7 @@ from the Qt Quick window, and helpers written several times.
 | 57-step schema migration chain; squash into one v57 `CREATE` and refuse older | `persistence/src/list_repository.cpp:323-1665` | ~1,340 |
 | SQL migration files read only by tests and a downgrade doc | `src/persistence/migrations/` (110 files), its tests, `docs/melody.md:270-285` | ~1,800 + tests |
 | Backfills for old schemas | `local_library.cpp:1229-1325`, `:3244`; `list_repository.cpp:2343` | ~110 |
-| Client-era list/profile/view-preset storage, reached only by one-time adoption into TabStore | `ListRepository` `load_all`/`replace_all`/`save_workspace` (2207-2784), `refresh_local_metadata` (2784-3179), profiles (3769-3875), view presets (3875-3956), `adopt_presets` (6548-6616), `Workspace::initialize` legacy load (`workspace.cpp:88-120`) | ~1,250 |
+| ~~Client-era list/profile/view-preset storage, reached only by one-time adoption into TabStore~~ Done 2026-11-17: schema 58, ADR-0354 amendment | `ListRepository` `load_all`/`replace_all`/`save_workspace` (2207-2784), `refresh_local_metadata` (2784-3179), profiles (3769-3875), view presets (3875-3956), `adopt_presets` (6548-6616), `Workspace::initialize` legacy load (`workspace.cpp:88-120`) | ~1,250 |
 | MPD remnants in storage | `ListKind::mpd`, `ListSource::mpd`, `connection_profiles`, `list_repository.cpp:1705`, `workspace_lists.cpp:584` | ~80 |
 | Retired-lists feature | `list.retired*` (`list_methods.cpp:787-840`), `load/drop_retired_*`, `workspace_connections.cpp:896-970`, `retired_engine_list*` tables | ~150 |
 | One-time adopters | Trackknife state folder (`engine_state.cpp:84-160`, `daemon/main.cpp:456-480`), `dynamic.adopt` + `copied_rule`, `adoptDynamicPlaylists`, `adoptTrackknifeNames` + `trackknife_names_test` | ~300 |

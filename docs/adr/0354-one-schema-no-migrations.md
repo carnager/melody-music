@@ -41,3 +41,52 @@ Accepted, 2026-11-17.
 - Tables the window no longer uses (`list_documents` and the rest of the
   client-era lists) are still in the script; dropping them is the next
   change, and the first one made this way.
+
+## Amendment, 2026-11-17: schema 58
+
+The first change made this way. Schema 58 drops what the window kept before
+its tabs were its own (ADR-0259, ADR-0286) -- `list_documents`,
+`list_items`, `list_item_fields`, `connection_profiles`,
+`track_view_presets`, the `local_metadata_*` cache -- and the lists schema 56
+retired. Nothing read them but the window's one-time import into its tab
+store and `adopt_presets`, both gone with them.
+
+The move journal, `local_source_relocations`, stays and loses its
+list-occurrence columns. It recorded a move only when the moved file was in
+one of those old lists, so a tab could not find a file moved while its
+window was closed (`catalogue.resolve_moves`); every move is recorded now.
+And a tab's row whose file cannot be read on opening keeps the revision it
+was seen at, so the journal can be asked; once followed, it is read where
+the file is.
+
+The owner's databases (both engines' `lists.sqlite`, caprica's
+`presets.sqlite`) are brought along with this script, run with
+`sqlite3 -bail` while nothing has them open; it refuses a database not at
+57. Checked on copies: integrity and foreign keys hold, and the result has
+the same tables, columns, foreign keys and indexes as a database made fresh
+at 58.
+
+```sql
+-- Melody state database 57 -> 58 (ADR-0354: by hand, no migration chain).
+-- The client-era lists, profiles, view presets, metadata cache and the
+-- lists retired by 56 go; the move journal keeps only the move.
+PRAGMA foreign_keys = OFF;
+BEGIN IMMEDIATE;
+CREATE TEMP TABLE at_schema_57 (version INTEGER CHECK(version = 57));
+INSERT INTO at_schema_57 SELECT version FROM schema_version;
+DROP TABLE IF EXISTS list_item_fields;
+DROP TABLE IF EXISTS list_items;
+DROP TABLE IF EXISTS list_documents;
+DROP TABLE IF EXISTS connection_profiles;
+DROP TABLE IF EXISTS track_view_presets;
+DROP TABLE IF EXISTS local_metadata_cache_fields;
+DROP TABLE IF EXISTS local_metadata_cache;
+DROP TABLE IF EXISTS local_metadata_refreshes;
+DROP TABLE IF EXISTS retired_engine_list_items;
+DROP TABLE IF EXISTS retired_engine_lists;
+ALTER TABLE local_source_relocations DROP COLUMN affected_occurrences;
+ALTER TABLE local_source_relocations DROP COLUMN cache_rekeyed;
+ALTER TABLE local_source_relocations DROP COLUMN metadata_refreshed;
+UPDATE schema_version SET version = 58;
+COMMIT;
+```
