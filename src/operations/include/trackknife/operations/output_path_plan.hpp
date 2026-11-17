@@ -175,10 +175,6 @@ struct ConvertedPublicationPolicy {
                            const ConvertedPublicationPolicy&) = default;
 };
 
-// The deepest directory containing every path (byte-wise component
-// comparison); empty when the list is empty or no common directory exists.
-[[nodiscard]] std::string common_source_directory_raw_path(std::span<const std::string> raw_paths);
-
 // Pure planning boundary: callers provide the selected items, final metadata,
 // and an explicit filesystem observation snapshot. The planner performs no I/O
 // and never mutates a source.

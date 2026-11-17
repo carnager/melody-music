@@ -463,12 +463,6 @@ void mirrorModeReproducesSourceStructureBelowTheRoot() {
     const std::vector<std::string> paths{"/music/Artist/Album/01 - One.flac",
                                          "/music/Artist/Album/CD2/02.flac",
                                          "/music/Artist/one.flac"};
-    CHECK(common_source_directory_raw_path(paths) == "/music/Artist");
-    CHECK(common_source_directory_raw_path({}).empty());
-    const std::vector<std::string> disjoint{"/music/a.flac", "/video/b.flac"};
-    CHECK(common_source_directory_raw_path(disjoint) == "/");
-    const std::vector<std::string> relative{"relative.flac"};
-    CHECK(common_source_directory_raw_path(relative).empty());
 
     const auto mirrored_policy = [](std::string root) {
         return ConvertedPublicationPolicy{.target_extension = "opus",

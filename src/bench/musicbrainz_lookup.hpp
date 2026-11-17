@@ -12,15 +12,15 @@
 
 namespace trackknife::bench {
 
-// Bench-level fetch boundary: the paced ADR-0088 client behind a durable
-// worker-thread cache. Empty means MusicBrainz is unavailable and Identify
-// stays disabled.
 // One fpcalc fingerprint of one local file.
 struct AcoustIdFingerprint {
     std::size_t duration_seconds{0U};
     QString fingerprint;
 };
 
+// What Identify asks MusicBrainz through: the engine, which paces and keeps
+// what it is answered. An empty fetch means MusicBrainz is unavailable and
+// Identify stays disabled.
 struct MusicBrainzLookupService {
     std::function<void(const QString& url, std::function<void(core::Result<QByteArray>)>)> fetch;
     // AcoustID (ADR-0096): optional fingerprint identification. Both empty

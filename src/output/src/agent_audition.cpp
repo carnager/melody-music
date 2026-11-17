@@ -102,19 +102,12 @@ bool AgentAudition::attach(std::unique_ptr<protocol::Client> client, const bool 
         if (event.name != changed_event) {
             return;
         }
-        std::function<void()> changed;
-        {
-            const std::lock_guard guard{mutex_};
-            // A report from a connection since replaced is stale.
-            if (weak.lock() != client_) {
-                return;
-            }
-            adopt(event.data);
-            changed = changed_;
+        const std::lock_guard guard{mutex_};
+        // A report from a connection since replaced is stale.
+        if (weak.lock() != client_) {
+            return;
         }
-        if (changed) {
-            changed();
-        }
+        adopt(event.data);
     });
     shared->on_closed([this, weak] {
         std::function<void()> offline;
@@ -218,11 +211,6 @@ std::optional<AgentAudition::LastHeard> AgentAudition::last_heard() const {
                             reported_.position_sample % rate * 1000 / rate;
     }
     return heard;
-}
-
-void AgentAudition::on_changed(std::function<void()> callback) {
-    const std::lock_guard guard{mutex_};
-    changed_ = std::move(callback);
 }
 
 void AgentAudition::on_offline(std::function<void()> callback) {

@@ -106,10 +106,6 @@ template <class Source> class RequestQueue {
         undo_.reset();
         return true;
     }
-    void abandon() {
-        clear();
-        finished();
-    }
     template <class Function> void updateSources(Function function) {
         ++revision_;
         for (auto& entry : pending_)

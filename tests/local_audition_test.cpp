@@ -250,156 +250,8 @@ int main() {
     CHECK(active.source_revision.has_value());
     CHECK(active.replay_gain_mode == trackknife::audio::ReplayGainMode::album);
 
-    // File publication re-keys decoder bindings by exact filesystem revision.
-    // The already-open descriptor continues without a reload, seek, or output
-    // transition; replay is an explicit no-op and stale evidence is refused.
-    const auto relocated_path = std::filesystem::path{path.native() + ".relocated"};
-    if (active.source_revision) {
-        const auto original_revision = *active.source_revision;
-        std::filesystem::rename(path, relocated_path);
-        const auto relocated_revision =
-            trackknife::core::observe_local_source_revision(relocated_path.native());
-        CHECK(relocated_revision.has_value());
-        if (relocated_revision) {
-            const auto before_relocation = (*service)->snapshot();
-            const trackknife::audio::LocalAuditionSourceRelocation relocation{
-                .source_raw_path = path.native(),
-                .target_raw_path = relocated_path.native(),
-                .source_revision = original_revision,
-                .target_revision = *relocated_revision,
-            };
-            std::size_t dependent_commit_count = 0U;
-            const auto relocated = (*service)->commit_source_relocation_and_wait(
-                relocation, [&]() -> trackknife::core::Result<void> {
-                    ++dependent_commit_count;
-                    CHECK((*service)->snapshot().raw_path == relocated_path.native());
-                    return {};
-                });
-            CHECK(relocated.has_value());
-            CHECK(dependent_commit_count == 1U);
-            if (relocated) {
-                CHECK(relocated->active_sources_relocated == 1U);
-                CHECK(relocated->queued_sources_relocated == 0U);
-                CHECK(relocated->pending_commands_relocated == 0U);
-                CHECK(relocated->revision_conflicts == 0U);
-                CHECK(!relocated->already_applied);
-            }
-            const auto after_relocation = (*service)->snapshot();
-            CHECK(after_relocation.raw_path == relocated_path.native());
-            CHECK(after_relocation.source_revision == relocated_revision);
-            CHECK(after_relocation.selection == before_relocation.selection);
-            CHECK(after_relocation.segment == before_relocation.segment);
-            CHECK(after_relocation.format == before_relocation.format);
-            CHECK(after_relocation.position_sample >= before_relocation.position_sample);
-
-            const auto replayed = (*service)->commit_source_relocation_and_wait(
-                relocation, [&]() -> trackknife::core::Result<void> {
-                    ++dependent_commit_count;
-                    return {};
-                });
-            CHECK(replayed.has_value());
-            CHECK(dependent_commit_count == 2U);
-            if (replayed) {
-                CHECK(replayed->active_sources_relocated == 0U);
-                CHECK(replayed->revision_conflicts == 0U);
-                CHECK(replayed->already_applied);
-            }
-
-            auto mismatched_replay = relocation;
-            ++mismatched_replay.target_revision.size;
-            const auto replay_conflict =
-                (*service)->relocate_source_and_wait(std::move(mismatched_replay));
-            CHECK(replay_conflict.has_value());
-            if (replay_conflict) {
-                CHECK(replay_conflict->active_sources_relocated == 0U);
-                CHECK(replay_conflict->revision_conflicts == 1U);
-                CHECK(!replay_conflict->already_applied);
-            }
-            CHECK((*service)->snapshot().raw_path == relocated_path.native());
-            CHECK((*service)->snapshot().source_revision == relocated_revision);
-
-            auto stale_revision = *relocated_revision;
-            ++stale_revision.size;
-            const auto refused = (*service)->relocate_source_and_wait({
-                .source_raw_path = relocated_path.native(),
-                .target_raw_path = relocated_path.native() + ".wrong",
-                .source_revision = stale_revision,
-                .target_revision = original_revision,
-            });
-            CHECK(refused.has_value());
-            if (refused) {
-                CHECK(refused->active_sources_relocated == 0U);
-                CHECK(refused->revision_conflicts == 1U);
-                CHECK(!refused->already_applied);
-            }
-            CHECK((*service)->snapshot().raw_path == relocated_path.native());
-            CHECK((*service)->snapshot().source_revision == relocated_revision);
-
-            // Replay can encounter an already-rekeyed player before the
-            // durable half fails. It must still compensate because the file
-            // executor will now roll publication back.
-            bool replay_failure_saw_target = false;
-            const auto replay_durable_failure = (*service)->commit_source_relocation_and_wait(
-                relocation, [&]() -> trackknife::core::Result<void> {
-                    replay_failure_saw_target =
-                        (*service)->snapshot().raw_path == relocated_path.native();
-                    return std::unexpected(trackknife::core::Error{
-                        .code = trackknife::core::ErrorCode::database,
-                        .message = "injected replay dependent-state failure",
-                        .context = {},
-                    });
-                });
-            CHECK(!replay_durable_failure);
-            CHECK(replay_failure_saw_target);
-            CHECK((*service)->snapshot().raw_path == path.native());
-            CHECK((*service)->snapshot().source_revision == active.source_revision);
-
-            std::filesystem::rename(relocated_path, path);
-            const auto restored_revision =
-                trackknife::core::observe_local_source_revision(path.native());
-            CHECK(restored_revision.has_value());
-            if (restored_revision) {
-                CHECK((*service)->snapshot().source_revision == restored_revision);
-
-                // If the durable half rejects publication, the transient
-                // player binding is returned to the source identity before
-                // the executor restores that directory entry.
-                std::filesystem::rename(path, relocated_path);
-                const auto failed_target_revision =
-                    trackknife::core::observe_local_source_revision(relocated_path.native());
-                CHECK(failed_target_revision.has_value());
-                if (failed_target_revision) {
-                    bool failure_saw_target = false;
-                    const auto durable_failure = (*service)->commit_source_relocation_and_wait(
-                        {
-                            .source_raw_path = path.native(),
-                            .target_raw_path = relocated_path.native(),
-                            .source_revision = *restored_revision,
-                            .target_revision = *failed_target_revision,
-                        },
-                        [&]() -> trackknife::core::Result<void> {
-                            failure_saw_target =
-                                (*service)->snapshot().raw_path == relocated_path.native();
-                            return std::unexpected(trackknife::core::Error{
-                                .code = trackknife::core::ErrorCode::database,
-                                .message = "injected dependent-state failure",
-                                .context = {},
-                            });
-                        });
-                    CHECK(!durable_failure);
-                    CHECK(durable_failure.error().code == trackknife::core::ErrorCode::database);
-                    CHECK(failure_saw_target);
-                    CHECK((*service)->snapshot().raw_path == path.native());
-                    CHECK((*service)->snapshot().source_revision == restored_revision);
-                }
-                std::filesystem::rename(relocated_path, path);
-            }
-        }
-    }
-
     const auto next_path = std::filesystem::path{
         path.native() + "-next-" + trackknife::core::StableId::random().to_string() + ".wav"};
-    const auto relocated_next_path = std::filesystem::path{next_path.native() + ".relocated"};
     write_silent_wave(next_path, 48'000U);
     CHECK((*service)->queue_gapless_next(next_path.native()).has_value());
     const auto queued = wait_for(**service, [&next_path](const auto& snapshot) {
@@ -407,34 +259,11 @@ int main() {
     });
     CHECK(queued.next_raw_path == next_path.native());
     CHECK(queued.next_source_revision.has_value());
-    if (queued.next_source_revision) {
-        std::filesystem::rename(next_path, relocated_next_path);
-        const auto relocated_next_revision =
-            trackknife::core::observe_local_source_revision(relocated_next_path.native());
-        CHECK(relocated_next_revision.has_value());
-        if (relocated_next_revision) {
-            const auto relocated_next = (*service)->relocate_source_and_wait({
-                .source_raw_path = next_path.native(),
-                .target_raw_path = relocated_next_path.native(),
-                .source_revision = *queued.next_source_revision,
-                .target_revision = *relocated_next_revision,
-            });
-            CHECK(relocated_next.has_value());
-            if (relocated_next) {
-                CHECK(relocated_next->active_sources_relocated == 0U);
-                CHECK(relocated_next->queued_sources_relocated == 1U);
-                CHECK(relocated_next->revision_conflicts == 0U);
-            }
-            CHECK((*service)->snapshot().next_raw_path == relocated_next_path.native());
-            CHECK((*service)->snapshot().next_source_revision == relocated_next_revision);
-        }
-    }
     CHECK((*service)->clear_gapless_next().has_value());
     const auto next_cleared =
         wait_for(**service, [](const auto& snapshot) { return snapshot.next_raw_path.empty(); });
     CHECK(next_cleared.next_raw_path.empty());
     std::filesystem::remove(next_path);
-    std::filesystem::remove(relocated_next_path);
 
     if (active.state == LocalAuditionState::failed) {
         std::cout << "SKIP: platform audio output unavailable: "

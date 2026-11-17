@@ -587,16 +587,6 @@ bool Player::forget_queue_rule(const std::string& rule) {
     return true;
 }
 
-bool Player::adopt_queue_list(const std::string& from, const std::string& to) {
-    const std::lock_guard guard{mutex_};
-    if (from.empty() || queue_list_ != from) {
-        return false;
-    }
-    queue_list_ = to;
-    ++revision_;
-    return true;
-}
-
 bool Player::ends_after_current() const {
     const std::lock_guard guard{mutex_};
     if (anchors_.current.is_nil() || !requests_.empty() || modes_.single_active()) {

@@ -488,10 +488,6 @@ Json encode(const operations::FilePublicationCommitResult& commit) {
     return encode_publication_commit(commit);
 }
 
-core::Result<operations::FilePublicationCommitResult> decode_publication_commit(const Json& value) {
-    return read_whole(value, read_publication_commit);
-}
-
 Json encode(const operations::FilePublicationApplyResult& result) {
     auto sources =
         encode_list(result.sources, [](const operations::FilePublicationApplySourceResult& source) {
@@ -582,26 +578,6 @@ decode_publication_apply_progress(const Json& value) {
 
 Json encode(const persistence::SavedOutputLayoutProfile& saved) {
     return Json{{"id", saved.id.to_string()}, {"profile", encode_layout(saved.profile)}};
-}
-
-core::Result<persistence::SavedOutputLayoutProfile> decode_saved_layout(const Json& value) {
-    Reader in{value};
-    persistence::SavedOutputLayoutProfile saved;
-    if (auto id = core::StableId::parse(in.text("id"))) {
-        saved.id = *id;
-    } else {
-        in.fail("id is not an identity");
-    }
-    if (auto profile =
-            in.optional_object<operations::OutputLayoutProfile>("profile", read_layout)) {
-        saved.profile = std::move(*profile);
-    } else {
-        in.fail("profile is missing");
-    }
-    if (!in.ok()) {
-        return std::unexpected(in.error());
-    }
-    return saved;
 }
 
 Json encode(const persistence::SavedDestinationProfile& saved) {

@@ -327,35 +327,6 @@ std::string_view output_path_plan_issue_kind_name(const OutputPathPlanIssueKind 
     return "output path issue";
 }
 
-std::string common_source_directory_raw_path(const std::span<const std::string> raw_paths) {
-    std::string common;
-    bool first = true;
-    for (const auto& raw_path : raw_paths) {
-        const auto slash = raw_path.rfind('/');
-        if (slash == std::string::npos || raw_path.front() != '/') {
-            return {};
-        }
-        auto directory = slash == 0U ? std::string{"/"} : raw_path.substr(0U, slash);
-        if (first) {
-            common = std::move(directory);
-            first = false;
-            continue;
-        }
-        // Shorten to the longest shared prefix that ends on a component
-        // boundary in both directories.
-        while (!(directory == common ||
-                 (directory.size() > common.size() && directory.starts_with(common) &&
-                  (common == "/" || directory[common.size()] == '/')))) {
-            if (common == "/") {
-                return "/";
-            }
-            const auto parent = common.rfind('/');
-            common = parent == 0U ? std::string{"/"} : common.substr(0U, parent);
-        }
-    }
-    return common;
-}
-
 bool OutputPathPlan::ready() const noexcept {
     return !sources.empty() && std::ranges::none_of(issues, &OutputPathPlanIssue::blocking);
 }

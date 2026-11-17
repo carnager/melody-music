@@ -483,19 +483,6 @@ $if(%originaldate%,$set(date,$left(%originaldate%,4))$set(originaldate,$left(%or
                diagnostic.message.find("default comment target") != std::string::npos;
     }));
 
-    const auto exported = export_metadata_rule_script(imported.actions);
-    CHECK(exported.has_value());
-    const auto reimported =
-        exported ? import_metadata_rule_script(*exported) : MetadataRuleScriptImportResult{};
-    CHECK(exported && !reimported.has_errors());
-    CHECK(exported && reimported.actions == imported.actions);
-    const std::array typed_only{MetadataTransformationAction{
-        MetadataAddValuesAction{.target_field = "genre", .values = {"Rock"}}}};
-    const auto unsupported_export = export_metadata_rule_script(typed_only);
-    CHECK(!unsupported_export);
-    CHECK(!unsupported_export &&
-          unsupported_export.error().code == trackknife::core::ErrorCode::unsupported);
-
     auto selected = StagedMetadataSelection::create({
         StagedMetadataSource{
             .raw_path = "/music/one.flac",

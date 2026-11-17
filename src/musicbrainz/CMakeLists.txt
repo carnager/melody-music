@@ -24,15 +24,11 @@ endif()
 qt_add_library(
     trackknife_musicbrainz STATIC
     src/album_groups.cpp
-    src/album_lookup.cpp
-    src/client.cpp
     src/matching.cpp
     src/proposal_bridge.cpp
     src/acoustid.cpp
     src/web_service.cpp
     include/trackknife/musicbrainz/album_groups.hpp
-    include/trackknife/musicbrainz/album_lookup.hpp
-    include/trackknife/musicbrainz/client.hpp
     include/trackknife/musicbrainz/matching.hpp
     include/trackknife/musicbrainz/proposal_bridge.hpp
     include/trackknife/musicbrainz/acoustid.hpp

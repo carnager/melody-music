@@ -83,8 +83,6 @@ class AgentAudition final : public audio::Audition {
     };
     // Nothing when it has not reported since it last connected.
     [[nodiscard]] std::optional<LastHeard> last_heard() const;
-    // Runs on the connection's reader thread after each report.
-    void on_changed(std::function<void()> callback);
     // Runs when the agent's connection drops, on its reader thread.
     void on_offline(std::function<void()> callback);
 
@@ -159,7 +157,6 @@ class AgentAudition final : public audio::Audition {
     bool files_{true};
     std::string reached_;
     StreamWishes wishes_;
-    std::function<void()> changed_;
     std::function<void()> offline_;
     audio::LocalAuditionSnapshot reported_;
     bool next_armed_{false};

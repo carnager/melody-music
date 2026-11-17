@@ -20,24 +20,6 @@ namespace {
 
 } // namespace
 
-std::string_view preparation_plan_issue_kind_name(const PreparationPlanIssueKind kind) {
-    switch (kind) {
-    case PreparationPlanIssueKind::no_effect:
-        return "no preparation effect";
-    case PreparationPlanIssueKind::metadata_plan_missing:
-        return "metadata plan missing";
-    case PreparationPlanIssueKind::path_plan_missing:
-        return "path plan missing";
-    case PreparationPlanIssueKind::path_preflight_missing:
-        return "path preflight missing";
-    case PreparationPlanIssueKind::combined_source_mismatch:
-        return "combined metadata and path source mismatch";
-    case PreparationPlanIssueKind::replaygain_unavailable:
-        return "ReplayGain unavailable";
-    }
-    return "preparation plan issue";
-}
-
 bool PreparationPlan::has_path_operation() const noexcept {
     return operations.rename_files || operations.move_files;
 }
