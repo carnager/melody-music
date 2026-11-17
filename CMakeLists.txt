@@ -80,10 +80,13 @@ if(MELODY_COMPILER_CACHE STREQUAL "AUTO" AND NOT DEFINED CMAKE_CXX_COMPILER_LAUN
 endif()
 
 # Qt, nlohmann::json and the standard library, which every UI file parses
-# and no edit to Melody changes, precompiled once per target.
+# and no edit to Melody changes, precompiled once per target. C++ files
+# only: the macOS Objective-C++ files build with ARC, which a header
+# precompiled without it refuses.
 function(melody_precompile_ui_headers target)
     if(NOT MELODY_ENABLE_CLANG_TIDY)
-        target_precompile_headers(${target} PRIVATE "${PROJECT_SOURCE_DIR}/cmake/pch/ui.hpp")
+        target_precompile_headers(${target} PRIVATE
+            "$<$<COMPILE_LANGUAGE:CXX>:${PROJECT_SOURCE_DIR}/cmake/pch/ui.hpp>")
     endif()
 endfunction()
 
