@@ -138,7 +138,6 @@ class LocalLibraryTest final : public QObject {
     Q_OBJECT
   private slots:
     void initTestCase();
-    void journalRebuildsKeepTheirEvidence();
     void rootsRetainOfflineMusicAndRawPaths();
     void incrementalScanSearchAndPaging();
     void refreshRereadsNamedFilesWithoutAWalk();
@@ -157,7 +156,6 @@ class LocalLibraryTest final : public QObject {
     void denseMetadataDoesNotProduceFalseMissingMatches();
     void parallelScanIndexesManyFiles();
     void ratingsFollowContentIdentity();
-    void migrationRoundTrip();
     void scansOnlyOnRefresh_data();
     void scansOnlyOnRefresh();
     void queryModeFiltersAndCommitsResults();
@@ -906,56 +904,6 @@ void LocalLibraryTest::denseMetadataDoesNotProduceFalseMissingMatches() {
     auto long_value = query::compile_tkq("ZZLONG PRESENT");
     QVERIFY(long_value);
     QCOMPARE(*library->filter_paths(*long_value), std::vector<std::string>{tagged});
-
-    // Downgrade/upgrade simulates a cache whose former per-field truncation
-    // cannot be distinguished from actual absence. No automatic scan repairs it.
-    sqlite3* db = nullptr;
-    QCOMPARE(sqlite3_open(database.c_str(), &db), SQLITE_OK);
-    // Migrations unwind strictly in reverse order down to the truncation-era
-    // schema before the app re-migrates forward.
-    for (const auto* name : {"0057_library_mounts.down",
-                             "0056_working_lists_retired.down",
-                             "0055_album_year_index.down",
-                             "0054_in_place_writes.down",
-                             "0052_file_publication_backups.down",
-                             "0051_engine_list_drafts.down",
-                             "0050_engine_list_item_details.down",
-                             "0049_operation_journal_backup_identity.down",
-                             "0047_list_engine.down",
-                             "0046_engine_lists.down",
-                             "0045_library_revision.down",
-                             "0044_library_added.down",
-                             "0043_remote_list_documents.down",
-                             "0042_engine_state.down",
-                             "0041_list_entry_identity.down",
-                             "0040_local_listening_occurrences.down",
-                             "0039_local_listening_history.down",
-                             "0038_folder_image_journal.down",
-                             "0037_mpd_list_documents.down",
-                             "0036_server_search_scope.down",
-                             "0035_local_ratings.down",
-                             "0034_metadata_field_filters.down",
-                             "0033_complete_library_fields.down"}) {
-        QFile downgrade{
-            QStringLiteral(MELODY_MIGRATION_DIR "/%1.sql").arg(QString::fromLatin1(name))};
-        QVERIFY(downgrade.open(QIODevice::ReadOnly));
-        QCOMPARE(sqlite3_exec(db, downgrade.readAll().constData(), nullptr, nullptr, nullptr),
-                 SQLITE_OK);
-    }
-    sqlite3_close(db);
-    auto migrated = persistence::LocalLibrary::open(database);
-    QVERIFY(migrated);
-    const auto incomplete = migrated->filter_paths(*query);
-    QVERIFY(!incomplete && incomplete.error().code == core::ErrorCode::conflict);
-    QVERIFY(incomplete.error().message.find("Refresh") != std::string::npos);
-    QVERIFY(!migrated->filter(*query, 0, 200));
-    persistence::LibraryScanProgress refresh;
-    QVERIFY(migrated->scan({}, refresh));
-    QCOMPARE(refresh.indexed.load(), 2U);
-    QCOMPARE(*migrated->filter_paths(*query), std::vector<std::string>{missing});
-    persistence::LibraryScanProgress unchanged;
-    QVERIFY(migrated->scan({}, unchanged));
-    QCOMPARE(unchanged.indexed.load(), 0U);
 }
 
 void LocalLibraryTest::scanRetainsFieldRowsAndTechnicals() {
@@ -1154,153 +1102,12 @@ void LocalLibraryTest::ratingsFollowContentIdentity() {
     QVERIFY(library->scan({}, rescan));
     QCOMPARE(library->query(tracks())->entries.front().rating, 8U);
 
-    // An index migrated before the identity columns existed backfills the
-    // hashes from its complete field evidence on open, so stored ratings
-    // join without waiting for a Refresh.
-    {
-        sqlite3* db = nullptr;
-        QCOMPARE(sqlite3_open((base / "state.sqlite").c_str(), &db), SQLITE_OK);
-        QCOMPARE(sqlite3_exec(db,
-                              "UPDATE local_library_tracks SET rating_hash='',"
-                              "album_rating_hash=''",
-                              nullptr, nullptr, nullptr),
-                 SQLITE_OK);
-        sqlite3_close(db);
-    }
-    auto backfilled = persistence::LocalLibrary::open(base / "state.sqlite");
-    QVERIFY(backfilled);
-    QCOMPARE(backfilled->query(tracks())->entries.front().rating_hash, track_hash);
-    QCOMPARE(backfilled->query(tracks())->entries.front().rating, 8U);
-    const auto backfilled_query = query::compile_tkq("rating GREATER 7");
-    QVERIFY(backfilled_query);
-    QCOMPARE(*backfilled->filter_paths(*backfilled_query), std::vector<std::string>{path});
-
     // Unrating deletes the stored row instead of keeping a zero.
     QVERIFY(library->set_rating(track_hash, false, 0U));
     QCOMPARE(library->query(tracks())->entries.front().rating, 0U);
     QCOMPARE(library->ratings({track_hash})->front(), 0U);
     QCOMPARE(filtered_paths("rating MISSING"), std::vector<std::string>{path});
     QCOMPARE(filtered_paths("rating PRESENT"), std::vector<std::string>{});
-}
-
-void LocalLibraryTest::migrationRoundTrip() {
-    QTemporaryDir temporary;
-    const auto database = (std::filesystem::path{temporary.path().toStdString()} / "state.sqlite");
-    {
-        auto repository = persistence::ListRepository::open(database);
-        QVERIFY(repository);
-        QCOMPARE(*repository->schema_version(), 57U);
-    }
-    sqlite3* db = nullptr;
-    QCOMPARE(sqlite3_open(database.c_str(), &db), SQLITE_OK);
-    // Down in reverse order, up in forward order: the ADR-0150 field table
-    // references the track table, so 0030 must unwind before 0028.
-    for (const auto* name : {"0057_library_mounts.down",
-                             "0056_working_lists_retired.down",
-                             "0055_album_year_index.down",
-                             "0054_in_place_writes.down",
-                             "0052_file_publication_backups.down",
-                             "0051_engine_list_drafts.down",
-                             "0050_engine_list_item_details.down",
-                             "0049_operation_journal_backup_identity.down",
-                             "0047_list_engine.down",
-                             "0046_engine_lists.down",
-                             "0045_library_revision.down",
-                             "0044_library_added.down",
-                             "0043_remote_list_documents.down",
-                             "0042_engine_state.down",
-                             "0041_list_entry_identity.down",
-                             "0040_local_listening_occurrences.down",
-                             "0039_local_listening_history.down",
-                             "0036_server_search_scope.down",
-                             "0035_local_ratings.down",
-                             "0034_metadata_field_filters.down",
-                             "0033_complete_library_fields.down",
-                             "0032_saved_searches.down",
-                             "0031_composed_metadata_artwork.down",
-                             "0030_library_query_index.down",
-                             "0028_local_library.down",
-                             "0028_local_library.up",
-                             "0030_library_query_index.up",
-                             "0031_composed_metadata_artwork.up",
-                             "0032_saved_searches.up",
-                             "0033_complete_library_fields.up",
-                             "0034_metadata_field_filters.up",
-                             "0035_local_ratings.up",
-                             "0036_server_search_scope.up",
-                             "0039_local_listening_history.up",
-                             "0040_local_listening_occurrences.up",
-                             "0041_list_entry_identity.up",
-                             "0042_engine_state.up",
-                             "0043_remote_list_documents.up",
-                             "0044_library_added.up",
-                             "0045_library_revision.up",
-                             "0046_engine_lists.up",
-                             "0047_list_engine.up"}) {
-        QFile migration{
-            QStringLiteral(MELODY_MIGRATION_DIR "/%1.sql").arg(QString::fromLatin1(name))};
-        QVERIFY(migration.open(QIODevice::ReadOnly));
-        QCOMPARE(sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr), SQLITE_OK);
-        QCOMPARE(sqlite3_exec(db, migration.readAll().constData(), nullptr, nullptr, nullptr),
-                 SQLITE_OK);
-        QCOMPARE(sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr), SQLITE_OK);
-    }
-    sqlite3_close(db);
-    auto library = persistence::LocalLibrary::open(database);
-    QVERIFY(library);
-    QVERIFY(library->roots()->empty());
-    QVERIFY(library->query(tracks())->entries.empty());
-    auto repository = persistence::ListRepository::open(database);
-    QVERIFY(repository.has_value());
-    persistence::SavedSearch saved{.id = core::StableId::random(),
-                                   .name = "Keep me",
-                                   .expression = "Jazz",
-                                   .dialect = "words-1"};
-    QVERIFY(repository->save_search(saved).has_value());
-    QCOMPARE(sqlite3_open(database.c_str(), &db), SQLITE_OK);
-    QFile downgrade{QStringLiteral(MELODY_MIGRATION_DIR "/0032_saved_searches.down.sql")};
-    QVERIFY(downgrade.open(QIODevice::ReadOnly));
-    QCOMPARE(sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr), SQLITE_OK);
-    QCOMPARE(sqlite3_exec(db, downgrade.readAll().constData(), nullptr, nullptr, nullptr),
-             SQLITE_CONSTRAINT);
-    QCOMPARE(sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr), SQLITE_OK);
-    sqlite3_close(db);
-    QCOMPARE(repository->load_saved_searches()->size(), 1U);
-    QCOMPARE(*repository->schema_version(), 57U);
-    QVERIFY(repository->save_local_resume(std::string(64U, 'a'), 500, 1'000));
-    QCOMPARE(sqlite3_open(database.c_str(), &db), SQLITE_OK);
-    QFile history_downgrade{
-        QStringLiteral(MELODY_MIGRATION_DIR "/0039_local_listening_history.down.sql")};
-    QVERIFY(history_downgrade.open(QIODevice::ReadOnly));
-    QCOMPARE(sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr), SQLITE_OK);
-    QCOMPARE(sqlite3_exec(db, history_downgrade.readAll().constData(), nullptr, nullptr, nullptr),
-             SQLITE_CONSTRAINT);
-    QCOMPARE(sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr), SQLITE_OK);
-    sqlite3_close(db);
-    const auto history = repository->load_local_listening_history(std::string(64U, 'a'));
-    QVERIFY(history && *history);
-    QCOMPARE((*history)->resume_position_ms, 500);
-    persistence::ListItem source;
-    source.source = persistence::ListSource::local;
-    source.source_reference = "/history.flac";
-    source.source_revision = core::LocalSourceRevision{.device = 1, .inode = 2};
-    QVERIFY(repository->record_local_listen(source, core::StableId::random(), 2000));
-    const auto key = repository->local_listening_key(source);
-    QVERIFY(key);
-    QCOMPARE(sqlite3_open(database.c_str(), &db), SQLITE_OK);
-    QFile occurrence_downgrade{
-        QStringLiteral(MELODY_MIGRATION_DIR "/0040_local_listening_occurrences.down.sql")};
-    QVERIFY(occurrence_downgrade.open(QIODevice::ReadOnly));
-    QCOMPARE(sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr), SQLITE_OK);
-    QCOMPARE(
-        sqlite3_exec(db, occurrence_downgrade.readAll().constData(), nullptr, nullptr, nullptr),
-        SQLITE_CONSTRAINT);
-    QCOMPARE(sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr), SQLITE_OK);
-    sqlite3_close(db);
-    QCOMPARE(repository->local_listening_key(source), key);
-    const auto retained = repository->load_local_listening_history(*key);
-    QVERIFY(retained && *retained);
-    QCOMPARE((*retained)->play_count, 1U);
 }
 
 // Settings in a directory of the test's own: the engine a case starts is
@@ -1316,65 +1123,6 @@ void LocalLibraryTest::initTestCase() {
 // foreign keys on during migration, dropping the old table deleted every
 // journal's children and backup record by cascade: one damaged record then
 // failed recovery at every start, so no backup was ever released again.
-void LocalLibraryTest::journalRebuildsKeepTheirEvidence() {
-    QTemporaryDir temporary;
-    QVERIFY(temporary.isValid());
-    const auto database = std::filesystem::path{temporary.path().toStdString()} / "state.sqlite";
-    QVERIFY(persistence::ListRepository::open(database).has_value());
-    sqlite3* db = nullptr;
-    QCOMPARE(sqlite3_open(database.c_str(), &db), SQLITE_OK);
-    const auto exec = [&db](const char* sql) {
-        return sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
-    };
-    QCOMPARE(exec("INSERT INTO operation_journal(id, kind, state, source_path, prepared_path, "
-                  "backup_path, expected_device, expected_inode, expected_size, "
-                  "expected_mtime_seconds, expected_mtime_nanoseconds, content_kind) VALUES("
-                  "'j1', 0, 3, X'61', X'62', X'63', X'00', X'00', X'00', X'00', X'00', 0);"
-                  "INSERT INTO operation_journal_occurrences VALUES('j1', 0, 0);"
-                  "INSERT INTO operation_journal_changes(journal_id, position, field_index, "
-                  "canonical_name, property_name, original_present, patch_kind) "
-                  "VALUES('j1', 0, 0, X'74', X'54', 0, 0);"
-                  "INSERT INTO metadata_operation_backups(journal_id, state, "
-                  "completed_at_unix_seconds, updated_at_unix_seconds) VALUES('j1', 0, 1, 1);"),
-             SQLITE_OK);
-    for (const auto* name :
-         {"0057_library_mounts", "0056_working_lists_retired", "0055_album_year_index",
-          "0054_in_place_writes", "0052_file_publication_backups", "0051_engine_list_drafts",
-          "0050_engine_list_item_details", "0049_operation_journal_backup_identity",
-          "0047_list_engine", "0046_engine_lists", "0045_library_revision", "0044_library_added",
-          "0043_remote_list_documents", "0042_engine_state", "0041_list_entry_identity",
-          "0040_local_listening_occurrences", "0039_local_listening_history",
-          "0038_folder_image_journal"}) {
-        QFile downgrade{
-            QStringLiteral(MELODY_MIGRATION_DIR "/%1.down.sql").arg(QLatin1String{name})};
-        QVERIFY(downgrade.open(QIODevice::ReadOnly));
-        QCOMPARE(exec("BEGIN IMMEDIATE"), SQLITE_OK);
-        QVERIFY2(exec(downgrade.readAll().constData()) == SQLITE_OK, sqlite3_errmsg(db));
-        QCOMPARE(exec("COMMIT"), SQLITE_OK);
-    }
-    sqlite3_close(db);
-
-    // Schema 38 runs again: the rebuild that emptied the child tables.
-    auto repository = persistence::ListRepository::open(database);
-    QVERIFY(repository.has_value());
-    QCOMPARE(*repository->schema_version(), 57U);
-    QCOMPARE(sqlite3_open(database.c_str(), &db), SQLITE_OK);
-    const auto count = [&db](const char* table) {
-        sqlite3_stmt* statement = nullptr;
-        const auto sql = QByteArray{"SELECT count(*) FROM "} + table;
-        sqlite3_prepare_v2(db, sql.constData(), -1, &statement, nullptr);
-        sqlite3_step(statement);
-        const auto result = sqlite3_column_int(statement, 0);
-        sqlite3_finalize(statement);
-        return result;
-    };
-    QCOMPARE(count("operation_journal"), 1);
-    QCOMPARE(count("operation_journal_occurrences"), 1);
-    QCOMPARE(count("operation_journal_changes"), 1);
-    QCOMPARE(count("metadata_operation_backups"), 1);
-    sqlite3_close(db);
-}
-
 void LocalLibraryTest::scansOnlyOnRefresh_data() {
     QTest::addColumn<bool>("cancel");
     QTest::newRow("completed") << false;

@@ -414,21 +414,6 @@ int main(const int argc, char** argv) {
     CHECK(library->scan({}, progress).has_value());
     CHECK(contains(paths_of("dayssinceadded GREATER 3650"), jazz));
 
-    // A library indexed before tracks were dated is dated by their files'
-    // recorded times when it next opens: e.flac's is from 2001, though it
-    // came in today.
-    {
-        sqlite3* raw = nullptr;
-        CHECK(sqlite3_open((base / "state.sqlite").c_str(), &raw) == SQLITE_OK);
-        CHECK(sqlite3_exec(raw, "UPDATE local_library_tracks SET added=0", nullptr, nullptr,
-                           nullptr) == SQLITE_OK);
-        sqlite3_close(raw);
-    }
-    library = persistence::LocalLibrary::open(base / "state.sqlite");
-    CHECK(library.has_value());
-    CHECK(contains(paths_of("dayssinceadded GREATER 3650"), fresh));
-    CHECK(paths_of("dayssinceadded MISSING").empty());
-
     // An artist's albums in the order they came out. Tagged from
     // MusicBrainz, an album's key is its release id, which sorts no way in
     // particular: adding an artist put them out of order, year-named folders

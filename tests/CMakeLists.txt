@@ -333,10 +333,6 @@ target_link_libraries(
     PRIVATE Trackknife::Persistence melody_cli_presets trackknife_project_options
             trackknife_project_warnings
 )
-target_compile_definitions(
-    trackknife_list_repository_tests
-    PRIVATE MELODY_MIGRATION_DIR="${PROJECT_SOURCE_DIR}/src/persistence/migrations"
-)
 add_test(NAME list-repository COMMAND trackknife_list_repository_tests)
 
 add_executable(trackknife_list_edits_tests list_edits_test.cpp)
@@ -995,7 +991,6 @@ if(MELODY_BUILD_UI)
     qt_add_executable(trackknife_local_library_tests local_library_test.cpp)
     target_compile_definitions(trackknife_local_library_tests PRIVATE
         MELODY_AUDIO_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/audio"
-        MELODY_MIGRATION_DIR="${PROJECT_SOURCE_DIR}/src/persistence/migrations"
         MELODY_ENGINE_BINARY="$<TARGET_FILE:trackknife_engine_daemon>")
     add_dependencies(trackknife_local_library_tests trackknife_engine_daemon)
     target_link_libraries(trackknife_local_library_tests PRIVATE Trackknife::BenchUi

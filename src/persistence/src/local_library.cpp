@@ -1224,105 +1224,6 @@ LocalLibrary::LocalLibrary(LocalLibrary&&) noexcept = default;
 LocalLibrary& LocalLibrary::operator=(LocalLibrary&&) noexcept = default;
 LocalLibrary::~LocalLibrary() = default;
 
-namespace {
-
-// Migration 35 added the content-identity hash columns, but the scan only
-// re-prepares changed files, so pre-existing rows would never join the
-// rating store. Rows with complete field evidence rebuild their identity
-// from the indexed values here; incomplete rows wait for their explicit
-// Refresh, exactly like field search does. Idempotent and cheap once done.
-void backfill_rating_identities(sqlite3* db) {
-    {
-        Statement pending{db, "SELECT 1 FROM local_library_tracks WHERE rating_hash='' AND "
-                              "field_index_complete=1 LIMIT 1"};
-        if (!pending.next()) {
-            return;
-        }
-    }
-    std::vector<std::string> paths;
-    {
-        Statement select{db, "SELECT raw_path FROM local_library_tracks WHERE rating_hash='' "
-                             "AND field_index_complete=1"};
-        while (select.next()) {
-            paths.push_back(select.bytes(0));
-        }
-    }
-    Transaction transaction{db};
-    Statement fields{db, "SELECT canonical_name,value FROM local_library_fields WHERE raw_path=? "
-                         "ORDER BY canonical_name,position"};
-    Statement update{db, "UPDATE local_library_tracks SET rating_hash=?,album_rating_hash=? "
-                         "WHERE raw_path=?"};
-    for (const auto& path : paths) {
-        metadata::MetadataDocument document;
-        fields.reset();
-        fields.blob(1, path);
-        while (fields.next()) {
-            auto name = fields.bytes(0);
-            auto value = fields.bytes(1);
-            if (!document.fields.empty() && document.fields.back().canonical_name == name) {
-                document.fields.back().values.push_back(std::move(value));
-            } else {
-                document.fields.push_back(metadata::MetadataField{
-                    .canonical_name = std::move(name),
-                    .native_name = {},
-                    .values = {std::move(value)},
-                    .qualifier = {},
-                    .provenance = metadata::FieldProvenance::cached_snapshot,
-                });
-            }
-        }
-        const auto identity = rating_identity(document, path);
-        update.reset();
-        update.text(1, identity.track_hash);
-        update.text(2, identity.album_hash);
-        update.blob(3, path);
-        update.next();
-    }
-    transaction.commit();
-}
-
-} // namespace
-
-namespace {
-
-// Tracks indexed before the library kept when they came: dated by their
-// file's modification time, from the revision recorded when last read
-// ("2:device:inode:size:seconds:nanoseconds"). Runs once; nothing is 0 after.
-void backfill_added(sqlite3* db) {
-    Statement pending{db, "SELECT count(*) FROM local_library_tracks WHERE added=0"};
-    if (!pending.next() || pending.number(0) == 0) {
-        return;
-    }
-    Transaction transaction{db};
-    Statement rows{db, "SELECT raw_path,revision FROM local_library_tracks WHERE added=0"};
-    Statement update{db, "UPDATE local_library_tracks SET added=? WHERE raw_path=?"};
-    while (rows.next()) {
-        const auto revision = rows.bytes(1);
-        std::int64_t seconds = 1;
-        // The fifth field; an unreadable one still leaves the row dated, so
-        // this does not run again for it.
-        std::size_t field = 0;
-        std::size_t start = 0;
-        for (std::size_t index = 0; index <= revision.size(); ++index) {
-            if (index == revision.size() || revision[index] == ':') {
-                if (field == 4) {
-                    std::from_chars(revision.data() + start, revision.data() + index, seconds);
-                    break;
-                }
-                ++field;
-                start = index + 1;
-            }
-        }
-        update.number(1, std::max<std::int64_t>(seconds, 1));
-        update.blob(2, rows.bytes(0));
-        update.next();
-        update.reset();
-    }
-    transaction.commit();
-}
-
-} // namespace
-
 core::Result<LocalLibrary> LocalLibrary::open(const std::filesystem::path& path) {
     return checked([&] {
         auto migrated = ListRepository::open(path);
@@ -1340,8 +1241,6 @@ core::Result<LocalLibrary> LocalLibrary::open(const std::filesystem::path& path)
         // final commit on power loss and removes the per-file fsync that
         // dominated large scans. The journals keep synchronous=FULL.
         execute(impl->db, "PRAGMA synchronous=NORMAL");
-        backfill_rating_identities(impl->db);
-        backfill_added(impl->db);
         return LocalLibrary{std::move(impl)};
     });
 }
@@ -3241,8 +3140,8 @@ core::Result<LibraryScanResult> LocalLibrary::scan(const core::CancellationToken
                 bool unchanged = false;
                 std::string stored_revision;
                 {
-                    // Rows still missing their migration-35 rating identity
-                    // re-prepare even when the file itself is unchanged.
+                    // A row without complete fields or a rating identity is
+                    // read again even when the file itself is unchanged.
                     previous.reset();
                     previous.blob(1, raw);
                     const bool stored = previous.next();

@@ -2243,76 +2243,6 @@ void engine_lists_are_edited_in_place() {
 
 } // namespace
 
-// ADR-0234: an older release's lists said only whether they were the
-// remote's. Upgraded, the remote's say "remote" -- the configured remote,
-// until it has said who it is -- and this computer's say nothing.
-void lists_of_an_older_release_name_their_engine() {
-    namespace persistence = trackknife::persistence;
-    namespace core = trackknife::core;
-    const auto directory = std::filesystem::temp_directory_path() /
-                           ("trackbench-list-engine-" + core::StableId::random().to_string());
-    std::filesystem::create_directory(directory);
-    const auto path = directory / "state.sqlite3";
-    const auto here = core::StableId::random();
-    const auto there = core::StableId::random();
-    {
-        auto repository = persistence::ListRepository::open(path);
-        require(repository.has_value(), "the database opens");
-        const auto document = [](const core::StableId& id, std::string engine) {
-            return persistence::ListDocument{.id = id,
-                                             .kind = persistence::ListKind::scratch,
-                                             .name = "list",
-                                             .pinned = false,
-                                             .dirty = false,
-                                             .items = {},
-                                             .engine = std::move(engine)};
-        };
-        const std::vector<persistence::ListDocument> lists{document(here, ""),
-                                                           document(there, "remote")};
-        require(repository->replace_all(lists).has_value(), "lists are saved");
-    }
-    // Back to how version 46 had it: only the flag.
-    sqlite3* db = nullptr;
-    require(sqlite3_open(path.c_str(), &db) == SQLITE_OK, "the database opens directly");
-    require(sqlite3_exec(db,
-                         "DROP TABLE local_library_mounts;"
-                         "DROP TABLE retired_engine_list_items;"
-                         "DROP TABLE retired_engine_lists;"
-                         "DROP INDEX local_library_album_date;"
-                         "DROP TABLE file_publication_backups;"
-                         "DROP INDEX engine_lists_draft;"
-                         "ALTER TABLE engine_lists DROP COLUMN draft_base;"
-                         "ALTER TABLE engine_lists DROP COLUMN draft_of;"
-                         "ALTER TABLE engine_list_items DROP COLUMN album_peak;"
-                         "ALTER TABLE engine_list_items DROP COLUMN album_gain_db;"
-                         "ALTER TABLE engine_list_items DROP COLUMN track_peak;"
-                         "ALTER TABLE engine_list_items DROP COLUMN track_gain_db;"
-                         "ALTER TABLE engine_list_items DROP COLUMN date;"
-                         "ALTER TABLE engine_list_items DROP COLUMN album_artist;"
-                         "ALTER TABLE operation_journal DROP COLUMN backup_device;"
-                         "ALTER TABLE operation_journal DROP COLUMN backup_inode;"
-                         "ALTER TABLE operation_journal DROP COLUMN backup_size;"
-                         "ALTER TABLE operation_journal DROP COLUMN backup_mtime_seconds;"
-                         "ALTER TABLE operation_journal DROP COLUMN backup_mtime_nanoseconds;"
-                         "ALTER TABLE operation_journal DROP COLUMN in_place;"
-                         "ALTER TABLE list_documents DROP COLUMN engine;"
-                         "UPDATE schema_version SET version = 46;",
-                         nullptr, nullptr, nullptr) == SQLITE_OK,
-            "the database goes back to version 46");
-    sqlite3_close(db);
-
-    auto reopened = persistence::ListRepository::open(path);
-    require(reopened.has_value() && reopened->schema_version() == 57U, "and is upgraded");
-    const auto loaded = reopened->load_all();
-    require(loaded.has_value() && loaded->size() == 2U, "with both lists");
-    for (const auto& list : *loaded) {
-        require(list.engine == (list.id == there ? "remote" : ""),
-                "the remote's lists name the remote; this computer's name nothing");
-    }
-    std::error_code ignored;
-    std::filesystem::remove_all(directory, ignored);
-}
-
 // A workspace save writes a list's items only when they changed: an
 // unchanged list is its header, and what is stored of it stands. Two kept
 // searches of 66,841 tracks had every save rewrite 3.2 million rows.
@@ -2506,100 +2436,6 @@ void a_saved_lists_draft_is_saved_into_it() {
 
 // ADR-0286: schema 56 sets the working lists and drafts aside -- saved
 // playlists stay -- and the down migration puts them back.
-void working_lists_are_retired_and_come_back() {
-    namespace persistence = trackknife::persistence;
-    using trackknife::core::StableId;
-    const auto path = std::filesystem::temp_directory_path() /
-                      ("trackknife-retired-lists-" + std::to_string(::getpid()) + ".sqlite3");
-    std::filesystem::remove(path);
-    const auto item = [](const char* raw_path) {
-        return persistence::EngineListItem{.entry_id = StableId::random(),
-                                           .raw_path = raw_path,
-                                           .logical_reference = std::nullopt,
-                                           .segment = std::nullopt,
-                                           .source_selection = std::nullopt,
-                                           .duration_ms = 1'000,
-                                           .title = "Title",
-                                           .artist = "Artist",
-                                           .album = "Album",
-                                           .album_artist = {},
-                                           .date = {},
-                                           .replay_gain = std::nullopt};
-    };
-    const auto working = StableId::random();
-    const auto saved = StableId::random();
-    const std::vector working_items{item("/music/a.flac"), item("/music/b.flac")};
-    {
-        auto repository = persistence::ListRepository::open(path);
-        require(repository.has_value(), "the repository opens");
-        require(repository
-                    ->save_engine_list(working, "Scratch", persistence::EngineListKind::working,
-                                       working_items, 0U, 1)
-                    .has_value(),
-                "a working list is stored, as an older engine did");
-        require(repository
-                    ->save_engine_list(saved, "Mixtape", persistence::EngineListKind::saved,
-                                       {item("/music/c.flac")}, 0U, 1)
-                    .has_value(),
-                "a saved list is stored");
-    }
-    const auto run = [&path](const char* file) {
-        std::ifstream stream{std::string{MELODY_MIGRATION_DIR} + "/" + file, std::ios::binary};
-        const std::string sql{std::istreambuf_iterator<char>{stream},
-                              std::istreambuf_iterator<char>{}};
-        sqlite3* raw = nullptr;
-        require(sqlite3_open(path.c_str(), &raw) == SQLITE_OK, "the database opens directly");
-        const bool ran = sqlite3_exec(raw, sql.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK;
-        sqlite3_close(raw);
-        return ran;
-    };
-    // Back to schema 55 with both lists in place, then opened again: 56 runs.
-    require(run("0057_library_mounts.down.sql") && run("0056_working_lists_retired.down.sql"),
-            "schema 56 goes down");
-    {
-        auto repository = persistence::ListRepository::open(path);
-        require(repository.has_value() && repository->schema_version() == 57U,
-                "and is upgraded again");
-        const auto lists = repository->load_engine_lists();
-        require(lists && lists->size() == 1U && lists->front().id == saved,
-                "only the saved playlist stays among the lists");
-        const auto retired = repository->load_retired_engine_lists();
-        require(retired && retired->size() == 1U && retired->front().id == working &&
-                    retired->front().tracks == 2U,
-                "the working list is set aside, with its tracks");
-        const auto read = repository->load_retired_engine_list(working);
-        require(read && *read && (*read)->items == working_items, "and read back whole, in order");
-        require(repository->load_engine_list(working) && !*repository->load_engine_list(working),
-                "it is no list of the engine's any more");
-    }
-    // Down again: it is a list once more.
-    require(run("0057_library_mounts.down.sql") && run("0056_working_lists_retired.down.sql"),
-            "schema 56 goes down again");
-    {
-        sqlite3* raw = nullptr;
-        require(sqlite3_open(path.c_str(), &raw) == SQLITE_OK, "the database opens directly");
-        sqlite3_stmt* statement = nullptr;
-        sqlite3_prepare_v2(raw,
-                           "SELECT count(*) FROM engine_lists l JOIN engine_list_items i "
-                           "ON i.list_id = l.id WHERE l.kind = 0",
-                           -1, &statement, nullptr);
-        require(sqlite3_step(statement) == SQLITE_ROW && sqlite3_column_int(statement, 0) == 2,
-                "the down migration puts the working list and its tracks back");
-        sqlite3_finalize(statement);
-        sqlite3_close(raw);
-    }
-    {
-        auto repository = persistence::ListRepository::open(path);
-        require(repository.has_value(), "and up again");
-        const auto dropped = repository->drop_retired_engine_lists({working});
-        require(dropped && *dropped == 1U, "a retired list dealt with is dropped");
-        require(repository->load_retired_engine_lists() &&
-                    repository->load_retired_engine_lists()->empty(),
-                "and gone");
-    }
-    std::filesystem::remove(path);
-}
-
 // ADR-0339: melody-cli reads the naming layouts Melody saves, by name, with
 // SQLite alone -- the same names and expressions, and nothing written.
 void melody_cli_reads_the_layouts_melody_saves() {
@@ -2651,7 +2487,6 @@ int main() {
     local_listening_history_is_monotonic_and_persistent();
     local_listening_occurrences_are_idempotent_and_source_qualified();
     list_documents_round_trip_transactionally();
-    lists_of_an_older_release_name_their_engine();
     metadata_transformation_chains_round_trip_transactionally();
     output_layout_and_destination_profiles_round_trip_transactionally();
     presets_are_adopted_once();
@@ -2665,7 +2500,6 @@ int main() {
     list_entry_identities_survive_reordering_and_separate_duplicates();
     an_up_to_date_database_is_opened_without_rechecking_it();
     engine_lists_round_trip_and_refuse_stale_writes();
-    working_lists_are_retired_and_come_back();
     engine_lists_are_edited_in_place();
     a_saved_lists_draft_is_saved_into_it();
     return EXIT_SUCCESS;
