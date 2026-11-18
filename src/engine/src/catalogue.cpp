@@ -276,6 +276,16 @@ LocalCatalogue::cached_tracks(const std::vector<std::string>& raw_paths,
     return library->cached_tracks(raw_paths, cancellation);
 }
 
+core::Result<std::vector<persistence::LibraryTrackSnapshot>>
+LocalCatalogue::read_tracks(const std::vector<std::string>& raw_paths,
+                            const core::CancellationToken& cancellation) const {
+    auto library = open();
+    if (!library) {
+        return std::unexpected(std::move(library.error()));
+    }
+    return library->read_tracks(raw_paths, cancellation);
+}
+
 core::Result<std::vector<std::optional<persistence::LibraryTrackSnapshot>>>
 LocalCatalogue::described_tracks(const std::vector<std::string>& raw_paths,
                                  const core::CancellationToken& cancellation) const {

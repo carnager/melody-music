@@ -94,7 +94,6 @@ inline constexpr std::array<TrackColumnSpec, local_column_count> track_column_sp
 [[nodiscard]] std::string utf8Bytes(const QString& text);
 [[nodiscard]] QString formatTime(qint64 milliseconds);
 [[nodiscard]] std::string lowercased_ascii(std::string name);
-[[nodiscard]] std::optional<std::string_view> probed_semantic_alias(std::string_view native_name);
 void remove_shadowed_probed_metadata(metadata::MetadataDocument& document);
 [[nodiscard]] std::string metadata_value(const metadata::MetadataDocument& document,
                                          std::initializer_list<std::string_view> candidate_names);

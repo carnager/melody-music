@@ -261,6 +261,12 @@ class LocalLibrary final {
     core::Result<std::vector<std::optional<LibraryTrackSnapshot>>>
     described_tracks(const std::vector<std::string>& raw_paths,
                      const core::CancellationToken& cancellation = {}) const;
+    // ADR-0355: what a list's rows show for these files, in input order:
+    // an indexed track as the index has it, any other file read as a scan
+    // reads it, without storing it. A file that cannot be read is left out.
+    core::Result<std::vector<LibraryTrackSnapshot>>
+    read_tracks(const std::vector<std::string>& raw_paths,
+                const core::CancellationToken& cancellation = {}) const;
     core::Result<std::optional<std::string>>
     artwork_source(const std::string& album_key,
                    const core::CancellationToken& cancellation = {}) const;

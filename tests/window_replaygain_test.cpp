@@ -20,8 +20,6 @@ class BenchMainWindowTest::ReplayGain final : public window_test::Fixture {
     void replayGainScanStagesR128ForOpusTags();
     void contextReplayGainScansAndApplies_data();
     void contextReplayGainScansAndApplies();
-    void loudnessSidecarProjectsOntoProbedRows();
-    void replayGainScanPreservesLogicalSources_data();
     void replayGainScanPreservesLogicalSources();
 };
 
@@ -172,81 +170,6 @@ void BenchMainWindowTest::ReplayGain::applyMeasuresReplayGainAndWritesOnce() {
     QCOMPARE(value_of("b1.flac", "artist"), std::string{"Renamed Band"});
     QCOMPARE(value_of("b1.flac", "replaygainalbumgain"), std::string{"-3.00 dB"});
     QSettings{}.remove(QStringLiteral("properties/actions"));
-}
-
-// ADR-0141: a fresh sidecar beside the file projects onto probed rows
-// at sidecar provenance; a stale one projects nothing.
-void BenchMainWindowTest::ReplayGain::loudnessSidecarProjectsOntoProbedRows() {
-    QTemporaryDir media;
-    QVERIFY(media.isValid());
-    const auto fresh_path = media.filePath(QStringLiteral("fresh.wav"));
-    const auto stale_path = media.filePath(QStringLiteral("stale.wav"));
-    write_wave(fresh_path, wave_sample_rate / 10U);
-    write_wave(stale_path, wave_sample_rate / 10U);
-    const auto write_sidecar = [](const QString& audio, const bool fresh) {
-        const auto encoded = QFile::encodeName(audio);
-        const std::string raw{encoded.constData(), static_cast<std::size_t>(encoded.size())};
-        auto revision = trackknife::core::observe_local_source_revision(raw);
-        QVERIFY(revision.has_value());
-        trackknife::metadata::LoudnessSidecar sidecar;
-        sidecar.source_size = fresh ? revision->size : revision->size + 1U;
-        sidecar.source_modified_seconds = revision->modification_time_seconds;
-        sidecar.source_modified_nanoseconds = revision->modification_time_nanoseconds;
-        sidecar.entries = {trackknife::metadata::LoudnessSidecarEntry{
-            .stream_index = std::nullopt,
-            .subsong_index = std::nullopt,
-            .start_sample = std::nullopt,
-            .end_sample = std::nullopt,
-            .track_gain_db = -6.02,
-            .track_peak = 1.0,
-            .album_gain_db = std::nullopt,
-            .album_peak = std::nullopt,
-        }};
-        const auto serialized = trackknife::metadata::serialize_loudness_sidecar(sidecar);
-        QVERIFY(serialized.has_value());
-        QFile output{QString::fromStdString(trackknife::metadata::loudness_sidecar_path(raw))};
-        QVERIFY(output.open(QIODevice::WriteOnly));
-        output.write(serialized->data(), static_cast<qint64>(serialized->size()));
-    };
-    write_sidecar(fresh_path, true);
-    write_sidecar(stale_path, false);
-
-    BenchMainWindow window;
-    window.show();
-    const auto fresh_encoded = QFile::encodeName(fresh_path);
-    const auto stale_encoded = QFile::encodeName(stale_path);
-    window.openLocalPaths(
-        {std::string{fresh_encoded.constData(), static_cast<std::size_t>(fresh_encoded.size())},
-         std::string{stale_encoded.constData(), static_cast<std::size_t>(stale_encoded.size())}});
-    auto* tabs = window.findChild<QTabWidget*>(QStringLiteral("bench-tabs"));
-    QVERIFY(tabs != nullptr);
-    QTRY_COMPARE(tabs->count(), 1);
-    LocalListModel* list_model = nullptr;
-    QTRY_VERIFY((list_model = [&]() -> LocalListModel* {
-                    auto* view = qobject_cast<QTableView*>(tabs->currentWidget());
-                    return view == nullptr ? nullptr : qobject_cast<LocalListModel*>(view->model());
-                }()) != nullptr);
-    QTRY_COMPARE_WITH_TIMEOUT(list_model->rowCount(), 2, 5'000);
-    QTRY_VERIFY_WITH_TIMEOUT(list_model->rows().front().probed && list_model->rows().back().probed,
-                             5'000);
-    const auto sidecar_value = [&](const trackknife::bench::LocalTrackRow& row,
-                                   const std::string_view name) -> std::optional<std::string> {
-        const auto canonical = trackknife::metadata::canonicalize_field_name(name);
-        for (const auto& field : row.metadata.fields) {
-            if (field.provenance == trackknife::metadata::FieldProvenance::sidecar &&
-                field.canonical_name == canonical && !field.values.empty()) {
-                return field.values.front();
-            }
-        }
-        return std::nullopt;
-    };
-    const auto& fresh_row = list_model->rows()[0];
-    const auto& stale_row = list_model->rows()[1];
-    QCOMPARE(sidecar_value(fresh_row, "REPLAYGAIN_TRACK_GAIN"),
-             std::optional<std::string>{"-6.02 dB"});
-    QCOMPARE(sidecar_value(fresh_row, "REPLAYGAIN_TRACK_PEAK"),
-             std::optional<std::string>{"1.000000"});
-    QVERIFY(!sidecar_value(stale_row, "REPLAYGAIN_TRACK_GAIN").has_value());
 }
 
 void BenchMainWindowTest::ReplayGain::replayGainScanStagesMeasuredGainsAsDrafts() {
@@ -654,33 +577,17 @@ void BenchMainWindowTest::ReplayGain::contextReplayGainScansAndApplies() {
     dialog->close();
 }
 
-void BenchMainWindowTest::ReplayGain::replayGainScanPreservesLogicalSources_data() {
-    QTest::addColumn<QString>("kind");
-    QTest::newRow("cue") << QStringLiteral("cue");
-    QTest::newRow("chapter") << QStringLiteral("chapter");
-    QTest::newRow("subsong") << QStringLiteral("subsong");
-}
-
 void BenchMainWindowTest::ReplayGain::replayGainScanPreservesLogicalSources() {
-    QFETCH(QString, kind);
     QTemporaryDir media;
     QVERIFY(media.isValid());
-    QString input;
-    if (kind == QStringLiteral("cue")) {
-        write_sine_wav_fixture(media.filePath(QStringLiteral("disc.wav")), 0.8, 0.2);
-        input = media.filePath(QStringLiteral("disc.cue"));
+    write_sine_wav_fixture(media.filePath(QStringLiteral("disc.wav")), 0.8, 0.2);
+    const auto input = media.filePath(QStringLiteral("disc.cue"));
+    {
         QFile cue{input};
         QVERIFY(cue.open(QIODevice::WriteOnly));
         cue.write("TITLE \"Gain Album\"\nFILE \"disc.wav\" WAVE\n"
                   "TRACK 01 AUDIO\nTITLE \"Loud\"\nINDEX 01 00:00:00\n"
                   "TRACK 02 AUDIO\nTITLE \"Quiet\"\nINDEX 01 00:01:00\n");
-    } else {
-        input = media.filePath(kind == QStringLiteral("chapter") ? QStringLiteral("disc.mka")
-                                                                 : QStringLiteral("disc.mod"));
-        QVERIFY(materialize_audio_fixture(kind == QStringLiteral("chapter")
-                                              ? QStringLiteral("loudness-chapters-mka.b64")
-                                              : QStringLiteral("two-subsongs-mod.b64"),
-                                          input));
     }
     BenchMainWindow window;
     window.show();

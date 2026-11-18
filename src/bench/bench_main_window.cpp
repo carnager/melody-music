@@ -51,12 +51,8 @@ void BenchMainWindow::stopBackgroundWork() {
     if (localLibrary() != nullptr) {
         localLibrary()->stop();
     }
-    probe_cancellation_.request_cancellation();
-    probe_queue_.clear();
+    work_cancellation_.request_cancellation();
     artwork_queue_.clear();
-    if (probe_watcher_.isRunning()) {
-        probe_watcher_.waitForFinished();
-    }
     if (artwork_watcher_.isRunning()) {
         artwork_watcher_.waitForFinished();
     }
@@ -68,7 +64,6 @@ void BenchMainWindow::stopBackgroundWork() {
     if (discovery_watcher_.isRunning()) {
         discovery_watcher_.waitForFinished();
     }
-    probe_running_ = false;
     artwork_running_ = false;
     discovery_running_ = false;
     if (transport_timer_ != nullptr) {

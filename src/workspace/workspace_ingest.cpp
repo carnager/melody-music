@@ -4,7 +4,6 @@
 
 #include "bench/bench_main_window_helpers.hpp"
 #include "trackknife/formats/cue_sheet.hpp"
-#include "trackknife/formats/probe.hpp"
 #include "trackknife/loudness/replaygain.hpp"
 #include "trackknife/metadata/flac_mapping.hpp"
 #include "trackknife/metadata/local_reader.hpp"
@@ -37,23 +36,27 @@ extern "C" void __tsan_release(void* address);
 namespace trackknife::bench {
 namespace {
 
-constexpr std::size_t probe_batch_size = 8U;
 constexpr std::size_t discovery_row_limit = 100'000U;
 
-// Case-insensitive first-value lookup over one ordered metadata scope.
-[[nodiscard]] std::string probed_tag(const std::span<const formats::ProbedTag> tags,
-                                     const std::string_view name) {
-    for (const auto& tag : tags) {
-        if (lowercased_ascii(tag.name) == name) {
-            return tag.value;
+// What a row showed before its file was read stays where the file has no
+// tag for it: a queue entry another client gave its title and album, say,
+// for a file without tags. A file's own tags always win.
+void keep_what_the_file_lacks(LocalTrackRow& filled, const LocalTrackRow& had) {
+    const auto keep = [&filled](std::string& value, const std::string& before,
+                                const std::initializer_list<std::string_view> names) {
+        const bool tagged = std::ranges::any_of(names, [&filled](const std::string_view name) {
+            return filled.metadata.first_effective_value(name).has_value();
+        });
+        if (!tagged && !before.empty()) {
+            value = before;
         }
-    }
-    return {};
-}
-
-[[nodiscard]] std::string probed_tag(const formats::MediaProbe& probe,
-                                     const std::string_view name) {
-    return probed_tag(probe.tags, name);
+    };
+    keep(filled.title, had.title, {"title"});
+    keep(filled.artist, had.artist, {"artist"});
+    keep(filled.album, had.album, {"album"});
+    keep(filled.album_artist, had.album_artist, {"albumartist"});
+    keep(filled.date, had.date, {"date"});
+    keep(filled.track_number, had.track_number, {"tracknumber"});
 }
 
 void append_metadata_value(metadata::MetadataDocument& document, std::string native_name,
@@ -73,241 +76,6 @@ void append_metadata_value(metadata::MetadataDocument& document, std::string nat
         .qualifier = {},
         .provenance = provenance,
     });
-}
-
-void prepend_metadata_value(metadata::MetadataDocument& document, std::string native_name,
-                            std::string value, const metadata::FieldProvenance provenance) {
-    if (value.empty()) {
-        return;
-    }
-    const auto canonical_name =
-        metadata::resolve_text_property_identity(native_name).canonical_name;
-    if (canonical_name.empty()) {
-        return;
-    }
-    document.fields.insert(document.fields.begin(), metadata::MetadataField{
-                                                        .canonical_name = canonical_name,
-                                                        .native_name = std::move(native_name),
-                                                        .values = {std::move(value)},
-                                                        .qualifier = {},
-                                                        .provenance = provenance,
-                                                    });
-}
-
-void append_probed_metadata(metadata::MetadataDocument& document,
-                            const std::span<const formats::ProbedTag> tags,
-                            const metadata::FieldProvenance provenance) {
-    for (const auto& tag : tags) {
-        append_metadata_value(document, tag.name, tag.value, provenance);
-    }
-}
-
-// TagLib is the primary generic property adapter. FFmpeg's container/stream
-// projection fills only names that TagLib did not expose, retaining repeated
-// values in demuxer order without duplicating the primary representation.
-void append_missing_probed_metadata(metadata::MetadataDocument& document,
-                                    const std::span<const formats::ProbedTag> tags) {
-    std::unordered_set<std::string> primary_names;
-    primary_names.reserve(document.fields.size());
-    for (const auto& field : document.fields) {
-        primary_names.insert(field.canonical_name);
-    }
-    for (const auto& tag : tags) {
-        const auto canonical_name =
-            metadata::resolve_text_property_identity(tag.name).canonical_name;
-        if (primary_names.contains(canonical_name)) {
-            continue;
-        }
-        const auto semantic = probed_semantic_alias(tag.name);
-        if (semantic && primary_names.contains(std::string{*semantic})) {
-            continue;
-        }
-        append_metadata_value(document, tag.name, tag.value, metadata::FieldProvenance::stream);
-    }
-    remove_shadowed_probed_metadata(document);
-}
-
-[[nodiscard]] int best_audio_sample_rate(const formats::MediaProbe& probe) {
-    if (!probe.best_audio_stream) {
-        return 0;
-    }
-    const auto found = std::ranges::find(probe.audio_streams, *probe.best_audio_stream,
-                                         &formats::AudioStreamInfo::stream_index);
-    return found == probe.audio_streams.end() ? 0 : found->sample_rate;
-}
-
-[[nodiscard]] std::optional<std::int64_t> sample_duration_ms(const std::int64_t frames,
-                                                             const int sample_rate) {
-    if (frames < 0 || sample_rate <= 0) {
-        return std::nullopt;
-    }
-    const auto seconds = frames / sample_rate;
-    if (seconds > std::numeric_limits<std::int64_t>::max() / 1'000) {
-        return std::nullopt;
-    }
-    return (seconds * 1'000) + (((frames % sample_rate) * 1'000) / sample_rate);
-}
-
-// ADR-0153: the ingest probe already knows the stream facts; keep them
-// on the row so tab searches and the Find bar can answer technical
-// questions without re-probing.
-[[nodiscard]] std::optional<LocalTrackTechnicals>
-probe_technicals(const formats::MediaProbe& probe) {
-    if (!probe.best_audio_stream) {
-        return std::nullopt;
-    }
-    const auto found = std::ranges::find(probe.audio_streams, *probe.best_audio_stream,
-                                         &formats::AudioStreamInfo::stream_index);
-    if (found == probe.audio_streams.end()) {
-        return std::nullopt;
-    }
-    LocalTrackTechnicals technicals;
-    technicals.codec = found->codec_name;
-    technicals.sample_rate = found->sample_rate;
-    technicals.bits = formats::bits_per_sample_hint(found->sample_format);
-    technicals.channels = found->channels;
-    technicals.bit_rate = found->bit_rate > 0 ? found->bit_rate : probe.bit_rate;
-    return technicals;
-}
-
-[[nodiscard]] LocalTrackRow
-whole_file_row(const formats::MediaProbe& probe, metadata::MetadataDocument document,
-               std::optional<core::LocalSourceRevision> source_revision) {
-    append_missing_probed_metadata(document, probe.tags);
-    LocalTrackRow row;
-    row.raw_path = probe.raw_path;
-    row.duration_ms = probe.duration_ms;
-    row.metadata = std::move(document);
-    row.source_revision = source_revision;
-    row.technicals = probe_technicals(probe);
-    project_display_metadata(row);
-    row.probed = true;
-    return row;
-}
-
-[[nodiscard]] std::string chapter_logical_reference(const formats::MediaProbe& probe,
-                                                    const formats::ProbedChapter& chapter) {
-    std::string reference{"container-chapter-v1"};
-    reference.push_back('\0');
-    reference += probe.raw_path;
-    reference.push_back('\0');
-    reference += std::to_string(probe.best_audio_stream.value_or(-1));
-    reference.push_back('\0');
-    reference += std::to_string(chapter.id);
-    reference.push_back('\0');
-    reference += std::to_string(chapter.source_index);
-    return reference;
-}
-
-[[nodiscard]] std::vector<LocalTrackRow>
-chapter_rows(const formats::MediaProbe& probe, const metadata::MetadataDocument& document,
-             const std::optional<core::LocalSourceRevision>& source_revision) {
-    const auto sample_rate = best_audio_sample_rate(probe);
-    if (sample_rate <= 0 || probe.chapters.empty()) {
-        return {};
-    }
-    std::vector<LocalTrackRow> rows;
-    rows.reserve(probe.chapters.size());
-    for (std::size_t index = 0U; index < probe.chapters.size(); ++index) {
-        const auto& chapter = probe.chapters[index];
-        LocalTrackRow row;
-        row.raw_path = probe.raw_path;
-        row.logical_reference = chapter_logical_reference(probe, chapter);
-        row.segment = formats::SampleRange{.start_sample = chapter.start_sample,
-                                           .end_sample = chapter.end_sample};
-        row.metadata = document;
-        row.source_revision = source_revision;
-        append_probed_metadata(row.metadata, chapter.tags, metadata::FieldProvenance::segment);
-        if (probed_tag(chapter.tags, "title").empty()) {
-            append_metadata_value(row.metadata, "TITLE", "Chapter " + std::to_string(index + 1U),
-                                  metadata::FieldProvenance::segment);
-        }
-        if (metadata_value(row.metadata, {"album"}).empty()) {
-            append_metadata_value(row.metadata, "ALBUM", metadata_value(document, {"title"}),
-                                  metadata::FieldProvenance::segment);
-        }
-        if (metadata_value(row.metadata, {"albumartist"}).empty()) {
-            append_metadata_value(row.metadata, "ALBUMARTIST", metadata_value(document, {"artist"}),
-                                  metadata::FieldProvenance::segment);
-        }
-        if (probed_tag(chapter.tags, "tracknumber").empty() &&
-            probed_tag(chapter.tags, "track").empty()) {
-            append_metadata_value(row.metadata, "TRACKNUMBER", std::to_string(index + 1U),
-                                  metadata::FieldProvenance::segment);
-        }
-        row.duration_ms =
-            sample_duration_ms(chapter.end_sample - chapter.start_sample, sample_rate);
-        row.technicals = probe_technicals(probe);
-        project_display_metadata(row);
-        row.probed = true;
-        rows.push_back(std::move(row));
-    }
-    return rows;
-}
-
-[[nodiscard]] std::string subsong_logical_reference(const formats::MediaProbe& probe,
-                                                    const formats::ProbedSubsong& subsong) {
-    std::string reference{"codec-subsong-v1"};
-    reference.push_back('\0');
-    reference += probe.raw_path;
-    reference.push_back('\0');
-    reference += std::to_string(subsong.selection.stream_index.value_or(-1));
-    reference.push_back('\0');
-    reference += std::to_string(subsong.selection.subsong_index.value_or(-1));
-    reference.push_back('\0');
-    reference += std::to_string(subsong.source_index);
-    return reference;
-}
-
-[[nodiscard]] std::vector<LocalTrackRow>
-subsong_rows(const formats::MediaProbe& probe, const metadata::MetadataDocument& document,
-             const std::optional<core::LocalSourceRevision>& source_revision) {
-    if (probe.subsongs.empty()) {
-        return {};
-    }
-    const auto container_title = probed_tag(probe, "title");
-    std::vector<LocalTrackRow> rows;
-    rows.reserve(probe.subsongs.size());
-    for (std::size_t index = 0U; index < probe.subsongs.size(); ++index) {
-        const auto& subsong = probe.subsongs[index];
-        LocalTrackRow row;
-        row.raw_path = probe.raw_path;
-        row.logical_reference = subsong_logical_reference(probe, subsong);
-        row.selection = subsong.selection;
-        if (subsong.duration_samples && *subsong.duration_samples > 0) {
-            row.segment =
-                formats::SampleRange{.start_sample = 0, .end_sample = *subsong.duration_samples};
-        }
-        row.metadata = document;
-        row.source_revision = source_revision;
-        if (!subsong.name.empty()) {
-            append_metadata_value(row.metadata, "TITLE", subsong.name,
-                                  metadata::FieldProvenance::segment);
-        }
-        append_probed_metadata(row.metadata, subsong.tags, metadata::FieldProvenance::segment);
-        auto title = metadata_value(row.metadata, {"title"});
-        if (title.empty() || title == container_title) {
-            prepend_metadata_value(row.metadata, "TITLE", "Subsong " + std::to_string(index + 1U),
-                                   metadata::FieldProvenance::segment);
-        }
-        if (metadata_value(row.metadata, {"album"}).empty()) {
-            append_metadata_value(row.metadata, "ALBUM", container_title,
-                                  metadata::FieldProvenance::segment);
-        }
-        if (metadata_value(row.metadata, {"albumartist"}).empty()) {
-            append_metadata_value(row.metadata, "ALBUMARTIST",
-                                  metadata_value(row.metadata, {"artist"}),
-                                  metadata::FieldProvenance::segment);
-        }
-        append_metadata_value(row.metadata, "TRACKNUMBER", std::to_string(index + 1U),
-                              metadata::FieldProvenance::segment);
-        row.duration_ms = subsong.duration_ms;
-        row.technicals = probe_technicals(probe);
-        project_display_metadata(row);
-        row.probed = true;
-        rows.push_back(std::move(row));
-    }
-    return rows;
 }
 
 // Folder expansion only ingests plausible audio and external cue sheets;
@@ -377,61 +145,15 @@ cue_row(const formats::ResolvedCueSheet& sheet, const formats::ResolvedCueTrack&
     return row;
 }
 
-// ADR-0141: a fresh loudness sidecar projects onto its rows at sidecar
-// provenance — the highest effective precedence — so Properties and
-// playback see the sidecar values without any I/O at play time. Stale
-// or unreadable sidecars project nothing; the write path surfaces
-// corruption, probing never fails on it.
-void apply_loudness_sidecar_projection(
-    LocalTrackRow& fallback, std::vector<LocalTrackRow>& rows, const std::string& raw_path,
-    const std::optional<core::LocalSourceRevision>& source_revision) {
-    if (!source_revision) {
-        return;
-    }
-    const auto sidecar = metadata::read_loudness_sidecar(raw_path);
-    if (!sidecar || !*sidecar || !(*sidecar)->matches(*source_revision)) {
-        return;
-    }
-    const auto project = [&sidecar](LocalTrackRow& row) {
-        loudness::project_loudness_sidecar(row.metadata, **sidecar, row.selection, row.segment);
-    };
-    project(fallback);
-    for (auto& row : rows) {
-        project(row);
-    }
-}
-
 } // namespace
 
+// ADR-0355: a tab's rows that are bare paths -- dragged in, opened, taken
+// over from a queue, or followed to where a file moved -- are filled in by
+// the engine the tab is of, as every tab is: from its index, or from the
+// file when the index does not have it. A file it cannot read keeps the row
+// it had and is not asked about again: left unanswered, it would be asked
+// on every look at the tab, ahead of everything else on the connection.
 void Workspace::enqueueUnprobedRows(ListTab& tab) {
-    // ADR-0227: a remote tab's files are on the remote's machine, and need
-    // not be reachable from this one. What a row is missing is asked of that
-    // engine's index instead of read from a file here.
-    if (!EngineKey::of(tab.document).isLocal()) {
-        enrichRemoteRows(tab);
-        return;
-    }
-    const auto id = QString::fromStdString(tab.document.id.to_string());
-    const auto& rows = tab.model->rows();
-    for (int row = 0; row < static_cast<int>(rows.size()); ++row) {
-        if (!rows[static_cast<std::size_t>(row)].probed) {
-            probe_queue_.push_back(ProbeJob{
-                .document_id = id,
-                .raw_path = rows[static_cast<std::size_t>(row)].raw_path,
-                .hint_row = row,
-            });
-        }
-    }
-    pumpProbeQueue();
-}
-
-// A remote tab's counterpart to probing: rows that are bare paths -- dragged
-// from the remote's library, or taken over from its queue, which holds paths
-// and not tags -- are filled in from the remote engine's index, keeping each
-// row's identity. A path the index does not know keeps its file name and is
-// not asked about again: left unanswered, it would be asked on every look at
-// the tab, ahead of everything else on the connection.
-void Workspace::enrichRemoteRows(ListTab& tab) {
     // Asked of the engine the tab is of -- not reached, nothing to ask.
     auto* source = catalogueOf(EngineKey::of(tab.document));
     if (source == nullptr) {
@@ -476,6 +198,7 @@ void Workspace::enrichRemoteRows(ListTab& tab) {
                     }
                     const auto match = by_path.find(current.raw_path);
                     auto filled = match != by_path.end() ? match->second : current;
+                    keep_what_the_file_lacks(filled, current);
                     filled.selection = current.selection;
                     std::vector<LocalTrackRow> one;
                     one.push_back(std::move(filled));
@@ -489,18 +212,8 @@ void Workspace::enrichRemoteRows(ListTab& tab) {
                 }
             });
     watcher->setFuture(QtConcurrent::run([catalogue, paths = std::move(paths)] {
-        // All at once; a batch holding one path the index does not know is
-        // refused whole, and then each is asked alone.
-        if (auto all = catalogue->cached_tracks(paths, {})) {
-            return std::move(*all);
-        }
-        Found found;
-        for (const auto& path : paths) {
-            if (auto one = catalogue->cached_tracks({path}, {}); one && !one->empty()) {
-                found.push_back(std::move(one->front()));
-            }
-        }
-        return found;
+        auto read = catalogue->read_tracks(paths, {});
+        return read ? std::move(*read) : Found{};
     }));
 }
 
@@ -520,113 +233,6 @@ void Workspace::insertRemotePaths(ListTab& tab, std::vector<std::string> raw_pat
     tab.model->appendRows(std::move(rows), insertion_row);
     markTabDirty(tab);
     enqueueUnprobedRows(tab);
-}
-
-void Workspace::pumpProbeQueue() {
-    if (probe_running_ || probe_queue_.empty()) {
-        return;
-    }
-    std::vector<ProbeJob> batch;
-    batch.reserve(probe_batch_size);
-    while (!probe_queue_.empty() && batch.size() < probe_batch_size) {
-        batch.push_back(std::move(probe_queue_.front()));
-        probe_queue_.pop_front();
-    }
-    probe_running_ = true;
-    connect(&probe_watcher_, &QFutureWatcher<std::vector<ProbeOutcome>>::finished, this,
-            &Workspace::finishProbeBatch, Qt::SingleShotConnection);
-    probe_watcher_.setFuture(QtConcurrent::run(
-        [jobs = std::move(batch), cancellation = probe_cancellation_.token()]() mutable {
-            std::vector<ProbeOutcome> outcomes;
-            outcomes.reserve(jobs.size());
-            for (auto& job : jobs) {
-                if (cancellation.is_cancellation_requested()) {
-                    break;
-                }
-                LocalTrackRow fallback;
-                std::vector<LocalTrackRow> rows;
-                metadata::MetadataDocument document;
-                std::optional<core::LocalSourceRevision> source_revision;
-                auto read = metadata::read_local_metadata(job.raw_path, cancellation);
-                if (read) {
-                    document = std::move(read->document);
-                    source_revision = read->source_revision;
-                }
-                auto probe = formats::probe_local_media(job.raw_path, cancellation);
-                const bool unreadable = !read && !probe;
-                if (probe) {
-                    append_missing_probed_metadata(document, probe->tags);
-                    fallback = whole_file_row(*probe, document, source_revision);
-                    rows = subsong_rows(*probe, document, source_revision);
-                    if (rows.empty()) {
-                        rows = chapter_rows(*probe, document, source_revision);
-                    }
-                    apply_loudness_sidecar_projection(fallback, rows, job.raw_path,
-                                                      source_revision);
-                } else {
-                    fallback.raw_path = job.raw_path;
-                    fallback.metadata = std::move(document);
-                    fallback.source_revision = source_revision;
-                    project_display_metadata(fallback);
-                    fallback.probed = true;
-                }
-                // A failed probe still marks the row probed so it is not
-                // retried in a loop; the file-name fallback stays visible.
-                if (rows.empty()) {
-                    rows.push_back(fallback);
-                }
-                outcomes.push_back(ProbeOutcome{.job = std::move(job),
-                                                .rows = std::move(rows),
-                                                .whole_file_fallback = std::move(fallback),
-                                                .unreadable = unreadable});
-            }
-            return outcomes;
-        }));
-}
-
-void Workspace::finishProbeBatch() {
-    probe_running_ = false;
-    auto outcomes = probe_watcher_.result();
-    bool applied = false;
-    bool logical_track_limit_hit = false;
-    QSet<QString> touched_documents;
-    for (auto& outcome : outcomes) {
-        auto* tab = tabForDocument(outcome.job.document_id);
-        if (tab == nullptr) {
-            continue;
-        }
-        if (outcome.unreadable &&
-            tab->model->keepUnreadable(outcome.job.raw_path, outcome.job.hint_row)) {
-            continue;
-        }
-        const auto current_count = static_cast<std::size_t>(tab->model->rowCount());
-        const auto projected_count =
-            current_count == 0U ? 0U : current_count - 1U + outcome.rows.size();
-        if (outcome.rows.size() > 1U && current_count > 0U &&
-            projected_count > discovery_row_limit) {
-            outcome.rows.clear();
-            outcome.rows.push_back(std::move(outcome.whole_file_fallback));
-            logical_track_limit_hit = true;
-        }
-        if (tab->model->applyProbeRows(outcome.job.raw_path, outcome.job.hint_row,
-                                       std::move(outcome.rows))) {
-            applied = true;
-            touched_documents.insert(outcome.job.document_id);
-        }
-    }
-    if (applied) {
-        schedulePersist();
-    }
-    if (logical_track_limit_hit) {
-        view_->showMessage(QStringLiteral("Logical-track expansion hit the local row limit"),
-                           5'000);
-    }
-    for (const auto& document_id : touched_documents) {
-        if (auto* tab = tabForDocument(document_id); tab != nullptr) {
-            syncArtwork(*tab);
-        }
-    }
-    pumpProbeQueue();
 }
 
 void Workspace::syncArtwork(ListTab& tab) {
@@ -741,7 +347,7 @@ void Workspace::pumpArtworkQueue() {
         std::make_shared<ArtworkOutcome>(ArtworkOutcome{.key = std::move(job.key), .image = {}});
     artwork_watcher_.setFuture(
         QtConcurrent::run([raw_path = std::move(job.raw_path), engine = std::move(job.engine),
-                           outcome = artwork_outcome_, cancellation = probe_cancellation_.token()] {
+                           outcome = artwork_outcome_, cancellation = work_cancellation_.token()] {
             if (engine) {
                 const auto bytes = engine->artwork(raw_path, cancellation);
                 outcome->image = bytes ? ui::artworkThumbnail(*bytes) : QImage{};
@@ -821,7 +427,7 @@ void Workspace::startDiscovery(std::vector<std::string> raw_paths, QString targe
     connect(&discovery_watcher_, &QFutureWatcher<DiscoveryOutcome>::finished, this,
             &Workspace::finishDiscovery, Qt::SingleShotConnection);
     discovery_watcher_.setFuture(QtConcurrent::run([paths = std::move(raw_paths),
-                                                    cancellation = probe_cancellation_.token()] {
+                                                    cancellation = work_cancellation_.token()] {
         auto discovered =
             core::discover_local_sources(std::span{paths.data(), paths.size()}, cancellation,
                                          discovery_row_limit, std::span{audio_extensions});

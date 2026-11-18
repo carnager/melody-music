@@ -1278,7 +1278,7 @@ void LocalLibraryTest::cachedSearchTabsLoadCovers() {
         // Open at once, filled as the results come (ADR-0140).
         QTRY_VERIFY(model && model->rowCount() == 2);
         QVERIFY(model->rows()[0].probed && model->rows()[0].technicals);
-        QVERIFY(!model->rows()[0].source_revision);
+        QVERIFY(model->rows()[0].source_revision);
         QCOMPARE(model->rows()[0].metadata.fields.front().provenance,
                  metadata::FieldProvenance::cached_snapshot);
         QTRY_VERIFY(model->hasArtwork(model->groupKey(0)));
@@ -1461,7 +1461,7 @@ void LocalLibraryTest::databaseSearchOpensCachedRowsWithoutFiles() {
     QCOMPARE(rows[1].metadata.fields.front().provenance,
              metadata::FieldProvenance::cached_snapshot);
     QVERIFY(rows[1].probed && rows[1].technicals && rows[1].duration_ms);
-    QVERIFY(!rows[1].source_revision);
+    QVERIFY(rows[1].source_revision);
     mode->setChecked(false);
 }
 
