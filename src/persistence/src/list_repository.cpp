@@ -17,6 +17,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -33,6 +34,7 @@ namespace trackknife::persistence {
 namespace {
 
 using detail::current_schema_version;
+using detail::previous_schema_version;
 constexpr std::size_t maximum_items_per_document = 1'000'000U;
 constexpr std::size_t maximum_source_relocations = 1'000'000U;
 constexpr std::size_t maximum_metadata_transformation_chains = 256U;
@@ -267,13 +269,63 @@ read_revision(sqlite3_stmt* statement, const int first, const std::string_view d
     return sqlite3_column_int64(query->get(), 0);
 }
 
+// Copies the database beside itself before an upgrade changes it, as
+// "<file>.v<version>-backup", with a number added when that name is taken.
+// VACUUM INTO writes one consistent copy from a snapshot and will not write
+// over a file, so two engines upgrading at once cannot share one copy. A
+// database in memory has no file to keep a copy beside.
+[[nodiscard]] core::Result<void> back_up_before_upgrade(sqlite3* database,
+                                                        const sqlite3_int64 version) {
+    const char* file = sqlite3_db_filename(database, "main");
+    if (file == nullptr || *file == '\0') {
+        return {};
+    }
+    const auto base = std::string{file} + ".v" + std::to_string(version) + "-backup";
+    constexpr int attempts = 100;
+    for (int attempt = 1; attempt <= attempts; ++attempt) {
+        const auto target = attempt == 1 ? base : base + "-" + std::to_string(attempt);
+        std::error_code ignored;
+        if (std::filesystem::exists(target, ignored)) {
+            continue;
+        }
+        auto copy = prepare(database, "VACUUM INTO ?1");
+        if (!copy) {
+            return std::unexpected(std::move(copy.error()));
+        }
+        sqlite3_bind_text(copy->get(), 1, target.data(), static_cast<int>(target.size()),
+                          SQLITE_TRANSIENT);
+        if (sqlite3_step(copy->get()) == SQLITE_DONE) {
+            return {};
+        }
+        if (std::string_view{sqlite3_errmsg(database)}.find("already exists") ==
+            std::string_view::npos) {
+            return std::unexpected(database_error(
+                database, "Could not copy the Melody state database before upgrading it"));
+        }
+    }
+    return std::unexpected(core::Error{
+        .code = core::ErrorCode::io,
+        .message = "Could not find a free name for the copy of the Melody state database",
+        .context = {{"path", base}},
+    });
+}
+
 [[nodiscard]] core::Result<void> migrate(sqlite3* database) {
     // The engine opens the database for every library request. A database
     // already at this version needs no write lock to say so -- taking one
     // made every read wait behind a scan or a tag write, and fail after the
     // busy timeout.
-    if (current_version(database) == sqlite3_int64{current_schema_version}) {
+    const auto unlocked = current_version(database);
+    if (unlocked == sqlite3_int64{current_schema_version}) {
         return {};
+    }
+    // The copy is made before the write lock: VACUUM INTO cannot run inside
+    // a transaction. Should another engine upgrade it meanwhile, the copy is
+    // still of the version before, and the step below finds nothing to do.
+    if (unlocked == sqlite3_int64{previous_schema_version}) {
+        if (auto copied = back_up_before_upgrade(database, *unlocked); !copied) {
+            return copied;
+        }
     }
     if (auto result = execute(database, "BEGIN IMMEDIATE"); !result) {
         return result;
@@ -318,18 +370,21 @@ read_revision(sqlite3_stmt* statement, const int first, const std::string_view d
         // second per request, spent confirming that no migration had run.
         return execute(database, "COMMIT");
     }
-    if (version != 0) {
-        // ADR-0354: no release ever wrote a database older than this one,
-        // so there is nothing to migrate from; one is made anew.
+    if (version != 0 && version != previous_schema_version) {
+        // ADR-0354: one step is kept, from the version before; an older
+        // database is left exactly as it is.
         rollback();
         return std::unexpected(core::Error{
             .code = core::ErrorCode::unsupported,
-            .message = "Melody state database is from before schema " +
-                       std::to_string(current_schema_version) + "; move it aside and start afresh",
+            .message = "Melody state database is at schema " + std::to_string(version) +
+                       ", and this Melody upgrades only from schema " +
+                       std::to_string(previous_schema_version) + "; it was left unchanged",
             .context = {{"schema_version", std::to_string(version)}},
         });
     }
-    if (auto result = execute(database, detail::current_schema_sql); !result) {
+    if (auto result = execute(database, version == 0 ? detail::current_schema_sql
+                                                     : detail::upgrade_from_previous_sql);
+        !result) {
         rollback();
         return result;
     }

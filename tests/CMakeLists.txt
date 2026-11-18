@@ -333,6 +333,10 @@ target_link_libraries(
     PRIVATE Trackknife::Persistence melody_cli_presets trackknife_project_options
             trackknife_project_warnings
 )
+target_compile_definitions(
+    trackknife_list_repository_tests
+    PRIVATE MELODY_STATE_SCHEMA_PREVIOUS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/state-schema-previous.sql"
+)
 add_test(NAME list-repository COMMAND trackknife_list_repository_tests)
 
 add_executable(trackknife_list_edits_tests list_edits_test.cpp)

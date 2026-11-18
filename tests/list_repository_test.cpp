@@ -1260,6 +1260,116 @@ void melody_cli_reads_the_layouts_melody_saves() {
     std::filesystem::remove_all(directory);
 }
 
+namespace {
+
+// Rows of a query, one line each, for comparing two databases' shapes.
+[[nodiscard]] std::string query_rows(const std::filesystem::path& path, const char* sql) {
+    sqlite3* raw = nullptr;
+    require(sqlite3_open_v2(path.c_str(), &raw, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK,
+            "the database opens for reading");
+    std::string rows;
+    sqlite3_stmt* statement = nullptr;
+    require(sqlite3_prepare_v2(raw, sql, -1, &statement, nullptr) == SQLITE_OK,
+            "the query prepares");
+    while (sqlite3_step(statement) == SQLITE_ROW) {
+        for (int column = 0; column < sqlite3_column_count(statement); ++column) {
+            const auto* text = sqlite3_column_text(statement, column);
+            rows += text == nullptr ? "NULL" : reinterpret_cast<const char*>(text);
+            rows += '|';
+        }
+        rows += '\n';
+    }
+    sqlite3_finalize(statement);
+    sqlite3_close(raw);
+    return rows;
+}
+
+[[nodiscard]] std::string schema_shape(const std::filesystem::path& path) {
+    return query_rows(path, "SELECT m.name, p.name, p.type, p.\"notnull\", p.dflt_value, p.pk "
+                            "FROM sqlite_schema m JOIN pragma_table_info(m.name) p "
+                            "WHERE m.type = 'table' ORDER BY m.name, p.cid") +
+           query_rows(path, "SELECT m.name, f.id, f.seq, f.\"table\", f.\"from\", f.\"to\", "
+                            "f.on_update, f.on_delete FROM sqlite_schema m "
+                            "JOIN pragma_foreign_key_list(m.name) f WHERE m.type = 'table' "
+                            "ORDER BY m.name, f.id, f.seq") +
+           query_rows(path, "SELECT type, name, tbl_name, sql FROM sqlite_schema "
+                            "WHERE type IN ('index', 'trigger', 'view') ORDER BY name");
+}
+
+// ADR-0354, amendment of 2026-11-18: a database at the version before is
+// upgraded where it is, its rows kept, after a copy of it is kept beside it;
+// the result has the shape of one made new. One older than that is refused
+// and left exactly as it was, with no copy made.
+void a_database_from_the_version_before_is_upgraded_after_a_copy() {
+    namespace persistence = trackknife::persistence;
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("trackknife-schema-upgrade-" + std::to_string(::getpid()));
+    std::filesystem::remove_all(directory);
+    std::filesystem::create_directories(directory);
+    const auto path = directory / "lists.sqlite";
+    const auto fresh = directory / "fresh.sqlite";
+
+    std::ifstream fixture{MELODY_STATE_SCHEMA_PREVIOUS};
+    const std::string previous{std::istreambuf_iterator<char>{fixture}, {}};
+    require(!previous.empty(), "the previous schema's script is read");
+    {
+        sqlite3* raw = nullptr;
+        require(sqlite3_open(path.c_str(), &raw) == SQLITE_OK, "a database is made");
+        require(sqlite3_exec(raw,
+                             "CREATE TABLE schema_version (version INTEGER NOT NULL "
+                             "CHECK(version >= 0)); INSERT INTO schema_version VALUES (0);",
+                             nullptr, nullptr, nullptr) == SQLITE_OK &&
+                    sqlite3_exec(raw, previous.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK,
+                "it is given the previous schema");
+        require(sqlite3_exec(raw,
+                             "INSERT INTO local_library_roots(raw_path, available) "
+                             "VALUES (x'2f6d75736963', 1);",
+                             nullptr, nullptr, nullptr) == SQLITE_OK,
+                "and a row");
+        sqlite3_close(raw);
+    }
+    require(persistence::ListRepository::open(fresh).has_value(), "a new database is made");
+
+    auto upgraded = persistence::ListRepository::open(path);
+    require(upgraded && upgraded->schema_version() == 58U,
+            "the database from the version before opens, upgraded");
+    upgraded = std::unexpected(trackknife::core::Error{});
+    require(query_rows(path, "SELECT hex(raw_path), available FROM local_library_roots") ==
+                "2F6D75736963|1|\n",
+            "its rows are kept");
+    require(schema_shape(path) == schema_shape(fresh),
+            "it has the tables, columns, keys and indexes of a new one");
+    const auto copy = std::filesystem::path{path.native() + ".v57-backup"};
+    require(query_rows(copy, "SELECT version FROM schema_version") == "57|\n" &&
+                query_rows(copy, "SELECT hex(raw_path) FROM local_library_roots") ==
+                    "2F6D75736963|\n",
+            "a copy at the version before is kept beside it");
+    require(persistence::ListRepository::open(path).has_value() &&
+                !std::filesystem::exists(path.native() + ".v57-backup-2"),
+            "opening it again copies nothing");
+
+    const auto old = directory / "old.sqlite";
+    {
+        sqlite3* raw = nullptr;
+        require(sqlite3_open(old.c_str(), &raw) == SQLITE_OK &&
+                    sqlite3_exec(raw,
+                                 "CREATE TABLE schema_version (version INTEGER NOT NULL); "
+                                 "INSERT INTO schema_version VALUES (56);",
+                                 nullptr, nullptr, nullptr) == SQLITE_OK,
+                "an older database is made");
+        sqlite3_close(raw);
+    }
+    const auto refused = persistence::ListRepository::open(old);
+    require(!refused && refused.error().message.find("schema 56") != std::string::npos,
+            "one older than the version before is refused, saying which it is");
+    require(query_rows(old, "SELECT version FROM schema_version") == "56|\n" &&
+                !std::filesystem::exists(old.native() + ".v56-backup"),
+            "and left as it was, with no copy");
+    std::filesystem::remove_all(directory);
+}
+
+} // namespace
+
 int main() {
     saved_searches_are_persistent_and_conflict_checked();
     local_listening_history_is_monotonic_and_persistent();
@@ -1270,6 +1380,7 @@ int main() {
     encoder_presets_round_trip_transactionally();
     a_move_is_journaled_and_followed_through_later_moves();
     an_up_to_date_database_is_opened_without_rechecking_it();
+    a_database_from_the_version_before_is_upgraded_after_a_copy();
     engine_lists_round_trip_and_refuse_stale_writes();
     engine_lists_are_edited_in_place();
     a_saved_lists_draft_is_saved_into_it();

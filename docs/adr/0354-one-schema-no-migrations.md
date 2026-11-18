@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted, 2026-11-17.
+Accepted, 2026-11-17. Amended 2026-11-18: one upgrade step is kept, from
+the version before (see the last amendment).
 
 ## Context
 
@@ -90,3 +91,32 @@ ALTER TABLE local_source_relocations DROP COLUMN metadata_refreshed;
 UPDATE schema_version SET version = 58;
 COMMIT;
 ```
+
+## Amendment, 2026-11-18: one step from the version before
+
+Refusing an older database was meant for a time when only the owner had
+one, and it held for a single schema change. Updating both hosts to 58
+left both engines failing to start until the script above was run by
+hand -- what any user would meet with every schema change, with nothing to
+do but run SQL or give up their library. Decision 2 changes:
+
+1. **A database at the version before is upgraded on opening.** The
+   program carries one step besides the script
+   (`upgrade_from_previous_sql` in `current_schema.hpp`). Before running
+   it, the database is copied beside itself as `<file>.v<N>-backup` (a
+   number added if that is taken) with `VACUUM INTO`; the step then runs
+   in one transaction, foreign keys off and checked before it commits.
+   This applies to the engine's `lists.sqlite` and the window's
+   `presets.sqlite` alike.
+2. **Each schema change replaces the step** with its own, and the
+   fixture `tests/fixtures/state-schema-previous.sql` with the schema it
+   starts from. There is still no chain; a database two versions behind
+   is refused, named by its version, and left unchanged -- never "moved
+   aside".
+3. **Tested on a real database of the version before:** made from the
+   fixture, it opens upgraded with its rows, a copy at the old version
+   beside it, and the same tables, columns, keys and indexes as one made
+   new; opening it again copies nothing.
+
+Decision 4's "brought along by hand" no longer applies: the step is part
+of the change.
