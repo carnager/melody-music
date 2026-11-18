@@ -4,6 +4,7 @@
 // must turn the old list into the new one, whatever changed, and the edits
 // must be no more than the change.
 
+#include "test_checks.hpp"
 #include "trackknife/persistence/list_edits.hpp"
 
 #include <algorithm>
@@ -20,12 +21,7 @@ namespace core = trackknife::core;
 namespace persistence = trackknife::persistence;
 using persistence::ListEdit;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 [[nodiscard]] persistence::EngineListItem item(const std::string& title) {
     persistence::EngineListItem made;

@@ -5,6 +5,7 @@
 // both real implementations meet, which is where a disagreement about the
 // contract would actually show.
 
+#include "test_checks.hpp"
 #include "trackknife/engine/server.hpp"
 #include "trackknife/protocol/client.hpp"
 
@@ -27,12 +28,7 @@ namespace protocol = trackknife::protocol;
 namespace engine = trackknife::engine;
 namespace core = trackknife::core;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 void calls_and_errors_survive_the_round_trip(const std::filesystem::path& path) {
     protocol::Dispatcher dispatcher;

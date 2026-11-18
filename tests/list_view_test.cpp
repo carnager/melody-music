@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include "test_checks.hpp"
 #include "trackknife/lists/list_view.hpp"
 
 #include <algorithm>
@@ -14,16 +15,7 @@ namespace {
 namespace lists = trackknife::lists;
 namespace metadata = trackknife::metadata;
 
-int failures = 0;
-
-void check(const bool condition, const std::string_view expression, const int line) {
-    if (!condition) {
-        std::cerr << "line " << line << ": check failed: " << expression << '\n';
-        ++failures;
-    }
-}
-
-#define CHECK(expression) check((expression), #expression, __LINE__)
+using checks::failures;
 
 [[nodiscard]] metadata::MetadataDocument
 tags(std::initializer_list<std::pair<std::string, std::vector<std::string>>> fields) {

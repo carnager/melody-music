@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include "bench/quick_pick_popup.hpp"
+#include "uicommon/colour_mix.hpp"
 
 #include <QGuiApplication>
 #include <QHBoxLayout>
@@ -39,10 +40,7 @@ class AlbumRowDelegate final : public QStyledItemDelegate {
         if (option.state.testFlag(QStyle::State_Selected)) {
             const auto base = palette.color(QPalette::Base);
             const auto accent = palette.color(QPalette::Highlight);
-            const auto mix = [](const int a, const int b) { return (a * 68 + b * 32) / 100; };
-            painter->fillRect(option.rect, QColor::fromRgb(mix(base.red(), accent.red()),
-                                                           mix(base.green(), accent.green()),
-                                                           mix(base.blue(), accent.blue())));
+            painter->fillRect(option.rect, ui::mix(base, accent, 0.32));
         }
         const auto area = option.rect.adjusted(12, 0, -12, 0);
         const auto album = index.data(name_role).toString(); // the album or the title

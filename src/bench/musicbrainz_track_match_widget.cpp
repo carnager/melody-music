@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include "bench/musicbrainz_track_match_widget.hpp"
+#include "uicommon/colour_mix.hpp"
 #include "workspace/identify_session.hpp"
 
 #include <QApplication>
@@ -54,14 +55,6 @@ constexpr int disc_role = Qt::UserRole + 3;
 constexpr int track_role = Qt::UserRole + 4;
 
 QString mimeType() { return QStringLiteral("application/x-trackbench-match-row"); }
-
-QColor blend(const QColor& base, const QColor& over, const int percent) {
-    const auto mix = [percent](const int a, const int b) {
-        return (a * (100 - percent) + b * percent) / 100;
-    };
-    return QColor{mix(base.red(), over.red()), mix(base.green(), over.green()),
-                  mix(base.blue(), over.blue())};
-}
 
 [[nodiscard]] bool dark(const QPalette& palette) {
     return palette.color(QPalette::Base).lightness() <= 128;
@@ -266,12 +259,12 @@ void paintFileTile(QPainter* painter, const QRect& tile, const QString& name, co
     const QFontMetrics metrics{option.font};
     QPainterPath shape;
     shape.addRoundedRect(QRectF{tile}.adjusted(0.5, 0.5, -0.5, -0.5), 4, 4);
-    painter->fillPath(shape, other ? base : blend(base, text, held || hovered ? 10 : 5));
-    painter->setPen(
-        QPen{held ? palette.color(QPalette::Highlight) : blend(base, text, 24), held ? 2.0 : 1.0});
+    painter->fillPath(shape, other ? base : ui::mix(base, text, held || hovered ? 0.10 : 0.05));
+    painter->setPen(QPen{held ? palette.color(QPalette::Highlight) : ui::mix(base, text, 0.24),
+                         held ? 2.0 : 1.0});
     painter->drawPath(shape);
     painter->setPen(Qt::NoPen);
-    painter->setBrush(blend(base, text, 42));
+    painter->setBrush(ui::mix(base, text, 0.42));
     const auto middle = static_cast<double>(tile.center().y());
     for (int column = 0; column < 2; ++column) {
         for (int dot = -1; dot <= 1; ++dot) {
@@ -630,7 +623,7 @@ void TrackDelegate::paintHeading(QPainter* painter, const QStyleOptionViewItem& 
         QRect{area.left(), option.rect.top() + 6, area.width(), option.rect.height() - 8},
         Qt::AlignLeft | Qt::AlignVCenter, index.data().toString());
     painter->setPen(
-        QPen{blend(palette.color(QPalette::Base), palette.color(QPalette::Text), 18), 1.0});
+        QPen{ui::mix(palette.color(QPalette::Base), palette.color(QPalette::Text), 0.18), 1.0});
     painter->drawLine(area.left(), option.rect.bottom() - 1, area.right(),
                       option.rect.bottom() - 1);
     const auto* item = board_->item(index.row());
@@ -663,15 +656,15 @@ void TrackDelegate::paintTrack(QPainter* painter, const QStyleOptionViewItem& op
     const auto colour = entry.fit ? fitColour(*entry.fit, palette) : quiet;
 
     if ((option.state & QStyle::State_Selected) != 0) {
-        painter->fillRect(option.rect, blend(base, accent, 14));
+        painter->fillRect(option.rect, ui::mix(base, accent, 0.14));
     } else if (entry.fit && *entry.fit != musicbrainz::PairFit::good) {
-        painter->fillRect(option.rect, blend(base, colour, 8));
+        painter->fillRect(option.rect, ui::mix(base, colour, 0.08));
     }
     // Where a carried file would land: the whole row, outlined.
     if (aimed) {
         QPainterPath landing;
         landing.addRoundedRect(QRectF{option.rect}.adjusted(2.5, 1.5, -2.5, -1.5), 5, 5);
-        painter->fillPath(landing, blend(base, accent, 16));
+        painter->fillPath(landing, ui::mix(base, accent, 0.16));
         painter->setPen(QPen{accent, 2.0});
         painter->drawPath(landing);
     }
@@ -696,7 +689,7 @@ void TrackDelegate::paintTrack(QPainter* painter, const QStyleOptionViewItem& op
     const QPointF centre{static_cast<double>(zones.dot.center().x()),
                          static_cast<double>(zones.dot.center().y())};
     if (entry.gap) {
-        painter->setPen(QPen{blend(base, text, 30), 1.0, Qt::DotLine});
+        painter->setPen(QPen{ui::mix(base, text, 0.3), 1.0, Qt::DotLine});
         painter->setBrush(Qt::NoBrush);
         painter->drawEllipse(centre, 4.0, 4.0);
     } else {
@@ -711,7 +704,7 @@ void TrackDelegate::paintTrack(QPainter* painter, const QStyleOptionViewItem& op
     if (entry.gap) {
         QPainterPath slot;
         slot.addRoundedRect(QRectF{file}.adjusted(0.5, 0.5, -0.5, -0.5), 4, 4);
-        painter->setPen(QPen{blend(base, text, 28), 1.0, Qt::DashLine});
+        painter->setPen(QPen{ui::mix(base, text, 0.28), 1.0, Qt::DashLine});
         painter->drawPath(slot);
         painter->setPen(quiet);
         painter->drawText(file.adjusted(12, 0, -8, 0), Qt::AlignLeft | Qt::AlignVCenter,
@@ -743,8 +736,8 @@ class LooseDelegate final : public QStyledItemDelegate {
                 Qt::AlignLeft | Qt::AlignVCenter,
                 QFontMetrics{font}.elidedText(index.data().toString(), Qt::ElideMiddle,
                                               area.width()));
-            painter->setPen(
-                QPen{blend(palette.color(QPalette::Base), palette.color(QPalette::Text), 18), 1.0});
+            painter->setPen(QPen{
+                ui::mix(palette.color(QPalette::Base), palette.color(QPalette::Text), 0.18), 1.0});
             painter->drawLine(area.left(), option.rect.bottom() - 1, area.right(),
                               option.rect.bottom() - 1);
             painter->restore();
@@ -759,8 +752,9 @@ class LooseDelegate final : public QStyledItemDelegate {
         painter->save();
         painter->setRenderHint(QPainter::Antialiasing);
         if ((option.state & QStyle::State_Selected) != 0) {
-            painter->fillRect(option.rect, blend(option.palette.color(QPalette::Base),
-                                                 option.palette.color(QPalette::Highlight), 14));
+            painter->fillRect(option.rect,
+                              ui::mix(option.palette.color(QPalette::Base),
+                                      option.palette.color(QPalette::Highlight), 0.14));
         }
         const bool held = pairing_->held() && *pairing_->held() == row;
         paintFileTile(painter, option.rect.adjusted(4, 3, -4, -3), entry.file, entry.length, option,

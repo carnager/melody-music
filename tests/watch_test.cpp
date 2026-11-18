@@ -3,6 +3,7 @@
 // ADR-0232: melody-watch's parts -- the folder mapping, the catch-up
 // comparison, and watching a real tree with inotify.
 
+#include "test_checks.hpp"
 #include "trackknife/core/local_sources.hpp"
 #include "trackknife/core/stable_id.hpp"
 #include "trackknife/watch/watch.hpp"
@@ -22,12 +23,7 @@ namespace {
 namespace watch = trackknife::watch;
 using Kind = watch::Change::Kind;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 void a_folder_is_mapped_to_where_the_engine_sees_it() {
     const auto mapped = watch::parse_mapping("/volume1/music/=/mnt/nas/music");

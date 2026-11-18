@@ -6,6 +6,7 @@
 // the two implementations disagree about is a bug the workspace would see.
 
 #include "engine_access.hpp"
+#include "test_checks.hpp"
 #include "trackknife/engine/catalogue_methods.hpp"
 #include "trackknife/engine/job_methods.hpp"
 #include "trackknife/engine/remote_catalogue.hpp"
@@ -31,12 +32,7 @@ namespace core = trackknife::core;
 namespace query = trackknife::query;
 namespace persistence = trackknife::persistence;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 // Every assertion runs against whichever implementation it is handed, so a
 // divergence shows up as the same case failing on one side only.

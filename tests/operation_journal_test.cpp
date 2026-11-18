@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include "test_checks.hpp"
 #include "trackknife/persistence/operation_journal.hpp"
 
 #include <algorithm>
@@ -20,12 +21,7 @@ using BackupTransition = trackknife::operations::MetadataOperationBackupTransiti
 using Record = trackknife::operations::MetadataOperationJournalRecord;
 using Transition = trackknife::operations::MetadataOperationJournalTransition;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 class TemporaryDatabase final {
   public:

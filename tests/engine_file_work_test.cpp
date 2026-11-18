@@ -4,6 +4,7 @@
 // protocol exactly, and a scan asked of the engine gives what the same scan
 // gives run here.
 
+#include "test_checks.hpp"
 #include "trackknife/engine/file_work_methods.hpp"
 #include "trackknife/engine/file_work_wire.hpp"
 #include "trackknife/engine/job_methods.hpp"
@@ -72,12 +73,7 @@ namespace wire = trackknife::engine::wire;
 namespace loudness = trackknife::loudness;
 namespace core = trackknife::core;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 // Through text and back, as the wire carries it.
 // For jobs that move nothing.

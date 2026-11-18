@@ -8,6 +8,7 @@
 // The speaker here is a stand-in on the protocol, as the phone speaks it:
 // no audio, so this runs anywhere.
 
+#include "test_checks.hpp"
 #include "trackknife/engine/outputs.hpp"
 #include "trackknife/engine/playback_methods.hpp"
 #include "trackknife/engine/player.hpp"
@@ -41,12 +42,7 @@ namespace protocol = trackknife::protocol;
 namespace output = trackknife::output;
 using protocol::Json;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::exit(EXIT_FAILURE);
-    }
-}
+using checks::require;
 
 bool eventually(const std::function<bool()>& condition,
                 const std::chrono::milliseconds limit = std::chrono::milliseconds{5'000}) {

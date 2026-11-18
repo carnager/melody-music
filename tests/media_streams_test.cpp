@@ -4,6 +4,7 @@
 // fetched with the agents' token or with a ticket the engine signed for a
 // client that gave the password -- and nothing else.
 
+#include "test_checks.hpp"
 #include "trackknife/core/posix.hpp"
 #include "trackknife/core/stable_id.hpp"
 #include "trackknife/engine/catalogue.hpp"
@@ -35,12 +36,7 @@ namespace engine = trackknife::engine;
 namespace output = trackknife::output;
 namespace protocol = trackknife::protocol;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 // One GET, the whole response: status line and body.
 [[nodiscard]] std::pair<std::string, std::string> get(const std::uint16_t port,

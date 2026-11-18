@@ -4,6 +4,7 @@
 // sections, and an address used only while the network does not find it.
 
 #include "agent/guests.hpp"
+#include "test_checks.hpp"
 
 #include <cstdlib>
 #include <iostream>
@@ -19,16 +20,7 @@ using trackknife::agent::plan_guests;
 using trackknife::agent::Wanted;
 using trackknife::discovery::Found;
 
-int failures = 0;
-
-void check(const bool condition, const std::string_view expression, const int line) {
-    if (!condition) {
-        std::cerr << "line " << line << ": check failed: " << expression << '\n';
-        ++failures;
-    }
-}
-
-#define CHECK(expression) check((expression), #expression, __LINE__)
+using checks::failures;
 
 [[nodiscard]] Found engine(const std::string& name, const std::string& id,
                            const std::string& address) {

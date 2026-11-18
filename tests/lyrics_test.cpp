@@ -4,6 +4,7 @@
 // container is a real file, lyrics written into it by TagLib as a tagger
 // would, then found by read_lyrics.
 
+#include "test_checks.hpp"
 #include "trackknife/core/stable_id.hpp"
 #include "trackknife/metadata/lyrics.hpp"
 
@@ -26,16 +27,7 @@ namespace {
 
 namespace metadata = trackknife::metadata;
 
-int failures = 0;
-
-void check(const bool condition, const std::string_view expression, const int line) {
-    if (!condition) {
-        std::cerr << "line " << line << ": check failed: " << expression << '\n';
-        ++failures;
-    }
-}
-
-#define CHECK(expression) check((expression), #expression, __LINE__)
+using checks::failures;
 
 [[nodiscard]] metadata::LyricsLine at(const std::int64_t ms, std::string text) {
     return {.time_ms = ms, .text = std::move(text)};

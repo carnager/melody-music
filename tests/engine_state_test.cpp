@@ -3,6 +3,7 @@
 // ADR-0287: an engine's state moves from Trackknife's folder to melody's,
 // once, and only what is the engine's.
 
+#include "test_checks.hpp"
 #include "trackknife/core/engine_state.hpp"
 
 #include <fcntl.h>
@@ -21,16 +22,7 @@ namespace {
 namespace core = trackknife::core;
 namespace fs = std::filesystem;
 
-int failures = 0;
-
-void check(const bool condition, const std::string_view expression, const int line) {
-    if (!condition) {
-        std::cerr << "line " << line << ": check failed: " << expression << '\n';
-        ++failures;
-    }
-}
-
-#define CHECK(expression) check((expression), #expression, __LINE__)
+using checks::failures;
 
 } // namespace
 

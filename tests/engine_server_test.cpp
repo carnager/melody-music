@@ -12,6 +12,7 @@
 #include "trackknife/engine/token.hpp"
 #include "trackknife/protocol/message.hpp"
 
+#include "test_checks.hpp"
 #include "trackknife/protocol/client.hpp"
 
 #include <arpa/inet.h>
@@ -41,12 +42,7 @@ namespace protocol = trackknife::protocol;
 namespace engine = trackknife::engine;
 namespace core = trackknife::core;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 // A deliberately dumb client: connect, write bytes, read lines.
 class Client final {

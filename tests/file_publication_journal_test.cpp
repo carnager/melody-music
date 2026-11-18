@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include "test_checks.hpp"
 #include "trackknife/persistence/file_publication_journal.hpp"
 
 #include <cstdlib>
@@ -22,12 +23,7 @@ using State = operations::FilePublicationJournalState;
 using Record = operations::FilePublicationJournalRecord;
 using Transition = operations::FilePublicationJournalTransition;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 class TemporaryDatabase final {
   public:

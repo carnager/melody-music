@@ -3,6 +3,7 @@
 // ADR-0260: a client decides once, from engine.info, whether and how it can
 // work with an engine.
 
+#include "test_checks.hpp"
 #include "trackknife/protocol/version.hpp"
 
 #include <cstdlib>
@@ -15,12 +16,7 @@ namespace {
 
 namespace protocol = trackknife::protocol;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 } // namespace
 

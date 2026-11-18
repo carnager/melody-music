@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "bench/trackknife_style.hpp"
+#include "uicommon/colour_mix.hpp"
 
 #include <QAbstractItemView>
 #include <QAbstractSpinBox>
@@ -105,42 +106,33 @@ TrackknifeStyle::TrackknifeStyle() : QProxyStyle{QStyleFactory::create(QStringLi
     setObjectName(QStringLiteral("trackknife"));
 }
 
-QColor TrackknifeStyle::mix(const QColor& a, const QColor& b, const qreal t) {
-    const auto toward = [t](const float from, const float to) {
-        return static_cast<float>(static_cast<qreal>(from) +
-                                  (static_cast<qreal>(to) - static_cast<qreal>(from)) * t);
-    };
-    return QColor::fromRgbF(toward(a.redF(), b.redF()), toward(a.greenF(), b.greenF()),
-                            toward(a.blueF(), b.blueF()), toward(a.alphaF(), b.alphaF()));
-}
-
 QColor TrackknifeStyle::hairline(const QPalette& p) {
-    return mix(p.color(QPalette::Window), p.color(QPalette::WindowText), 0.13);
+    return ui::mix(p.color(QPalette::Window), p.color(QPalette::WindowText), 0.13);
 }
 QColor TrackknifeStyle::border(const QPalette& p) {
-    return mix(p.color(QPalette::Window), p.color(QPalette::WindowText), 0.22);
+    return ui::mix(p.color(QPalette::Window), p.color(QPalette::WindowText), 0.22);
 }
 QColor TrackknifeStyle::raised(const QPalette& p) {
-    return mix(p.color(QPalette::Window), p.color(QPalette::WindowText), 0.07);
+    return ui::mix(p.color(QPalette::Window), p.color(QPalette::WindowText), 0.07);
 }
 QColor TrackknifeStyle::hovered(const QPalette& p) {
-    return mix(p.color(QPalette::Window), p.color(QPalette::WindowText), 0.11);
+    return ui::mix(p.color(QPalette::Window), p.color(QPalette::WindowText), 0.11);
 }
 QColor TrackknifeStyle::pressed(const QPalette& p) {
-    return mix(p.color(QPalette::Window), p.color(QPalette::WindowText), 0.17);
+    return ui::mix(p.color(QPalette::Window), p.color(QPalette::WindowText), 0.17);
 }
 QColor TrackknifeStyle::sunken(const QPalette& p) {
-    return mix(p.color(QPalette::Window), p.color(QPalette::WindowText), 0.035);
+    return ui::mix(p.color(QPalette::Window), p.color(QPalette::WindowText), 0.035);
 }
 QColor TrackknifeStyle::rowHover(const QPalette& p) {
-    return mix(p.color(QPalette::Base), p.color(QPalette::Text), 0.05);
+    return ui::mix(p.color(QPalette::Base), p.color(QPalette::Text), 0.05);
 }
 QColor TrackknifeStyle::selection(const QPalette& p) {
-    return mix(p.color(QPalette::Active, QPalette::Base),
-               p.color(QPalette::Active, QPalette::Highlight), 0.35);
+    return ui::mix(p.color(QPalette::Active, QPalette::Base),
+                   p.color(QPalette::Active, QPalette::Highlight), 0.35);
 }
 QColor TrackknifeStyle::dim(const QPalette& p) {
-    return mix(p.color(QPalette::WindowText), p.color(QPalette::Window), 0.45);
+    return ui::mix(p.color(QPalette::WindowText), p.color(QPalette::Window), 0.45);
 }
 
 void TrackknifeStyle::polish(QWidget* widget) {
@@ -812,7 +804,7 @@ void TrackknifeStyle::drawComplexControl(const ComplexControl control,
         }
         const auto window = palette.color(QPalette::Window);
         const auto text = palette.color(QPalette::WindowText);
-        fill_rounded(painter, thumb, mix(window, text, down ? 0.5 : 0.3), thickness / 2);
+        fill_rounded(painter, thumb, ui::mix(window, text, down ? 0.5 : 0.3), thickness / 2);
         return;
     }
     case CC_ComboBox: {

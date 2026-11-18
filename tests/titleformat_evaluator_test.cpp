@@ -3,6 +3,7 @@
 #include "trackknife/titleformat/compiler.hpp"
 #include "trackknife/titleformat/evaluator.hpp"
 
+#include "test_checks.hpp"
 #include "trackknife/core/cancellation.hpp"
 
 #include <algorithm>
@@ -18,16 +19,7 @@
 
 namespace {
 
-int failures = 0;
-
-void check(const bool condition, const std::string_view expression, const int line) {
-    if (!condition) {
-        std::cerr << "line " << line << ": check failed: " << expression << '\n';
-        ++failures;
-    }
-}
-
-#define CHECK(expression) check((expression), #expression, __LINE__)
+using checks::failures;
 
 [[nodiscard]] std::string asciiLower(const std::string_view value) {
     std::string result;

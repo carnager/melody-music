@@ -5,6 +5,7 @@
 // index, as its queue entry says.
 
 #include "recording_audition.hpp"
+#include "test_checks.hpp"
 #include "trackknife/core/stable_id.hpp"
 #include "trackknife/engine/catalogue.hpp"
 #include "trackknife/engine/now_playing_methods.hpp"
@@ -25,12 +26,7 @@ namespace engine = trackknife::engine;
 namespace protocol = trackknife::protocol;
 using protocol::Json;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 [[nodiscard]] Json call(protocol::Dispatcher& dispatcher, const std::string& method,
                         Json params = Json::object()) {

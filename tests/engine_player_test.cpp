@@ -6,6 +6,7 @@
 // being tested is who owns the state, not whether PipeWire is present.
 
 #include "recording_audition.hpp"
+#include "test_checks.hpp"
 #include "trackknife/audio/audition.hpp"
 #include "trackknife/engine/playback_methods.hpp"
 #include "trackknife/engine/playback_store.hpp"
@@ -34,12 +35,7 @@ namespace engine = trackknife::engine;
 namespace core = trackknife::core;
 namespace audio = trackknife::audio;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 [[nodiscard]] engine::QueueEntry entry(const std::string& path) {
     engine::QueueEntry made;

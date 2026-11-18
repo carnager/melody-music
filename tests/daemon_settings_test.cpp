@@ -3,6 +3,7 @@
 // ADR-0286: melodyd.conf and the command line over it.
 
 #include "settings.hpp"
+#include "test_checks.hpp"
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -21,16 +22,7 @@ namespace {
 using trackknife::daemon::read_settings;
 using trackknife::daemon::Settings;
 
-int failures = 0;
-
-void check(const bool condition, const std::string_view expression, const int line) {
-    if (!condition) {
-        std::cerr << "line " << line << ": check failed: " << expression << '\n';
-        ++failures;
-    }
-}
-
-#define CHECK(expression) check((expression), #expression, __LINE__)
+using checks::failures;
 
 std::filesystem::path root;
 

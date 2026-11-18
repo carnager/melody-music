@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include "test_checks.hpp"
 #include "trackknife/core/cancellation.hpp"
 #include "trackknife/core/local_sources.hpp"
 #include "trackknife/core/posix.hpp"
@@ -31,12 +32,7 @@ namespace operations = trackknife::operations;
 namespace persistence = trackknife::persistence;
 using State = operations::FilePublicationJournalState;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 class TemporaryDirectory final {
   public:

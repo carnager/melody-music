@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include "test_checks.hpp"
 #include "trackknife/persistence/list_repository.hpp"
 #include "trackknife/persistence/workspace_backup.hpp"
 
@@ -12,12 +13,7 @@
 
 namespace {
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 } // namespace
 

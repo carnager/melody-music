@@ -297,6 +297,17 @@ QueueTableView::QueueTableView(QWidget* parent) : QTableView(parent) {
     // The list is the page, not a box on it: no frame, and no focus ring
     // around the whole of it -- the current row says where the keys go.
     setFrameShape(QFrame::NoFrame);
+    // Every track list is rows of tracks, picked several at a time and never
+    // edited in place; one line each, cut short rather than wrapped, and no
+    // grid or row numbers.
+    setShowGrid(false);
+    setSelectionBehavior(QAbstractItemView::SelectRows);
+    setSelectionMode(QAbstractItemView::ExtendedSelection);
+    setEditTriggers(QAbstractItemView::NoEditTriggers);
+    setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    setWordWrap(false);
+    setTextElideMode(Qt::ElideRight);
+    verticalHeader()->hide();
     // The cover gutter stays clear of the selection under every style.
     DelegateSelectionStyle::install(this);
     FlatHeaderStyle::install(horizontalHeader());

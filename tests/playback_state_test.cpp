@@ -5,6 +5,7 @@
 // widgets -- which is the property the phase is actually after. The behaviour
 // itself is unchanged; it simply lives somewhere a headless engine can reach.
 
+#include "test_checks.hpp"
 #include "trackknife/audio/album_grouping.hpp"
 #include "trackknife/audio/listen_observation.hpp"
 #include "trackknife/audio/playback_anchors.hpp"
@@ -21,12 +22,7 @@
 
 namespace {
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 void modes_default_to_off() {
     namespace audio = trackknife::audio;

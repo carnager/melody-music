@@ -2,6 +2,7 @@
 #pragma once
 
 #include "uicommon/application_style.hpp"
+#include "uicommon/colour_mix.hpp"
 
 #include <QApplication>
 #include <QHeaderView>
@@ -31,13 +32,7 @@ class FlatHeaderStyle final : public QProxyStyle {
     static constexpr int label_margin = 6;
 
     [[nodiscard]] static QColor blend(const QPalette& palette, const double share) {
-        const auto ground = palette.color(QPalette::Base);
-        const auto text = palette.color(QPalette::Text);
-        const auto mix = [share](const int from, const int to) {
-            return static_cast<int>(from + ((to - from) * share) + 0.5);
-        };
-        return QColor::fromRgb(mix(ground.red(), text.red()), mix(ground.green(), text.green()),
-                               mix(ground.blue(), text.blue()));
+        return ui::mix(palette.color(QPalette::Base), palette.color(QPalette::Text), share);
     }
     [[nodiscard]] static QFont labelFont(const QWidget* widget) {
         auto font = widget != nullptr ? widget->font() : QApplication::font();

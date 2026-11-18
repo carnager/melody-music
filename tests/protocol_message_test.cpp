@@ -4,6 +4,7 @@
 // meant to be run by the Go implementation, which is what stops the two
 // drifting; a case added here is a case both must satisfy.
 
+#include "test_checks.hpp"
 #include "trackknife/protocol/dispatch.hpp"
 #include "trackknife/protocol/message.hpp"
 
@@ -18,12 +19,7 @@
 
 namespace {
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 [[nodiscard]] std::string bytes_from_hex(const std::string& hex) {
     std::string bytes;

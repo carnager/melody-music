@@ -3,6 +3,7 @@
 // ADR-0296: playlist files as an engine's playlist folder holds them --
 // MPD's, other players', Melody's own -- read and written again alike.
 
+#include "test_checks.hpp"
 #include "trackknife/lists/playlist_file.hpp"
 
 #include <cstdlib>
@@ -16,16 +17,7 @@ namespace {
 
 namespace lists = trackknife::lists;
 
-int failures = 0;
-
-void check(const bool condition, const std::string_view expression, const int line) {
-    if (!condition) {
-        std::cerr << "line " << line << ": check failed: " << expression << '\n';
-        ++failures;
-    }
-}
-
-#define CHECK(expression) check((expression), #expression, __LINE__)
+using checks::failures;
 
 // What is "on disk" for these files.
 const std::set<std::string> present{"/music/A/B/01.flac", "/music/A/B/02.flac", "/music/C/D/01.mp3",

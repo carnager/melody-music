@@ -13,6 +13,7 @@
 #include "trackknife/metadata/write_plan.hpp"
 
 #include "../src/metadata/src/container_preservation_detail.hpp"
+#include "test_checks.hpp"
 
 #include <taglib/mp4coverart.h>
 #include <taglib/mp4file.h>
@@ -32,16 +33,7 @@
 
 namespace {
 
-int failures = 0;
-
-void check(const bool condition, const std::string_view expression, const int line) {
-    if (!condition) {
-        std::cerr << "line " << line << ": check failed: " << expression << '\n';
-        ++failures;
-    }
-}
-
-#define CHECK(expression) check((expression), #expression, __LINE__)
+using checks::failures;
 
 class TemporaryDirectory final {
   public:

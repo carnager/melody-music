@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include "bench/plugin_panel_view.hpp"
+#include "uicommon/colour_mix.hpp"
 
 #include <QAbstractButton>
 #include <QDesktopServices>
@@ -172,13 +173,6 @@ class FlowLayout final : public QLayout {
     std::vector<QLayoutItem*> items_;
 };
 
-// ADR-0304: Melody's colours, mixed as its own rows mix them.
-[[nodiscard]] QColor mixed(const QColor& from, const QColor& to, const int percent) {
-    const auto mix = [percent](const int a, const int b) { return a + (b - a) * percent / 100; };
-    return QColor::fromRgb(mix(from.red(), to.red()), mix(from.green(), to.green()),
-                           mix(from.blue(), to.blue()));
-}
-
 [[nodiscard]] QFont smaller(QFont font) {
     font.setPointSizeF(std::max(7.0, font.pointSizeF() - 1.0));
     return font;
@@ -251,8 +245,8 @@ class PersonChip final : public QWidget {
         QPainter painter{this};
         painter.setRenderHint(QPainter::Antialiasing);
         painter.setPen(Qt::NoPen);
-        painter.setBrush(
-            mixed(palette().color(QPalette::Window), palette().color(QPalette::WindowText), 8));
+        painter.setBrush(ui::mix(palette().color(QPalette::Window),
+                                 palette().color(QPalette::WindowText), 0.08));
         const QRectF area{rect()};
         painter.drawRoundedRect(area, area.height() / 2, area.height() / 2);
     }
@@ -279,7 +273,7 @@ class PanelSwitch final : public QAbstractButton {
         const QRectF track = QRectF{rect()}.adjusted(0.5, 0.5, -0.5, -0.5);
         const auto radius = track.height() / 2;
         const auto off =
-            mixed(colours.color(QPalette::Window), colours.color(QPalette::WindowText), 28);
+            ui::mix(colours.color(QPalette::Window), colours.color(QPalette::WindowText), 0.28);
         auto fill = isChecked() ? colours.color(QPalette::Highlight) : off;
         if (underMouse()) {
             fill = fill.lighter(108);
@@ -395,8 +389,9 @@ class TrackRow final : public QWidget {
         const bool hovered = testAttribute(Qt::WA_UnderMouse);
         if (playing_ || hovered) {
             painter.setPen(Qt::NoPen);
-            painter.setBrush(playing_ ? mixed(window, palette().color(QPalette::Highlight), 16)
-                                      : mixed(window, palette().color(QPalette::WindowText), 6));
+            painter.setBrush(playing_
+                                 ? ui::mix(window, palette().color(QPalette::Highlight), 0.16)
+                                 : ui::mix(window, palette().color(QPalette::WindowText), 0.06));
             painter.drawRoundedRect(QRectF{rect()}, 6, 6);
         }
         if (cover_space_ != nullptr) {
@@ -404,7 +399,8 @@ class TrackRow final : public QWidget {
             QPainterPath rounded;
             rounded.addRoundedRect(area, 3, 3);
             if (cover_.isNull()) {
-                painter.fillPath(rounded, mixed(window, palette().color(QPalette::WindowText), 10));
+                painter.fillPath(rounded,
+                                 ui::mix(window, palette().color(QPalette::WindowText), 0.1));
             } else {
                 painter.setClipPath(rounded);
                 // Filled, as a cover is: cut to a square around its middle.

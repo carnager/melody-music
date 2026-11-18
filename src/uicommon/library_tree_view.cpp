@@ -4,6 +4,7 @@
 #include "uicommon/delegate_selection_style.hpp"
 #include "uicommon/queue_item_delegate.hpp"
 
+#include "uicommon/colour_mix.hpp"
 #include "uicommon/rating_stars.hpp"
 
 #include <QApplication>
@@ -258,10 +259,7 @@ void LibraryTreeDelegate::paint(QPainter* painter, const QStyleOptionViewItem& o
         item.state &= ~QStyle::State_Selected;
         const auto base = item.palette.color(QPalette::Base);
         const auto accent = item.palette.color(QPalette::Highlight);
-        const auto mix = [](const int a, const int b) { return (a * 68 + b * 32) / 100; };
-        item.backgroundBrush =
-            QColor::fromRgb(mix(base.red(), accent.red()), mix(base.green(), accent.green()),
-                            mix(base.blue(), accent.blue()));
+        item.backgroundBrush = ui::mix(base, accent, 0.32);
     }
     item.state &= ~QStyle::State_HasFocus;
     const auto* widget = item.widget;
@@ -297,10 +295,7 @@ void LibraryTreeDelegate::paint(QPainter* painter, const QStyleOptionViewItem& o
         // A shade off the background, not the dark mid tone.
         const auto base = item.palette.color(QPalette::Base);
         const auto ink = item.palette.color(QPalette::Text);
-        const auto tint = [](const int a, const int b) { return (a * 88 + b * 12) / 100; };
-        painter->setBrush(QColor::fromRgb(tint(base.red(), ink.red()),
-                                          tint(base.green(), ink.green()),
-                                          tint(base.blue(), ink.blue())));
+        painter->setBrush(ui::mix(base, ink, 0.12));
         painter->drawRoundedRect(icon_rect, 3, 3);
         auto tile_font = item.font;
         tile_font.setPointSizeF(std::max(6.0, item.font.pointSizeF() * 0.72));

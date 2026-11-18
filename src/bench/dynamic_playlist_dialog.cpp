@@ -145,9 +145,6 @@ DynamicPlaylistDialog::DynamicPlaylistDialog(std::vector<Library> libraries, Rul
     layout->addWidget(status_);
     view_ = new ui::QueueTableView(this);
     view_->setObjectName(QStringLiteral("dynamic-tracks"));
-    view_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    view_->setSelectionBehavior(QAbstractItemView::SelectRows);
-    view_->setSelectionMode(QAbstractItemView::ExtendedSelection);
     view_->setProperty("definition-owned", true);
     view_->setDragDropMode(QAbstractItemView::DragOnly);
     view_->setDefaultDropAction(Qt::CopyAction);

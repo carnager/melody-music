@@ -2,6 +2,7 @@
 
 #include "bench/up_next_delegate.hpp"
 
+#include "uicommon/colour_mix.hpp"
 #include "uicommon/track_row_roles.hpp"
 
 #include <QApplication>
@@ -12,17 +13,7 @@
 #include <algorithm>
 
 namespace trackknife::bench {
-namespace {
-
-[[nodiscard]] QColor mixed(const QColor& from, const QColor& to, const int percent) {
-    const auto mix = [percent](const int a, const int b) {
-        return (a * (100 - percent) + b * percent) / 100;
-    };
-    return QColor::fromRgb(mix(from.red(), to.red()), mix(from.green(), to.green()),
-                           mix(from.blue(), to.blue()));
-}
-
-} // namespace
+namespace {} // namespace
 
 UpNextDelegate::UpNextDelegate(const int artist_column, const int length_column, QObject* parent)
     : QStyledItemDelegate(parent), artist_column_(artist_column), length_column_(length_column) {}
@@ -41,7 +32,7 @@ void UpNextDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option
     // Selection as a tint, as in the lists.
     const bool selected = option.state.testFlag(QStyle::State_Selected);
     painter->fillRect(option.rect,
-                      selected ? mixed(base, palette.color(QPalette::Highlight), 32) : base);
+                      selected ? ui::mix(base, palette.color(QPalette::Highlight), 0.32) : base);
 
     const auto area = option.rect.adjusted(8, 4, -8, -4);
     const auto extent = std::min(32, area.height());
@@ -58,7 +49,7 @@ void UpNextDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option
         painter->restore();
     } else {
         painter->setPen(Qt::NoPen);
-        painter->setBrush(mixed(base, palette.color(QPalette::Text), 10));
+        painter->setBrush(ui::mix(base, palette.color(QPalette::Text), 0.1));
         painter->drawRoundedRect(cover_rect, 2, 2);
     }
 

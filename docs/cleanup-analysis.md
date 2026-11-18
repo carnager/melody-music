@@ -71,10 +71,12 @@ Not dead, though a scan says so: Qt overrides (`renderItem`, `tabSizeHint`,
 - **Two cover loaders with their own caches:** Workspace
   (`workspace_ingest.cpp:645-785`) and `LibraryBrowser::wantCovers`
   (`library_browser.cpp:1738`).
-- **UI helpers:** 12 colour-mix helpers (`TrackknifeStyle::mix` should be the
-  one), 5 two-line "title + muted detail" delegates, the QueueTableView setup
-  copied 4 times, `smaller(QFont)` twice. ~200 lines.
-- **Tests:** `check()` copied into 43 files, `require()` into 32,
+- **UI helpers:** ~~12 colour-mix helpers~~ done 2026-11-18 (`ui::mix`,
+  `uicommon/colour_mix.hpp`); 5 two-line "title + muted detail" delegates;
+  ~~the QueueTableView setup copied 4 times~~ done 2026-11-18 (its
+  constructor); `smaller(QFont)` twice. ~200 lines.
+- **Tests:** ~~`check()` copied into 43 files, `require()` into 32~~ done
+  2026-11-18 (`tests/test_checks.hpp`);
   `write_file`/`write_silent_wave`/`write_bytes` 3-4 times each;
   `engine_lastfm_test.cpp:45` has an old copy of `recording_audition.hpp`.
 

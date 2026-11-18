@@ -4,6 +4,7 @@
 // an HTTP proxy meets it -- the handshake, the password asked as on TCP,
 // one message a line, pings answered, a broken frame refused.
 
+#include "test_checks.hpp"
 #include "trackknife/core/posix.hpp"
 #include "trackknife/engine/server.hpp"
 #include "trackknife/engine/stream_server.hpp"
@@ -32,12 +33,7 @@ namespace engine = trackknife::engine;
 namespace protocol = trackknife::protocol;
 using Json = protocol::Json;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 [[nodiscard]] int connect_to(const std::uint16_t port) {
     const int connection = trackknife::core::socket_cloexec(AF_INET, SOCK_STREAM, 0);
