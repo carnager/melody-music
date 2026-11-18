@@ -1038,9 +1038,10 @@ void BenchMainWindowTest::EngineLists::aListReplacedOnTheFollowedEngineMarksWhat
         return ids;
     };
     const auto id = [](const std::string& text) { return *core::StableId::parse(text); };
-    auto* tab = window.remoteQueueTab();
-    QVERIFY(tab != nullptr);
+    // What the server plays is followed in its playing list, one list
+    // however often another client replaces the queue.
     const auto marked = [&](const std::string& entry) {
+        auto* tab = window.playingTab(window.remoteEngine()->key);
         const auto row = tab->model->rowOfEntry(id(entry), -1);
         return row >= 0 && tab->model->index(row, 0).data(ui::track_current_role).toBool();
     };
@@ -1056,7 +1057,8 @@ void BenchMainWindowTest::EngineLists::aListReplacedOnTheFollowedEngineMarksWhat
     QVERIFY((*other)->call("playback.play", protocol::Json{{"entry", album[0]}}).has_value());
     std::this_thread::sleep_for(std::chrono::milliseconds{600});
 
-    QTRY_VERIFY(tab->model->rowOfEntry(id(album[0]), -1) >= 0);
+    QTRY_VERIFY(
+        window.playingTab(window.remoteEngine()->key)->model->rowOfEntry(id(album[0]), -1) >= 0);
     QTRY_VERIFY2(marked(album[0]), "the new list's playing row is not marked");
     QVERIFY2(!marked(album[1]), "the row where the old track was is marked instead");
     // Past two of the engine's state reports.

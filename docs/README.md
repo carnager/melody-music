@@ -21,7 +21,7 @@ their limits are.
 
 ## Current state
 
-Updated on 2026-11-18, through ADR-0358: database schema 58, protocol 1 at
+Updated on 2026-11-18, through ADR-0359: database schema 58, protocol 1 at
 level 36 ([protocol levels](protocol-levels.md)).
 
 **The unified engine is in place.** `melodyd` owns the library and playback

@@ -1,6 +1,6 @@
 # Architecture
 
-How Melody is built today (2026-11-18, through ADR-0358). The direction it
+How Melody is built today (2026-11-18, through ADR-0359). The direction it
 follows is [ADR-0220](adr/0220-unified-engine-and-remote-agents.md); how the
 code got here is in [the unified engine plan](unified-engine.md) and the
 [ADR index](adr/README.md). The two-authority design this document used to

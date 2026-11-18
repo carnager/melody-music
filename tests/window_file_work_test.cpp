@@ -34,6 +34,7 @@ class BenchMainWindowTest::FileWork final : public window_test::Fixture {
     void actionChoicesAreRemembered();
     void actionsLinksOpenTheirOwnSettings();
     void namingLayoutsAreMelodys();
+    void thisComputersDestinationsAreItsEngines();
     void combinedTagAndRenameReviewReachesPreparationApply_data();
     void combinedTagAndRenameReviewReachesPreparationApply();
     void applyMovesIntoAChosenFolder();
@@ -1592,6 +1593,72 @@ void BenchMainWindowTest::FileWork::namingLayoutsAreMelodys() {
         id, [&removed](const QString& error) { removed = error.isEmpty(); });
     QTRY_VERIFY(removed);
     QTRY_VERIFY_WITH_TIMEOUT(!std::ranges::contains(kept(), std::string{"Mine"}), 5'000);
+}
+
+// ADR-0359: this computer's engine keeps its move destinations, as every
+// engine does. One kept in Melody's presets before is moved into it once,
+// without anyone doing anything; new ones are saved there.
+void BenchMainWindowTest::FileWork::thisComputersDestinationsAreItsEngines() {
+    QTemporaryDir music;
+    QVERIFY(music.isValid());
+    const auto old_id = core::StableId::random();
+    {
+        auto presets = persistence::ListRepository::open(core::presets_database_path());
+        QVERIFY(presets.has_value());
+        QVERIFY(presets
+                    ->upsert_destination_profile(persistence::SavedDestinationProfile{
+                        .id = old_id,
+                        .profile =
+                            operations::DestinationProfile{
+                                .schema_version = 1U,
+                                .name = "Archive",
+                                .root_raw_path = QFile::encodeName(music.path()).toStdString(),
+                                .containment_policy = {"lexical-beneath-root", 1U}}})
+                    .has_value());
+    }
+    const auto in_presets = [] {
+        std::vector<std::string> found;
+        auto presets = persistence::ListRepository::open(core::presets_database_path());
+        if (auto kept = presets ? presets->load_destination_profiles()
+                                : decltype(presets->load_destination_profiles()){}) {
+            for (const auto& destination : *kept) {
+                found.push_back(destination.profile.name);
+            }
+        }
+        return found;
+    };
+    const auto in_engine = [this] {
+        std::vector<std::string> found;
+        engine::RemoteFileWork work{protocol::Endpoint{
+            .socket = engine_.socket().toStdString(), .host = {}, .port = 0, .token = {}}};
+        if (auto kept = work.destinations()) {
+            for (const auto& destination : *kept) {
+                found.push_back(destination.profile.name);
+            }
+        }
+        return found;
+    };
+    BenchMainWindow window;
+    window.show();
+    QTRY_VERIFY(window.lists_restored_);
+    QTRY_VERIFY_WITH_TIMEOUT(window.localEngine().does_file_work, 10'000);
+    QTRY_VERIFY_WITH_TIMEOUT(std::ranges::contains(in_engine(), std::string{"Archive"}), 5'000);
+    QTRY_VERIFY_WITH_TIMEOUT(in_presets().empty(), 5'000);
+
+    bool saved = false;
+    window.buildOutputProfileStore().save_destination(
+        persistence::SavedDestinationProfile{
+            .id = core::StableId::random(),
+            .profile =
+                operations::DestinationProfile{
+                    .schema_version = 1U,
+                    .name = "Lossy",
+                    .root_raw_path = QFile::encodeName(music.path()).toStdString() + "/lossy",
+                    .containment_policy = {"lexical-beneath-root", 1U}}},
+        [&saved](const QString& error) { saved = error.isEmpty(); });
+    QTRY_VERIFY(saved);
+    QVERIFY(std::ranges::contains(in_engine(), std::string{"Lossy"}));
+    QVERIFY(in_presets().empty());
 }
 
 void BenchMainWindowTest::FileWork::combinedTagAndRenameReviewReachesPreparationApply_data() {

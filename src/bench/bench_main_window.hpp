@@ -701,6 +701,7 @@ class BenchMainWindow final : public QMainWindow, public WorkspaceView {
     [[nodiscard]] ListTab* remoteQueueTab() { return workspace_.remoteQueueTab(); }
     // An engine's own tab: its first, or one made for it, named after it.
     [[nodiscard]] ListTab* engineTab(EngineLink& engine) { return workspace_.engineTab(engine); }
+    ListTab* playingTab(const EngineKey& engine) { return workspace_.playingTab(engine); }
     // True while an engine is connected. ADR-0226: nothing plays otherwise;
     // this window has no player of its own.
     [[nodiscard]] bool playingOnEngine() const { return workspace_.playingOnEngine(); }

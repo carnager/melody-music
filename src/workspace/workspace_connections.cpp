@@ -726,6 +726,9 @@ void Workspace::watchFileWork(EngineLink& link) {
                                  if (does) {
                                      candidate->ratings.clear();
                                  }
+                                 if (does && candidate->key.isLocal()) {
+                                     workspace->moveDestinationsToEngine(work);
+                                 }
                              }
                          }
                          // What was opened before this computer's engine

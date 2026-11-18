@@ -96,17 +96,58 @@ Workspace::ConvertOpening Workspace::convertItems(LocalListModel& list, const En
     return opening;
 }
 
+namespace {
+
+// Blocking engine work off the UI thread, answered on `context`'s.
+template <typename Work, typename Done> void offThread(QObject* context, Work work, Done done) {
+    const QPointer guard{context};
+    static_cast<void>(
+        QtConcurrent::run([guard, work = std::move(work), done = std::move(done)]() mutable {
+            auto result = work();
+            postBack(guard, [done = std::move(done), result = std::move(result)]() mutable {
+                done(std::move(result));
+            });
+        }));
+}
+
+[[nodiscard]] QString failure(const core::Result<void>& result) {
+    return result ? QString{} : QString::fromStdString(result.error().message);
+}
+
+} // namespace
+
 ConvertProfilesLoader Workspace::convertProfiles() {
     auto* const persistence_service = persistence_;
-    return [persistence_service](
-               std::function<void(std::vector<persistence::SavedOutputLayoutProfile>,
-                                  std::vector<persistence::SavedDestinationProfile>, QString)>
-                   completion) {
+    const QPointer<Workspace> self{this};
+    return [persistence_service,
+            self](std::function<void(std::vector<persistence::SavedOutputLayoutProfile>,
+                                     std::vector<persistence::SavedDestinationProfile>, QString)>
+                      completion) {
         if (persistence_service == nullptr) {
             completion({}, {}, QStringLiteral("Melody persistence is unavailable"));
             return;
         }
-        persistence_service->loadOutputProfiles(std::move(completion));
+        // The naming layouts are Melody's; the destinations, this computer's
+        // engine's (ADR-0359), where the converted files land.
+        persistence_service->loadOutputProfiles(
+            [self, completion = std::move(completion)](
+                std::vector<persistence::SavedOutputLayoutProfile> layouts,
+                std::vector<persistence::SavedDestinationProfile>, const QString& error) mutable {
+                auto work = self ? self->fileWorkOf(EngineKey::local()) : nullptr;
+                if (!error.isEmpty() || !work) {
+                    completion(std::move(layouts), {}, error);
+                    return;
+                }
+                offThread(
+                    self.data(), [work] { return work->destinations(); },
+                    [layouts = std::move(layouts),
+                     completion = std::move(completion)](auto listed) mutable {
+                        completion(std::move(layouts),
+                                   listed ? std::move(*listed)
+                                          : std::vector<persistence::SavedDestinationProfile>{},
+                                   {});
+                    });
+            });
     };
 }
 
@@ -349,26 +390,6 @@ Workspace::TaggerOpening Workspace::taggerServices(std::shared_ptr<engine::Remot
     };
     return opening;
 }
-
-namespace {
-
-// Blocking engine work off the UI thread, answered on `context`'s.
-template <typename Work, typename Done> void offThread(QObject* context, Work work, Done done) {
-    const QPointer guard{context};
-    static_cast<void>(
-        QtConcurrent::run([guard, work = std::move(work), done = std::move(done)]() mutable {
-            auto result = work();
-            postBack(guard, [done = std::move(done), result = std::move(result)]() mutable {
-                done(std::move(result));
-            });
-        }));
-}
-
-[[nodiscard]] QString failure(const core::Result<void>& result) {
-    return result ? QString{} : QString::fromStdString(result.error().message);
-}
-
-} // namespace
 
 void Workspace::libraryTakes(const std::vector<std::string>& moved_here) {
     const auto* library = libraryElsewhere();
@@ -746,48 +767,8 @@ void Workspace::applyEngineRelocation(const EngineKey& engine,
 OutputProfileStore Workspace::buildOutputProfileStore(const EngineKey& destinations_of) {
     auto* const persistence_service = persistence_;
     const auto unavailable = QStringLiteral("Melody persistence is unavailable");
-    // This computer's destinations are in this workspace, which its engine
-    // shares; an engine elsewhere is asked for its own.
-    const auto place_of = [this, persistence_service,
-                           unavailable](const EngineLink& engine) -> DestinationPlace {
-        if (engine.key.isLocal()) {
-            return DestinationPlace{
-                .key = engine.key.text(),
-                .name = engineName(engine.key),
-                .load =
-                    [persistence_service, unavailable](DestinationPlace::LoadCompletion done) {
-                        if (!persistence_service) {
-                            done({}, unavailable);
-                            return;
-                        }
-                        persistence_service->loadOutputProfiles(
-                            [done = std::move(done)](auto, auto destinations, QString error) {
-                                done(std::move(destinations), error);
-                            });
-                    },
-                .save =
-                    [persistence_service, unavailable](persistence::SavedDestinationProfile profile,
-                                                       DestinationPlace::Completion done) {
-                        if (!persistence_service) {
-                            done(unavailable);
-                            return;
-                        }
-                        persistence_service->saveDestinationProfile(std::move(profile),
-                                                                    std::move(done));
-                    },
-                .remove =
-                    [persistence_service, unavailable](core::StableId id,
-                                                       DestinationPlace::Completion done) {
-                        if (!persistence_service) {
-                            done(unavailable);
-                            return;
-                        }
-                        persistence_service->removeDestinationProfile(id, std::move(done));
-                    },
-                .folders = {},
-                .copyable = {},
-            };
-        }
+    // Every engine keeps its own move destinations, this computer's too.
+    const auto place_of = [this](const EngineLink& engine) -> DestinationPlace {
         const auto work = engine.file_work;
         const auto mount = mountOf(engine);
         return DestinationPlace{
@@ -818,10 +799,12 @@ OutputProfileStore Workspace::buildOutputProfileStore(const EngineKey& destinati
                         this, [work, id] { return work->remove_destination(id); },
                         [done = std::move(done)](auto removed) { done(failure(removed)); });
                 },
-            .folders = engineFolderLister(work),
+            // This computer's folders are chosen in its own file dialog.
+            .folders = engine.key.isLocal() ? EngineFolderLister{} : engineFolderLister(work),
             // Only through a mount: a folder of this computer is that
             // engine's only where the mount says it is.
-            .copyable = mount.local_folder.empty() || mount.remote_folder.empty()
+            .copyable = engine.key.isLocal() || mount.local_folder.empty() ||
+                                mount.remote_folder.empty()
                             ? std::function<std::vector<persistence::SavedDestinationProfile>()>{}
                             : [this, mount] {
                                   std::vector<persistence::SavedDestinationProfile> there;
@@ -841,38 +824,64 @@ OutputProfileStore Workspace::buildOutputProfileStore(const EngineKey& destinati
         };
     };
 
+    const auto ready = [](const EngineLink* engine) {
+        return engine != nullptr && engine->does_file_work && engine->file_work;
+    };
     std::vector<DestinationPlace> places;
     for (const auto& engine : engines_) {
-        if (engine->key.isLocal() || (engine->does_file_work && engine->file_work)) {
+        if (ready(engine.get())) {
             places.push_back(place_of(*engine));
         }
     }
-    const auto* chosen = link(destinations_of);
-    auto destinations = chosen != nullptr && (chosen->key.isLocal() ||
-                                              (chosen->does_file_work && chosen->file_work))
-                            ? place_of(*chosen)
-                            : place_of(localEngine());
+    const auto* chosen = ready(link(destinations_of)) ? link(destinations_of) : &localEngine();
+    auto destinations =
+        ready(chosen)
+            ? place_of(*chosen)
+            : DestinationPlace{
+                  .key = EngineKey::local().text(),
+                  .name = engineName(EngineKey::local()),
+                  .load =
+                      [](DestinationPlace::LoadCompletion done) {
+                          done({}, tr("this computer's engine is not reached"));
+                      },
+                  .save =
+                      [](persistence::SavedDestinationProfile, DestinationPlace::Completion done) {
+                          done(tr("this computer's engine is not reached"));
+                      },
+                  .remove =
+                      [](core::StableId, DestinationPlace::Completion done) {
+                          done(tr("this computer's engine is not reached"));
+                      },
+                  .folders = {},
+                  .copyable = {}};
     const bool elsewhere =
         !destinations.key.isEmpty() && destinations.key != EngineKey::local().text();
+    // This computer's, for copying to an engine whose mount reaches them.
+    if (ready(&localEngine())) {
+        offThread(
+            this, [work = localEngine().file_work] { return work->destinations(); },
+            [this](auto listed) {
+                if (listed) {
+                    local_destinations_ = std::move(*listed);
+                }
+            });
+    }
     return OutputProfileStore{
         .load =
-            [this, persistence_service, unavailable, elsewhere,
+            [persistence_service, unavailable,
              load_destinations = destinations.load](OutputProfileStore::LoadCompletion completion) {
                 if (!persistence_service) {
                     completion({}, {}, unavailable);
                     return;
                 }
-                const QPointer window{this};
+                // The naming layouts are Melody's (ADR-0339); the
+                // destinations, the engine's.
                 persistence_service->loadOutputProfiles(
-                    [window, elsewhere, load_destinations, completion = std::move(completion)](
+                    [load_destinations, completion = std::move(completion)](
                         std::vector<persistence::SavedOutputLayoutProfile> layouts,
-                        std::vector<persistence::SavedDestinationProfile> here,
-                        QString error) mutable {
-                        if (window) {
-                            window->local_destinations_ = here;
-                        }
-                        if (!error.isEmpty() || !elsewhere) {
-                            completion(std::move(layouts), std::move(here), error);
+                        std::vector<persistence::SavedDestinationProfile>, QString error) mutable {
+                        if (!error.isEmpty()) {
+                            completion(std::move(layouts), {}, error);
                             return;
                         }
                         load_destinations(
@@ -910,6 +919,51 @@ OutputProfileStore Workspace::buildOutputProfileStore(const EngineKey& destinati
         .destinations_key = destinations.key,
         .places = std::move(places),
     };
+}
+
+// ADR-0359: this computer's move destinations were kept in Melody's presets;
+// its engine keeps them now, as every engine keeps its own. Moved once, when
+// the engine is first reached: each one it has not by name is saved there,
+// then let go of here.
+void Workspace::moveDestinationsToEngine(std::shared_ptr<engine::RemoteFileWork> work) {
+    if (persistence_ == nullptr || !work) {
+        return;
+    }
+    const QPointer<Workspace> self{this};
+    persistence_->loadOutputProfiles(
+        [self, work](std::vector<persistence::SavedOutputLayoutProfile>,
+                     std::vector<persistence::SavedDestinationProfile> here, const QString& error) {
+            if (!self || !error.isEmpty() || here.empty()) {
+                return;
+            }
+            offThread(
+                self.data(),
+                [work, here = std::move(here)] {
+                    std::vector<core::StableId> moved;
+                    const auto there = work->destinations();
+                    if (!there) {
+                        return moved;
+                    }
+                    for (const auto& destination : here) {
+                        const auto known =
+                            std::ranges::any_of(*there, [&destination](const auto& kept) {
+                                return kept.profile.name == destination.profile.name;
+                            });
+                        if (known || work->save_destination(destination)) {
+                            moved.push_back(destination.id);
+                        }
+                    }
+                    return moved;
+                },
+                [self](const std::vector<core::StableId>& moved) {
+                    if (!self || self->persistence_ == nullptr) {
+                        return;
+                    }
+                    for (const auto& id : moved) {
+                        self->persistence_->removeDestinationProfile(id);
+                    }
+                });
+        });
 }
 
 void Workspace::applyCommittedMetadata(const operations::MetadataCommitResult& result) {
