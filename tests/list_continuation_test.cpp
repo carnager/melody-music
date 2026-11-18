@@ -5,6 +5,7 @@
 
 #include "recording_audition.hpp"
 
+#include "test_checks.hpp"
 #include "trackknife/core/local_sources.hpp"
 #include "trackknife/core/stable_id.hpp"
 #include "trackknife/engine/catalogue.hpp"
@@ -33,12 +34,7 @@ namespace engine = trackknife::engine;
 namespace protocol = trackknife::protocol;
 using trackknife::testing::RecordingAudition;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 [[nodiscard]] std::filesystem::path materialize(const std::filesystem::path& fixtures,
                                                 const std::string& name,

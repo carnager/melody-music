@@ -2,6 +2,7 @@
 
 #include "query/history_corpus.hpp"
 #include "query/search_preset_corpus.hpp"
+#include "test_checks.hpp"
 #include "trackknife/query/search_presets.hpp"
 #include "trackknife/query/tkq.hpp"
 
@@ -13,16 +14,7 @@
 
 namespace {
 
-int failures = 0;
-
-void check(const bool condition, const std::string_view expression, const int line) {
-    if (!condition) {
-        std::cerr << "line " << line << ": check failed: " << expression << '\n';
-        ++failures;
-    }
-}
-
-#define CHECK(expression) check((expression), #expression, __LINE__)
+using checks::failures;
 
 using trackknife::query::compile_tkq;
 using trackknife::query::TkqComparison;

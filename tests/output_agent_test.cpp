@@ -8,6 +8,7 @@
 
 #include "agent/agent.hpp"
 #include "agent/speaker_arbiter.hpp"
+#include "test_checks.hpp"
 #include "trackknife/engine/media_streams.hpp"
 #include "trackknife/engine/outputs.hpp"
 #include "trackknife/engine/playback_methods.hpp"
@@ -45,12 +46,7 @@ namespace audio = trackknife::audio;
 namespace protocol = trackknife::protocol;
 namespace output = trackknife::output;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 [[nodiscard]] bool eventually(const std::function<bool()>& condition,
                               const std::chrono::seconds patience = std::chrono::seconds{10}) {

@@ -2,6 +2,7 @@
 
 // ADR-0286: the format of melodyd.conf.
 
+#include "test_checks.hpp"
 #include "trackknife/core/config_file.hpp"
 
 #include <sys/stat.h>
@@ -19,16 +20,7 @@ namespace {
 
 using trackknife::core::ConfigFile;
 
-int failures = 0;
-
-void check(const bool condition, const std::string_view expression, const int line) {
-    if (!condition) {
-        std::cerr << "line " << line << ": check failed: " << expression << '\n';
-        ++failures;
-    }
-}
-
-#define CHECK(expression) check((expression), #expression, __LINE__)
+using checks::failures;
 
 [[nodiscard]] std::string value_of(const ConfigFile& file, const std::string_view kind,
                                    const std::string_view name, const std::string_view key) {

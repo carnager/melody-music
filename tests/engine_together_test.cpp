@@ -6,6 +6,7 @@
 // library -- or, for a track it lacks, from the host's copy; and, at a
 // party, the room plays a track the friend suggested, from her copy.
 
+#include "test_checks.hpp"
 #include "trackknife/core/posix.hpp"
 #include "trackknife/engine/catalogue.hpp"
 #include "trackknife/engine/player.hpp"
@@ -37,12 +38,7 @@ namespace engine = trackknife::engine;
 namespace protocol = trackknife::protocol;
 using namespace std::chrono_literals;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 // Whether `holds` comes true within `within`.
 [[nodiscard]] bool eventually(const std::function<bool()>& holds,

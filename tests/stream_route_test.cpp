@@ -4,6 +4,7 @@
 // engine.
 
 #include "agent/stream_route.hpp"
+#include "test_checks.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -19,12 +20,7 @@ using trackknife::agent::classify_route;
 using trackknife::agent::InterfaceAddress;
 using trackknife::agent::Route;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 [[nodiscard]] sockaddr_storage v4(const char* text) {
     sockaddr_storage storage{};

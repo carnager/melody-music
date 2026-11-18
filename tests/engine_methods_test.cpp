@@ -11,6 +11,7 @@
 #ifdef MELODY_ENABLE_LIBRARY_WATCH
 #include "trackknife/engine/library_watch.hpp"
 #endif
+#include "test_checks.hpp"
 #include "trackknife/protocol/message.hpp"
 
 #include <chrono>
@@ -31,12 +32,7 @@ namespace protocol = trackknife::protocol;
 namespace engine = trackknife::engine;
 namespace core = trackknife::core;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 // Round trip through the wire format rather than calling dispatch directly:
 // encoding and parsing are part of what these methods have to survive.

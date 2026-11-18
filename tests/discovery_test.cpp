@@ -2,6 +2,7 @@
 
 // Engines announcing themselves on multicast DNS, and being found.
 
+#include "test_checks.hpp"
 #include "trackknife/core/posix.hpp"
 #include "trackknife/core/stable_id.hpp"
 #include "trackknife/discovery/dns.hpp"
@@ -26,12 +27,7 @@ namespace {
 
 namespace discovery = trackknife::discovery;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 [[nodiscard]] bool eventually(const std::function<bool()>& condition,
                               const std::chrono::milliseconds patience = std::chrono::seconds{8}) {

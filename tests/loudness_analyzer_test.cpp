@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include "test_checks.hpp"
 #include "trackknife/core/stable_id.hpp"
 #include "trackknife/formats/decoder.hpp"
 #include "trackknife/loudness/analyzer.hpp"
@@ -23,16 +24,7 @@
 
 namespace {
 
-int failures = 0;
-
-void check(const bool condition, const std::string_view expression, const int line) {
-    if (!condition) {
-        std::cerr << "line " << line << ": check failed: " << expression << '\n';
-        ++failures;
-    }
-}
-
-#define CHECK(expression) check((expression), #expression, __LINE__)
+using checks::failures;
 
 constexpr int sample_rate = 44'100;
 constexpr double tone_hertz = 997.0;

@@ -5,6 +5,7 @@
 // submitting long work as a job is that it becomes impossible, so the central
 // case here is a long job running while control calls are answered.
 
+#include "test_checks.hpp"
 #include "trackknife/engine/job_registry.hpp"
 #include "trackknife/protocol/dispatch.hpp"
 
@@ -24,12 +25,7 @@ namespace protocol = trackknife::protocol;
 namespace engine = trackknife::engine;
 namespace core = trackknife::core;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 // Collects what the engine would write to a socket.
 class RecordedEvents final {

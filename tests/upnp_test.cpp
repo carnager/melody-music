@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+#include "test_checks.hpp"
 #include "trackknife/discovery/upnp.hpp"
 #include "trackknife/output/upnp_audition.hpp"
 #include <algorithm>
@@ -13,12 +14,8 @@
 
 using namespace trackknife;
 namespace {
-void require(bool condition, const char* message) {
-    if (!condition) {
-        std::cerr << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
+
 class Renderer final : public discovery::UpnpControl {
   public:
     std::string state{"STOPPED"}, uri, next, position{"0:00:00"};

@@ -2,6 +2,7 @@
 
 // ADR-0258: what a dynamic playlist's rule picks from its matches.
 
+#include "test_checks.hpp"
 #include "trackknife/engine/dynamic_selection.hpp"
 
 #include <algorithm>
@@ -18,12 +19,7 @@ namespace {
 
 namespace engine = trackknife::engine;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::exit(EXIT_FAILURE);
-    }
-}
+using checks::require;
 
 // Artist "big" with 400 tracks and nine with 10 each, in library order.
 [[nodiscard]] std::vector<engine::DynamicMatch> library() {

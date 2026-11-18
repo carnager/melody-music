@@ -3,6 +3,7 @@
 // ADR-0254: a library view groups real, tagged files by its levels'
 // expressions -- in the engine, the same answered locally and over the wire.
 
+#include "test_checks.hpp"
 #include "trackknife/core/stable_id.hpp"
 #include "trackknife/engine/catalogue.hpp"
 #include "trackknife/engine/catalogue_methods.hpp"
@@ -32,12 +33,7 @@ namespace protocol = trackknife::protocol;
 using persistence::LibraryEntryKind;
 using persistence::LibraryQuery;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 struct Tags {
     std::string albumartist;

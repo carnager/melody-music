@@ -4,6 +4,7 @@
 // works for any client, and the session outlives a restart -- against a fake
 // Last.fm on a local port, with the listening clock driven by the test.
 
+#include "test_checks.hpp"
 #include "trackknife/core/posix.hpp"
 #include "trackknife/engine/catalogue.hpp"
 #include "trackknife/engine/lastfm.hpp"
@@ -35,12 +36,7 @@ namespace engine = trackknife::engine;
 namespace core = trackknife::core;
 namespace audio = trackknife::audio;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 class RecordingAudition final : public audio::Audition {
   public:

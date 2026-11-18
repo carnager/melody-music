@@ -4,6 +4,7 @@
 #include "trackknife/persistence/list_repository.hpp"
 
 #include "presets.hpp"
+#include "test_checks.hpp"
 #include <sqlite3.h>
 
 #include <iterator>
@@ -22,12 +23,7 @@
 
 namespace {
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 void saved_searches_are_persistent_and_conflict_checked() {
     namespace persistence = trackknife::persistence;

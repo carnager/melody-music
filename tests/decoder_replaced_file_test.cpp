@@ -6,6 +6,7 @@
 // fails mid-track; here the old file is emptied through a second name to the
 // same effect.
 
+#include "test_checks.hpp"
 #include "trackknife/formats/decoder.hpp"
 
 #include <unistd.h>
@@ -22,16 +23,7 @@ namespace {
 
 namespace formats = trackknife::formats;
 
-int failures = 0;
-
-void check(const bool condition, const char* expression, const int line) {
-    if (!condition) {
-        std::cerr << "line " << line << ": " << expression << '\n';
-        ++failures;
-    }
-}
-
-#define CHECK(expression) check((expression), #expression, __LINE__)
+using checks::failures;
 
 constexpr std::uint32_t rate = 8'000;
 constexpr std::int64_t frames = rate * 10;

@@ -3,6 +3,7 @@
 // Covers scaled by the engine for a client that shows them small: a phone
 // scrolling a grid pays for every byte of every original.
 
+#include "test_checks.hpp"
 #include "trackknife/formats/cover_fitting.hpp"
 #include "trackknife/protocol/message.hpp"
 
@@ -27,12 +28,7 @@ namespace {
 
 namespace formats = trackknife::formats;
 
-void require(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        std::abort();
-    }
-}
+using checks::require;
 
 [[nodiscard]] std::vector<std::uint8_t> fixture(const std::filesystem::path& encoded) {
     std::ifstream input{encoded};

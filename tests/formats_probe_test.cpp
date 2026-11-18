@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include "test_checks.hpp"
 #include "trackknife/core/cancellation.hpp"
 #include "trackknife/core/stable_id.hpp"
 #include "trackknife/formats/artwork.hpp"
@@ -27,16 +28,7 @@ extern "C" {
 
 namespace {
 
-int failures = 0;
-
-void check(const bool condition, const std::string_view expression, const int line) {
-    if (!condition) {
-        std::cerr << "line " << line << ": check failed: " << expression << '\n';
-        ++failures;
-    }
-}
-
-#define CHECK(expression) check((expression), #expression, __LINE__)
+using checks::failures;
 
 void append_u16(std::array<unsigned char, 44>& header, const std::size_t offset,
                 const std::uint16_t value) {

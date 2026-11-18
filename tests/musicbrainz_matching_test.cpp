@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include "test_checks.hpp"
 #include "trackknife/musicbrainz/album_groups.hpp"
 #include "trackknife/musicbrainz/matching.hpp"
 #include "trackknife/musicbrainz/proposal_bridge.hpp"
@@ -13,16 +14,7 @@
 
 namespace {
 
-int failures = 0;
-
-void check(const bool condition, const std::string_view expression, const int line) {
-    if (!condition) {
-        std::cerr << "line " << line << ": check failed: " << expression << '\n';
-        ++failures;
-    }
-}
-
-#define CHECK(expression) check((expression), #expression, __LINE__)
+using checks::failures;
 
 using namespace trackknife::musicbrainz;
 
