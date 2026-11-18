@@ -250,19 +250,6 @@ LocalTrackRow cached_library_row(persistence::LibraryTrackSnapshot snapshot) {
     return row;
 }
 
-std::string cue_track_logical_reference(const std::string& raw_cue_path,
-                                        const std::size_t file_index,
-                                        const std::size_t track_index) {
-    std::string reference{"cue-v1"};
-    reference.push_back('\0');
-    reference += raw_cue_path;
-    reference.push_back('\0');
-    reference += std::to_string(file_index);
-    reference.push_back('\0');
-    reference += std::to_string(track_index);
-    return reference;
-}
-
 std::optional<CueLogicalReferenceParts> parse_cue_logical_reference(const std::string& reference) {
     constexpr std::string_view prefix{"cue-v1"};
     if (!reference.starts_with(prefix) || reference.size() <= prefix.size() + 1U ||

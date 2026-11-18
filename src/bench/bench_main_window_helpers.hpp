@@ -5,6 +5,7 @@
 #include "bench/engine_key.hpp"
 
 #include "bench/local_list_model.hpp"
+#include "trackknife/formats/cue_sheet.hpp"
 #include "trackknife/persistence/local_library.hpp"
 
 #include <QIcon>
@@ -100,12 +101,8 @@ void remove_shadowed_probed_metadata(metadata::MetadataDocument& document);
 void project_display_metadata(LocalTrackRow& row);
 [[nodiscard]] LocalTrackRow cached_library_row(persistence::LibraryTrackSnapshot snapshot);
 
-// ADR-0139: the stable CUE logical identity ("cue-v1" NUL sheet path NUL
-// file index NUL track index), shared by ingest, apply capture, and
-// committed-sheet view refresh.
-[[nodiscard]] std::string cue_track_logical_reference(const std::string& raw_cue_path,
-                                                      std::size_t file_index,
-                                                      std::size_t track_index);
+// ADR-0139: the stable CUE logical identity, as formats writes it.
+using formats::cue_track_logical_reference;
 
 struct CueLogicalReferenceParts {
     std::string raw_cue_path;

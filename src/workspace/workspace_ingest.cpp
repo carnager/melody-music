@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <format>
 #include <limits>
 #include <span>
 #include <string_view>
@@ -35,8 +36,6 @@ extern "C" void __tsan_release(void* address);
 
 namespace trackknife::bench {
 namespace {
-
-constexpr std::size_t discovery_row_limit = 100'000U;
 
 // What a row showed before its file was read stays where the file has no
 // tag for it: a queue entry another client gave its title and album, say,
@@ -59,90 +58,48 @@ void keep_what_the_file_lacks(LocalTrackRow& filled, const LocalTrackRow& had) {
     keep(filled.track_number, had.track_number, {"tracknumber"});
 }
 
-void append_metadata_value(metadata::MetadataDocument& document, std::string native_name,
-                           std::string value, const metadata::FieldProvenance provenance) {
-    if (value.empty()) {
-        return;
+// ADR-0356: an item the engine opened as the list item a tab's rows are
+// made from -- a sheet's words at sidecar provenance and its ReplayGain at
+// segment provenance, as a sheet is read for both (ADR-0139).
+persistence::ListItem list_item_of_opened(persistence::EngineListItem item) {
+    persistence::ListItem listed{.entry_id = item.entry_id,
+                                 .profile_id = std::nullopt,
+                                 .source_reference = std::move(item.raw_path),
+                                 .logical_reference = std::move(item.logical_reference),
+                                 .segment = item.segment,
+                                 .source_selection = item.source_selection,
+                                 .duration_ms = item.duration_ms,
+                                 .source_revision = std::nullopt,
+                                 .fields = {}};
+    const auto add = [&listed](const char* name, std::string value,
+                               const metadata::FieldProvenance provenance) {
+        if (!value.empty()) {
+            listed.fields.push_back(persistence::SnapshotField{.name = {},
+                                                               .value = std::move(value),
+                                                               .native_name = name,
+                                                               .provenance = provenance});
+        }
+    };
+    using metadata::FieldProvenance;
+    add("TITLE", std::move(item.title), FieldProvenance::sidecar);
+    add("ARTIST", std::move(item.artist), FieldProvenance::sidecar);
+    add("ALBUM", std::move(item.album), FieldProvenance::sidecar);
+    add("ALBUMARTIST", std::move(item.album_artist), FieldProvenance::sidecar);
+    add("DATE", std::move(item.date), FieldProvenance::sidecar);
+    if (item.replay_gain) {
+        const auto& gain = *item.replay_gain;
+        const auto db = [](const std::optional<double>& value) {
+            return value ? std::format("{:.2f} dB", *value) : std::string{};
+        };
+        const auto peak = [](const std::optional<double>& value) {
+            return value ? std::format("{:.6f}", *value) : std::string{};
+        };
+        add("REPLAYGAIN_TRACK_GAIN", db(gain.track_gain_db), FieldProvenance::segment);
+        add("REPLAYGAIN_TRACK_PEAK", peak(gain.track_peak), FieldProvenance::segment);
+        add("REPLAYGAIN_ALBUM_GAIN", db(gain.album_gain_db), FieldProvenance::segment);
+        add("REPLAYGAIN_ALBUM_PEAK", peak(gain.album_peak), FieldProvenance::segment);
     }
-    const auto canonical_name =
-        metadata::resolve_text_property_identity(native_name).canonical_name;
-    if (canonical_name.empty()) {
-        return;
-    }
-    document.fields.push_back(metadata::MetadataField{
-        .canonical_name = canonical_name,
-        .native_name = std::move(native_name),
-        .values = {std::move(value)},
-        .qualifier = {},
-        .provenance = provenance,
-    });
-}
-
-// Folder expansion only ingests plausible audio and external cue sheets;
-// explicitly opened files always pass regardless (core discovery contract).
-// The probe/resolver still gates everything this list lets through.
-constexpr std::array<std::string_view, 28> audio_extensions{
-    "flac", "mp3", "ogg",  "oga", "opus", "m4a", "mp4", "aac", "wv",  "wav",
-    "rf64", "w64", "aiff", "aif", "aifc", "ape", "mpc", "tta", "spx", "mka",
-    "wma",  "dsf", "dff",  "cue", "mod",  "xm",  "s3m", "it"};
-
-[[nodiscard]] bool is_cue_path(const std::string& raw_path) {
-    const auto slash = raw_path.find_last_of('/');
-    const auto dot = raw_path.find_last_of('.');
-    return dot != std::string::npos && (slash == std::string::npos || dot > slash) &&
-           lowercased_ascii(raw_path.substr(dot + 1U)) == "cue";
-}
-
-[[nodiscard]] std::string cue_remark(const formats::CueLogicalTrack& track,
-                                     const std::string_view name) {
-    const auto found = std::ranges::find_if(
-        track.remarks.rbegin(), track.remarks.rend(),
-        [name](const formats::CueMetadataField& field) { return field.name == name; });
-    return found == track.remarks.rend() ? std::string{} : found->value;
-}
-
-[[nodiscard]] std::string cue_logical_reference(const std::string& raw_cue_path,
-                                                const formats::CueLogicalTrack& track) {
-    return cue_track_logical_reference(raw_cue_path, track.file_index, track.track_index);
-}
-
-[[nodiscard]] LocalTrackRow
-cue_row(const formats::ResolvedCueSheet& sheet, const formats::ResolvedCueTrack& resolved,
-        const metadata::MetadataDocument& embedded_document,
-        const std::optional<core::LocalSourceRevision>& source_revision) {
-    const auto& cue = resolved.cue;
-    LocalTrackRow row;
-    row.raw_path = resolved.raw_source_path;
-    row.logical_reference = cue_logical_reference(sheet.raw_cue_path, cue);
-    row.segment = resolved.sample_range;
-    row.metadata = embedded_document;
-    row.source_revision = source_revision;
-    for (const auto& remark : cue.remarks) {
-        append_metadata_value(row.metadata, remark.name, remark.value,
-                              metadata::FieldProvenance::segment);
-    }
-    append_metadata_value(row.metadata, "TITLE", cue.title.value_or(std::string{}),
-                          metadata::FieldProvenance::sidecar);
-    append_metadata_value(row.metadata, "ARTIST", cue.performer.value_or(std::string{}),
-                          metadata::FieldProvenance::sidecar);
-    append_metadata_value(row.metadata, "ALBUM", cue.album_title.value_or(std::string{}),
-                          metadata::FieldProvenance::sidecar);
-    append_metadata_value(row.metadata, "ALBUMARTIST", cue.album_performer.value_or(std::string{}),
-                          metadata::FieldProvenance::sidecar);
-    append_metadata_value(row.metadata, "SONGWRITER", cue.songwriter.value_or(std::string{}),
-                          metadata::FieldProvenance::sidecar);
-    append_metadata_value(row.metadata, "ISRC", cue.isrc.value_or(std::string{}),
-                          metadata::FieldProvenance::sidecar);
-    // REM values retain source order at segment scope. The established CUE
-    // policy selects the last DATE as the effective sidecar projection.
-    append_metadata_value(row.metadata, "DATE", cue_remark(cue, "DATE"),
-                          metadata::FieldProvenance::sidecar);
-    append_metadata_value(row.metadata, "TRACKNUMBER", std::to_string(cue.track_number),
-                          metadata::FieldProvenance::sidecar);
-    row.duration_ms = resolved.duration_ms;
-    project_display_metadata(row);
-    row.probed = true;
-    return row;
+    return listed;
 }
 
 } // namespace
@@ -413,10 +370,30 @@ void Workspace::finishArtworkLoad() {
 
 void Workspace::startDiscovery(std::vector<std::string> raw_paths, QString target_document_id,
                                const int insertion_row, const bool replace_and_play) {
-    if (discovery_running_) {
-        view_->showMessage(QStringLiteral("A folder scan is already running"), 3'000);
+    // ADR-0356: opened by this computer's engine -- one at a time, and not
+    // before it is reached, as at a start with files to open.
+    if (fileWorkOf(EngineKey::local()) == nullptr) {
+        view_->showMessage(tr("Opening as soon as this computer's engine is reached"), 5'000);
+    }
+    pending_discoveries_.push_back(
+        PendingDiscovery{.raw_paths = std::move(raw_paths),
+                         .target_document_id = std::move(target_document_id),
+                         .insertion_row = insertion_row,
+                         .replace_and_play = replace_and_play});
+    startNextDiscovery();
+}
+
+void Workspace::startNextDiscovery() {
+    if (discovery_running_ || pending_discoveries_.empty() ||
+        fileWorkOf(EngineKey::local()) == nullptr) {
         return;
     }
+    auto next = std::move(pending_discoveries_.front());
+    pending_discoveries_.pop_front();
+    auto raw_paths = std::move(next.raw_paths);
+    auto target_document_id = std::move(next.target_document_id);
+    const auto insertion_row = next.insertion_row;
+    const auto replace_and_play = next.replace_and_play;
     discovery_running_ = true;
     discovery_target_document_ = std::move(target_document_id);
     discovery_insertion_row_ = insertion_row;
@@ -426,112 +403,30 @@ void Workspace::startDiscovery(std::vector<std::string> raw_paths, QString targe
     discovery_replace_and_play_ = replace_and_play;
     connect(&discovery_watcher_, &QFutureWatcher<DiscoveryOutcome>::finished, this,
             &Workspace::finishDiscovery, Qt::SingleShotConnection);
-    discovery_watcher_.setFuture(QtConcurrent::run([paths = std::move(raw_paths),
-                                                    cancellation = work_cancellation_.token()] {
-        auto discovered =
-            core::discover_local_sources(std::span{paths.data(), paths.size()}, cancellation,
-                                         discovery_row_limit, std::span{audio_extensions});
-        DiscoveryOutcome outcome{.rows = {},
-                                 .issues = std::move(discovered.issues),
-                                 .cancelled = discovered.cancelled,
-                                 .truncated = discovered.truncated};
-        std::vector<std::optional<formats::ResolvedCueSheet>> resolved_cues(
-            discovered.raw_files.size());
-        std::unordered_set<std::string> cue_sources;
-        std::unordered_map<std::string, metadata::LocalMetadataRead> cue_metadata;
-
-        // Resolve cues first so an audio file referenced by a successfully
-        // expanded sheet is not also inserted as one duplicate whole-file
-        // row when both came from the same intake batch.
-        for (std::size_t index = 0U; index < discovered.raw_files.size(); ++index) {
-            if (cancellation.is_cancellation_requested()) {
-                outcome.cancelled = true;
-                break;
+    // ADR-0356: what was opened is this computer's, walked and read by its
+    // engine; the rows then fill as every tab's do.
+    discovery_watcher_.setFuture(
+        QtConcurrent::run([work = fileWorkOf(EngineKey::local()), paths = std::move(raw_paths)] {
+            DiscoveryOutcome outcome;
+            if (!work) {
+                outcome.failure = tr("this computer's engine is not reached");
+                return outcome;
             }
-            const auto& raw_path = discovered.raw_files[index];
-            if (!is_cue_path(raw_path)) {
-                continue;
+            auto opened = work->open_paths(paths);
+            if (!opened) {
+                outcome.failure = QString::fromStdString(opened.error().message);
+                return outcome;
             }
-            auto resolved = formats::resolve_external_cue_sheet(raw_path, cancellation);
-            if (!resolved) {
-                outcome.issues.push_back(core::LocalSourceIssue{
-                    .raw_path = raw_path, .error = std::move(resolved.error())});
-                continue;
+            outcome.unopened = opened->unopened;
+            outcome.truncated = opened->truncated;
+            std::vector<persistence::ListItem> items;
+            items.reserve(opened->items.size());
+            for (auto& item : opened->items) {
+                items.push_back(list_item_of_opened(std::move(item)));
             }
-            for (const auto& physical : resolved->physical_sources) {
-                cue_sources.insert(physical);
-                if (!cue_metadata.contains(physical)) {
-                    if (auto read = metadata::read_local_metadata(physical, cancellation); read) {
-                        cue_metadata.emplace(physical, std::move(*read));
-                    }
-                }
-            }
-            resolved_cues[index] = std::move(*resolved);
-        }
-
-        bool row_limit_reached = false;
-        for (std::size_t index = 0U;
-             index < discovered.raw_files.size() && !outcome.cancelled && !row_limit_reached;
-             ++index) {
-            const auto& raw_path = discovered.raw_files[index];
-            if (is_cue_path(raw_path)) {
-                if (!resolved_cues[index]) {
-                    continue;
-                }
-                for (const auto& resolved_track : resolved_cues[index]->tracks) {
-                    if (outcome.rows.size() == discovery_row_limit) {
-                        outcome.truncated = true;
-                        row_limit_reached = true;
-                        outcome.issues.push_back(core::LocalSourceIssue{
-                            .raw_path = raw_path,
-                            .error =
-                                core::Error{
-                                    .code = core::ErrorCode::limit_exceeded,
-                                    .message = "CUE expansion reached the local row limit",
-                                    .context = {},
-                                },
-                        });
-                        break;
-                    }
-                    const auto embedded = cue_metadata.find(resolved_track.raw_source_path);
-                    if (embedded == cue_metadata.end()) {
-                        outcome.rows.push_back(
-                            cue_row(*resolved_cues[index], resolved_track, {}, std::nullopt));
-                    } else {
-                        outcome.rows.push_back(cue_row(*resolved_cues[index], resolved_track,
-                                                       embedded->second.document,
-                                                       embedded->second.source_revision));
-                    }
-                }
-                continue;
-            }
-
-            std::error_code canonical_error;
-            const auto canonical =
-                std::filesystem::canonical(std::filesystem::path{raw_path}, canonical_error);
-            if (!canonical_error && cue_sources.contains(canonical.native())) {
-                continue;
-            }
-            if (outcome.rows.size() == discovery_row_limit) {
-                outcome.truncated = true;
-                row_limit_reached = true;
-                outcome.issues.push_back(core::LocalSourceIssue{
-                    .raw_path = raw_path,
-                    .error =
-                        core::Error{
-                            .code = core::ErrorCode::limit_exceeded,
-                            .message = "Local intake reached the row limit",
-                            .context = {},
-                        },
-                });
-                continue;
-            }
-            LocalTrackRow row;
-            row.raw_path = raw_path;
-            outcome.rows.push_back(std::move(row));
-        }
-        return outcome;
-    }));
+            outcome.rows = rowsOfItems(items);
+            return outcome;
+        }));
 }
 
 void Workspace::finishDiscovery() {
@@ -539,6 +434,7 @@ void Workspace::finishDiscovery() {
     auto result = discovery_watcher_.result();
     auto* tab = tabForDocument(discovery_target_document_);
     if (tab == nullptr || (discovery_anchored_ && !discovery_insertion_anchor_.isValid())) {
+        startNextDiscovery();
         return;
     }
     // This computer's files found for another engine's list: each as that
@@ -594,16 +490,19 @@ void Workspace::finishDiscovery() {
         enqueueUnprobedRows(*tab);
         syncArtwork(*tab);
     }
-    if (!result.issues.empty()) {
+    if (!result.failure.isEmpty()) {
+        view_->showMessage(tr("Nothing could be opened: %1").arg(result.failure), 5'000);
+    } else if (result.unopened > 0U) {
         view_->showMessage(
             QStringLiteral("%1 entr%2 could not be opened")
-                .arg(result.issues.size())
-                .arg(result.issues.size() == 1U ? QStringLiteral("y") : QStringLiteral("ies")),
+                .arg(result.unopened)
+                .arg(result.unopened == 1U ? QStringLiteral("y") : QStringLiteral("ies")),
             5'000);
     }
     if (result.truncated) {
         view_->showMessage(QStringLiteral("Folder scan hit the file limit"), 5'000);
     }
+    startNextDiscovery();
 }
 
 } // namespace trackknife::bench

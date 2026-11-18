@@ -187,9 +187,6 @@ class LocalListModel final : public QAbstractTableModel {
 
     void replaceRows(std::vector<LocalTrackRow> rows, bool remember = false, QString label = {});
     void appendRows(std::vector<LocalTrackRow> rows, int insertion_row = -1, bool remember = true);
-    // ADR-0153: stores on-demand probed technicals onto every row of the
-    // given physical source.
-    void applyTechnicals(const std::string& raw_path, const LocalTrackTechnicals& technicals);
     // ADR-0179: applies stored ratings by content-identity hash to every row
     // whose track hash appears in the map.
     void applyRatings(const QHash<QString, unsigned>& ratings);

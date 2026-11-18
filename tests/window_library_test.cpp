@@ -640,7 +640,8 @@ void BenchMainWindowTest::Library::cueSheetsExpandIntoPersistentSegmentRows() {
                  std::optional<std::string>{"First Cue Track"});
         QCOMPARE(rows[0].metadata.first_effective_value("album_artist"),
                  std::optional<std::string>{"Cue Artist"});
-        QVERIFY(rows[0].source_revision.has_value());
+        // ADR-0356: a sheet's track is its words and range, as an engine's
+        // list has it -- no revision of the audio file.
         QVERIFY(window.close());
     }
 

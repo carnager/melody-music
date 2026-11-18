@@ -23,6 +23,7 @@
 #include "trackknife/engine/catalogue.hpp"
 #include "trackknife/engine/catalogue_methods.hpp"
 #include "trackknife/engine/dynamic_rules.hpp"
+#include "trackknife/engine/file_work_methods.hpp"
 #include "trackknife/engine/list_continuation.hpp"
 #include "trackknife/engine/list_methods.hpp"
 #include "trackknife/engine/playback_methods.hpp"
@@ -134,6 +135,11 @@ class RecordingEngine final {
             library_.filePath(QStringLiteral("library.sqlite3")).toStdString()});
         static_cast<void>(catalogue_->prepare());
         engine::register_catalogue_methods(outer_, *catalogue_);
+        // And file work, as every engine does: files opened in a window are
+        // walked and read by it (ADR-0356).
+        engine::register_file_work_methods(
+            outer_, std::filesystem::path{
+                        library_.filePath(QStringLiteral("state.sqlite3")).toStdString()});
         // An engine of this build's protocol and level, as every engine says.
         outer_.on("engine.info", [](const protocol::Json&) {
             return core::Result<protocol::Json>{
@@ -1240,8 +1246,8 @@ void EnginePlaybackTest::anEngineQueueNoListHoldsBecomesATab() {
     (*server)->stop();
 }
 
-// The unchanged path: no engine configured, so the window plays it itself and
-// nothing about the local workspace is disturbed.
+// No engine reached: what is opened waits for this computer's engine to walk
+// and read it (ADR-0356), and nothing plays.
 void EnginePlaybackTest::withoutAnEngineNothingChanges() {
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
@@ -1260,10 +1266,8 @@ void EnginePlaybackTest::withoutAnEngineNothingChanges() {
     QVERIFY(view != nullptr);
     auto* model = qobject_cast<LocalListModel*>(view->model());
     QVERIFY(model != nullptr);
-    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(), 1, 5'000);
-
-    emit view->doubleClicked(model->index(0, 0));
-    QTest::qWait(200);
+    QTest::qWait(500);
+    QCOMPARE(model->rowCount(), 0);
     // ADR-0226: no engine, nothing plays -- the window has no player of its
     // own to fall back on, and says so rather than pretending.
     QCOMPARE(window.property("trackknife-engine-playback").toString(),

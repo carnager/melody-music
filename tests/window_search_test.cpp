@@ -23,7 +23,7 @@ class BenchMainWindowTest::Search final : public window_test::Fixture {
     void savedSearchesCanBeManagedAndReopened();
     void searchDialogFiltersTabAndOpensResults();
     void searchResultTabLoadsCovers();
-    void searchDialogProbesMissingTechnicalsOnDemand();
+    void searchDialogSearchesTheTabsRows();
     void searchPresetsAreGroupedAndPrompt();
     void quickAlbumSearchesTheLibraryChosen();
     void aKeptSearchOpensAtOnce();
@@ -520,7 +520,7 @@ void BenchMainWindowTest::Search::savedSearchesCanBeManagedAndReopened() {
     };
     {
         CatalogueSource catalogues{database};
-        SearchDialog dialog{catalogues, EngineKey::local(), access, {}};
+        SearchDialog dialog{catalogues, EngineKey::local(), access};
         dialog.show();
         auto* input = dialog.findChild<QLineEdit*>(QStringLiteral("bench-search-input"));
         auto* scope = dialog.findChild<QComboBox*>(QStringLiteral("bench-search-scope"));
@@ -757,54 +757,40 @@ void BenchMainWindowTest::Search::searchResultTabLoadsCovers() {
     dialog->close();
 }
 
-void BenchMainWindowTest::Search::searchDialogProbesMissingTechnicalsOnDemand() {
-    QTemporaryDir media;
-    QVERIFY(media.isValid());
-    const auto flac_path = media.filePath(QStringLiteral("tone.flac"));
-    QVERIFY(materialize_audio_fixture(QStringLiteral("tagged-tone-flac.b64"), flac_path));
-    const auto encoded = QFile::encodeName(flac_path);
-
+void BenchMainWindowTest::Search::searchDialogSearchesTheTabsRows() {
+    // ADR-0355: a tab's rows come filled by their engine, technicals and
+    // all, so a technical query reads them as they are -- nothing probed.
     LocalTrackRow row;
-    row.raw_path = std::string{encoded.constData(), static_cast<std::size_t>(encoded.size())};
+    row.raw_path = "/music/tone.flac";
     row.title = "Restored";
     row.metadata.fields.push_back({.canonical_name = "title",
                                    .native_name = "TITLE",
                                    .values = {"Restored"},
                                    .qualifier = {},
                                    .provenance = metadata::FieldProvenance::embedded});
+    row.technicals =
+        LocalTrackTechnicals{.codec = "flac", .sample_rate = 44'100, .bits = 16, .channels = 2};
     row.probed = true;
 
-    std::vector<std::pair<std::string, LocalTrackTechnicals>> reported;
     CatalogueSource catalogues{std::filesystem::path{}};
     SearchDialog dialog{catalogues, EngineKey::local(),
                         [&row]() -> std::optional<SearchDialog::TabSnapshot> {
                             return SearchDialog::TabSnapshot{QStringLiteral("Fixture"), {row}};
-                        },
-                        [&reported](std::string path, LocalTrackTechnicals technicals) {
-                            reported.emplace_back(std::move(path), technicals);
                         }};
     dialog.show();
     auto* scope = dialog.findChild<QComboBox*>(QStringLiteral("bench-search-scope"));
     auto* input = dialog.findChild<QLineEdit*>(QStringLiteral("bench-search-input"));
     auto* mode = dialog.findChild<QCheckBox*>(QStringLiteral("bench-search-query-mode"));
     auto* results = dialog.findChild<QListWidget*>(QStringLiteral("bench-search-results"));
-    auto* status = dialog.findChild<QLabel*>(QStringLiteral("bench-search-status"));
-    QVERIFY(scope && input && mode && results && status);
+    QVERIFY(scope && input && mode && results);
     scope->setCurrentIndex(1);
     mode->setChecked(true);
     input->setText(QStringLiteral("samplerate GREATER 8000"));
     QTRY_COMPARE_WITH_TIMEOUT(results->count(), 1, 15'000);
-    QVERIFY(status->text().contains(QStringLiteral("scanned 1 file")));
-    QCOMPARE(reported.size(), 1U);
-    QCOMPARE(reported.front().first, row.raw_path);
-    QCOMPARE(reported.front().second.codec, std::string{"flac"});
-
-    // Metadata-only queries never probe.
-    reported.clear();
+    input->setText(QStringLiteral("samplerate GREATER 48000"));
+    QTRY_COMPARE(results->count(), 0);
     input->setText(QStringLiteral("title HAS restored"));
     QTRY_COMPARE(results->count(), 1);
-    QVERIFY(reported.empty());
-    QVERIFY(!status->text().contains(QStringLiteral("scanned")));
 
     // ADR-0179: tab rows expose their loaded content-identity ratings to
     // rating predicates without touching the library store.
@@ -824,7 +810,7 @@ void BenchMainWindowTest::Search::searchDialogProbesMissingTechnicalsOnDemand() 
 // translator's message, and opens results through the window callback.
 void BenchMainWindowTest::Search::searchPresetsAreGroupedAndPrompt() {
     CatalogueSource catalogues{std::filesystem::path{}};
-    SearchDialog dialog{catalogues, EngineKey::local(), {}, {}};
+    SearchDialog dialog{catalogues, EngineKey::local(), {}};
     dialog.show();
     auto* input = dialog.findChild<QLineEdit*>(QStringLiteral("bench-search-input"));
     auto* scope = dialog.findChild<QComboBox*>(QStringLiteral("bench-search-scope"));
