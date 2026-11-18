@@ -118,9 +118,11 @@ class Catalogue {
             const core::CancellationToken& cancellation = {}, bool changed_only = false) = 0;
 
     // A track's cover, as encoded bytes read on the engine's machine --
-    // embedded, else a folder image beside it. Only for a track in the
-    // library: this reads files on the engine's machine for anyone who can
-    // reach it, so it reads nothing else. Empty when there is no cover.
+    // embedded, else a folder image beside it. Any file's, as its tags are
+    // (metadata.read, catalogue.read_tracks): a list holds files from
+    // anywhere, and who reaches the engine is its own user or authenticated
+    // (ADR-0223), as for every file read (ADR-0356). Empty when there is no
+    // cover.
     [[nodiscard]] virtual core::Result<std::vector<unsigned char>>
     artwork(const std::string& raw_path,
             const core::CancellationToken& cancellation = {}) const = 0;

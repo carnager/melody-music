@@ -44,12 +44,4 @@ QImage artworkThumbnail(const std::vector<unsigned char>& bytes) {
     return reader.read();
 }
 
-QImage loadLocalArtwork(const std::string& raw_path, const core::CancellationToken& cancellation) {
-    if (cancellation.is_cancellation_requested()) {
-        return {};
-    }
-    auto image = artworkThumbnail(formats::load_track_artwork(raw_path, cancellation));
-    return cancellation.is_cancellation_requested() ? QImage{} : image;
-}
-
 } // namespace trackknife::ui

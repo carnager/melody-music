@@ -241,15 +241,8 @@ LocalCatalogue::rated_tracks(const std::string_view field,
 core::Result<std::vector<unsigned char>>
 LocalCatalogue::artwork(const std::string& raw_path,
                         const core::CancellationToken& cancellation) const {
-    auto library = open();
-    if (!library) {
-        return std::unexpected(std::move(library.error()));
-    }
-    // In the library, or not read: a path missing from the index is an
-    // error there, which is the answer here too.
-    if (auto known = library->cached_tracks({raw_path}, cancellation); !known) {
-        return std::unexpected(std::move(known.error()));
-    }
+    // ADR-0356: any file's, as its tags are (catalogue.read_tracks) -- a
+    // list holds files from anywhere.
     return formats::load_track_artwork(raw_path, cancellation);
 }
 

@@ -31,11 +31,17 @@ import reading every entry's tags. AGENTS.md: the UI asks, the core answers.
    so a technical query reads them as they are.
 4. **An imported playlist is not read.** Its rows keep the playlist's title
    and duration and are filled by the tab's engine.
+5. **Covers come from the tab's engine**, this computer's too
+   (`catalogue.artwork`), for any file, as its tags are: the rule that an
+   engine gives covers only of indexed or held files is dropped. It never
+   limited what a peer could read -- `metadata.read` reads any path -- and
+   every peer is the engine's own user or authenticated (ADR-0223).
 
 ## Consequences
 
 - No code in `src/bench`, `src/workspace` or `src/uicommon` calls the
-  probe, the tag reader, folder discovery or the CUE resolver.
+  probe, the tag reader, the cover reader, folder discovery or the CUE
+  resolver (`ui::loadLocalArtwork` is gone).
 - A CUE row has no revision of its audio file -- as an engine list's CUE
   item never had -- so it is not followed through a move of that file; nor
   does it carry the sheet's track number, songwriter or ISRC.

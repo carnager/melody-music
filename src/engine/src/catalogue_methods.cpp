@@ -788,63 +788,59 @@ void register_catalogue_methods(protocol::Dispatcher& dispatcher, Catalogue& cat
 
     // The cover itself, read where the files are, so a client shows it with
     // no access to them. Null when the track has none.
-    dispatcher.on(
-        "catalogue.artwork", [&catalogue, holds](const Json& params) -> core::Result<Json> {
-            // By a track, or by an album: a grid of albums knows their keys, not
-            // their files, and asking for a file first would double the trips.
-            std::string raw_path;
-            if (const auto album = params.find("album_key");
-                album != params.end() && album->is_string()) {
-                auto key = protocol::decode_raw_path(album->get<std::string>());
-                if (!key) {
-                    return std::unexpected(
-                        bad_params("album_key is not an encoded key", "album_key"));
-                }
-                auto source = catalogue.artwork_source(*key);
-                if (!source) {
-                    return std::unexpected(std::move(source.error()));
-                }
-                if (!*source) {
-                    Json none = Json::object();
-                    none["image"] = Json(nullptr);
-                    return none;
-                }
-                raw_path = std::move(**source);
-            } else {
-                auto encoded = required_string(params, "path");
-                if (!encoded) {
-                    return std::unexpected(std::move(encoded.error()));
-                }
-                auto decoded = protocol::decode_raw_path(*encoded);
-                if (!decoded) {
-                    return std::unexpected(bad_params("path is not an encoded path", "path"));
-                }
-                raw_path = std::move(*decoded);
+    dispatcher.on("catalogue.artwork", [&catalogue](const Json& params) -> core::Result<Json> {
+        // By a track, or by an album: a grid of albums knows their keys, not
+        // their files, and asking for a file first would double the trips.
+        std::string raw_path;
+        if (const auto album = params.find("album_key");
+            album != params.end() && album->is_string()) {
+            auto key = protocol::decode_raw_path(album->get<std::string>());
+            if (!key) {
+                return std::unexpected(bad_params("album_key is not an encoded key", "album_key"));
             }
-            // Held to play: streamed to an agent whether indexed or not, so its
-            // cover is no secret either.
-            auto image = holds && holds(raw_path) ? formats::load_track_artwork(raw_path)
-                                                  : catalogue.artwork(raw_path);
-            if (!image) {
-                return std::unexpected(std::move(image.error()));
+            auto source = catalogue.artwork_source(*key);
+            if (!source) {
+                return std::unexpected(std::move(source.error()));
             }
-            // A client showing it small asks for it small: a phone's grid of
-            // covers is otherwise megabytes over mobile data. Scaled here, where
-            // the original is, so only the thumbnail travels.
-            if (const auto size = params.value("size", 0); size > 0 && !image->empty()) {
-                auto fitted = formats::fit_cover(*image, size);
-                if (!fitted) {
-                    return std::unexpected(std::move(fitted.error()));
-                }
-                *image = std::move(*fitted);
+            if (!*source) {
+                Json none = Json::object();
+                none["image"] = Json(nullptr);
+                return none;
             }
-            Json answer = Json::object();
-            answer["image"] =
-                image->empty() ? Json(nullptr)
-                               : Json(protocol::encode_raw_path(std::string_view{
-                                     reinterpret_cast<const char*>(image->data()), image->size()}));
-            return answer;
-        });
+            raw_path = std::move(**source);
+        } else {
+            auto encoded = required_string(params, "path");
+            if (!encoded) {
+                return std::unexpected(std::move(encoded.error()));
+            }
+            auto decoded = protocol::decode_raw_path(*encoded);
+            if (!decoded) {
+                return std::unexpected(bad_params("path is not an encoded path", "path"));
+            }
+            raw_path = std::move(*decoded);
+        }
+        // ADR-0356: any file's, as its tags are.
+        auto image = catalogue.artwork(raw_path);
+        if (!image) {
+            return std::unexpected(std::move(image.error()));
+        }
+        // A client showing it small asks for it small: a phone's grid of
+        // covers is otherwise megabytes over mobile data. Scaled here, where
+        // the original is, so only the thumbnail travels.
+        if (const auto size = params.value("size", 0); size > 0 && !image->empty()) {
+            auto fitted = formats::fit_cover(*image, size);
+            if (!fitted) {
+                return std::unexpected(std::move(fitted.error()));
+            }
+            *image = std::move(*fitted);
+        }
+        Json answer = Json::object();
+        answer["image"] = image->empty()
+                              ? Json(nullptr)
+                              : Json(protocol::encode_raw_path(std::string_view{
+                                    reinterpret_cast<const char*>(image->data()), image->size()}));
+        return answer;
+    });
 
     // ADR-0276: a track's lyrics, found where the files are. Null when it has
     // none. Held to play, it may be outside the library, as for its cover.

@@ -193,16 +193,14 @@ void Workspace::insertRemotePaths(ListTab& tab, std::vector<std::string> raw_pat
 }
 
 void Workspace::syncArtwork(ListTab& tab) {
-    // A remote tab's files are on the remote's machine (ADR-0227), and
-    // nothing of it need be mounted here: its covers come from its engine.
-    std::shared_ptr<engine::Catalogue> engine;
-    if (const auto key = EngineKey::of(tab.document); !key.isLocal()) {
-        auto* source = catalogueOf(key);
-        if (source == nullptr) {
-            return;
-        }
-        engine = source->openDeferred();
+    // ADR-0356: a tab's covers come from its engine, as its rows do --
+    // this computer's as well as one elsewhere, of which nothing need be
+    // mounted here (ADR-0227).
+    auto* source = catalogueOf(EngineKey::of(tab.document));
+    if (source == nullptr) {
+        return;
     }
+    std::shared_ptr<engine::Catalogue> engine{source->openDeferred()};
     const auto& rows = tab.model->rows();
     for (int row = 0; row < static_cast<int>(rows.size()); ++row) {
         const auto& track = rows[static_cast<std::size_t>(row)];
@@ -240,15 +238,12 @@ QImage Workspace::coverFor(const LocalTrackRow& track, const EngineKey& engine_k
         return *cached;
     }
     // Not in any list: fetched as a tab's would be, from the engine that has
-    // the file when it is another's.
-    std::shared_ptr<engine::Catalogue> engine;
-    if (!engine_key.isLocal()) {
-        auto* catalogue = catalogueOf(engine_key);
-        if (catalogue == nullptr) {
-            return {};
-        }
-        engine = catalogue->openDeferred();
+    // the file.
+    auto* catalogue = catalogueOf(engine_key);
+    if (catalogue == nullptr) {
+        return {};
     }
+    std::shared_ptr<engine::Catalogue> engine{catalogue->openDeferred()};
     if (!artwork_pending_.contains(key)) {
         artwork_pending_.insert(key);
         artwork_queue_.push_back(
@@ -305,13 +300,9 @@ void Workspace::pumpArtworkQueue() {
     artwork_watcher_.setFuture(
         QtConcurrent::run([raw_path = std::move(job.raw_path), engine = std::move(job.engine),
                            outcome = artwork_outcome_, cancellation = work_cancellation_.token()] {
-            if (engine) {
-                const auto bytes = engine->artwork(raw_path, cancellation);
-                outcome->image = bytes ? ui::artworkThumbnail(*bytes) : QImage{};
-                outcome->failed = !bytes;
-            } else {
-                outcome->image = ui::loadLocalArtwork(raw_path, cancellation);
-            }
+            const auto bytes = engine->artwork(raw_path, cancellation);
+            outcome->image = bytes ? ui::artworkThumbnail(*bytes) : QImage{};
+            outcome->failed = !bytes;
 #if defined(MELODY_THREAD_SANITIZER)
             __tsan_release(outcome.get());
 #endif
