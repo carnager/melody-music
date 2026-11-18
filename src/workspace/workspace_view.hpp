@@ -72,7 +72,7 @@ class WorkspaceView {
     // -- and one attached, now answering, is named as it says; one about to
     // be let go of is no longer shown, and when it is gone what was chosen
     // among them is chosen again. Settings' engines were connected again.
-    virtual void engineConnected(Workspace::EngineLink& engine, bool first) = 0;
+    virtual void engineConnected(Workspace::EngineLink& engine) = 0;
     virtual void engineAttached(Workspace::EngineLink& engine) = 0;
     // ADR-0234: it took the id it gave in place of `from`, and its lists
     // with it when `lists_follow`.

@@ -150,7 +150,6 @@ void BenchMainWindowTest::Library::listRowsWhoseFilesAreGoneAreGreyed() {
                                        .engine = {}};
     for (const auto& path : {here_raw, gone_raw}) {
         persistence::ListItem item;
-        item.source = persistence::ListSource::local;
         item.source_reference = path;
         document.items.push_back(item);
     }

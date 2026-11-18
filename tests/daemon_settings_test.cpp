@@ -33,11 +33,6 @@ std::filesystem::path root;
     return path;
 }
 
-[[nodiscard]] std::string contents(const std::filesystem::path& path) {
-    std::ifstream stream{path, std::ios::binary};
-    return {std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
-}
-
 [[nodiscard]] trackknife::core::Result<Settings> settings_of(const std::filesystem::path& config,
                                                              std::vector<std::string> flags = {}) {
     std::vector<std::string> owned{"--config", config.string()};
@@ -128,11 +123,6 @@ void theFileAndFlagsOverIt() {
 void refusesWithTheLine() {
     CHECK(refusal("name = a\nbitrate = 3\n")
               .ends_with("refused.conf:2: bitrate is not a setting melodyd.conf has"));
-    CHECK(refusal("agent-bitrate-away = 96\n")
-              .ends_with(":1: agent-bitrate-away is not a setting melodyd.conf has; it is "
-                         "agent-stream-away now "
-                         "(original, or opus 128)"));
-    CHECK(refusal("play-for = a:1\n").find("[engine NAME] section now") != std::string::npos);
     CHECK(refusal("config = x\n").ends_with(":1: config is not a setting melodyd.conf has"));
     CHECK(refusal("agent = maybe\n").ends_with(":1: agent is yes or no, got maybe"));
     CHECK(refusal("agent-stream-home = flac\n")
@@ -196,51 +186,6 @@ void saysWhenOthersCanReadThePassword() {
     CHECK(plain && plain->notes.empty());
 }
 
-void convertsTheOldFile() {
-    const auto old = std::string{
-        "# melodyd on gemenon\n"
-        "MELODYD_OPTIONS=\"--name gemenon --agent --password-file "
-        "/home/you/.config/melody/password "
-        "--upnp --agent-bitrate-nearby 0 --agent-bitrate-away 96 "
-        "--play-for-music-root /mnt/all --play-for 10.8.0.1:6603 --play-for-name caprica "
-        "--play-for-bitrate-away 64 --play-for nas:6603\"\n"
-        "OTHER=1\n"};
-    const auto path = file("melodyd.conf", old);
-    const auto read = settings_of(path);
-    CHECK(read.has_value());
-    if (!read) {
-        std::cerr << read.error().message << '\n';
-        return;
-    }
-    CHECK(contents(std::filesystem::path{path.string() + ".old"}) == old);
-    const auto converted = contents(path);
-    CHECK(converted.find("# melodyd on gemenon\n# OTHER=1\n") != std::string::npos);
-    CHECK(converted.find("name = gemenon\nagent = yes\npassword-file = "
-                         "/home/you/.config/melody/password\nupnp = yes\n"
-                         "agent-stream-home = original\nagent-stream-away = opus 96\n") !=
-          std::string::npos);
-    CHECK(converted.find("[engine caprica]\naddress = 10.8.0.1:6603\nmusic-root = /mnt/all\n"
-                         "stream-away = opus 64\n") != std::string::npos);
-    // Unnamed, the section is named after its address; every group's
-    // defaults are its own.
-    CHECK(converted.find("[engine nas:6603]\naddress = nas:6603\nmusic-root = /mnt/all\n") !=
-          std::string::npos);
-    CHECK(read->engine_name == "gemenon");
-    CHECK(read->password_file == "/home/you/.config/melody/password");
-    CHECK(read->agent_away_kbps == 96);
-    CHECK(read->engines.size() == 2U);
-    CHECK(read->notes.size() == 1U && read->notes[0].starts_with("converted "));
-    // Once: read again, it is the new file.
-    const auto again = settings_of(path);
-    CHECK(again && again->notes.empty() && again->engine_name == "gemenon");
-
-    // What cannot be converted is left as it was, and said.
-    const auto odd = file("odd.conf", "MELODYD_OPTIONS=--frobnicate\n");
-    const auto refused = settings_of(odd);
-    CHECK(!refused && refused.error().message.find("--frobnicate") != std::string::npos);
-    CHECK(contents(odd) == "MELODYD_OPTIONS=--frobnicate\n");
-}
-
 void streams() {
     using trackknife::daemon::parse_stream;
     CHECK(parse_stream("original") == 0);
@@ -251,8 +196,6 @@ void streams() {
     CHECK(!parse_stream("opus 0"));
     CHECK(!parse_stream("opus 513"));
     CHECK(!parse_stream("Original"));
-    CHECK(trackknife::daemon::stream_text(0) == "original");
-    CHECK(trackknife::daemon::stream_text(96) == "opus 96");
 }
 
 // The skeleton melody-cli config starts a file from: taken as it is, and
@@ -304,7 +247,6 @@ int main() {
     refusesWithTheLine();
     whichFile();
     saysWhenOthersCanReadThePassword();
-    convertsTheOldFile();
     streams();
     theSkeletonHolds();
     std::filesystem::remove_all(root);

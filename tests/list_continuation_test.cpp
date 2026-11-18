@@ -146,7 +146,6 @@ int main(const int argc, char** argv) {
     {
         const auto listened = [&workspace](const std::string& path) {
             trackknife::persistence::ListItem item;
-            item.source = trackknife::persistence::ListSource::local;
             item.source_reference = path;
             auto revision = core::observe_local_source_revision(path);
             require(revision.has_value(), "the file is there");

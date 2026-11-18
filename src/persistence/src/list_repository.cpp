@@ -116,7 +116,7 @@ std::string listening_observation(const std::string_view path,
 }
 
 bool valid_listening_source(const ListItem& source) {
-    return source.source == ListSource::local && !source.source_reference.empty() &&
+    return !source.source_reference.empty() &&
            source.source_reference.find('\0') == std::string::npos && source.source_revision &&
            source.source_revision->inode != 0 &&
            (!source.segment || (source.segment->start_sample >= 0 &&

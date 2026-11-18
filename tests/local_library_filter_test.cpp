@@ -176,7 +176,6 @@ int main(const int argc, char** argv) {
     auto repository = persistence::ListRepository::open(base / "state.sqlite");
     CHECK(repository.has_value());
     persistence::ListItem listened;
-    listened.source = persistence::ListSource::local;
     listened.source_reference = jazz;
     const auto observed = core::observe_local_source_revision(jazz);
     CHECK(observed.has_value());

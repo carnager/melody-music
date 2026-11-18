@@ -27,14 +27,9 @@ bool Workspace::holdsLibrary(const EngineKey& engine) const {
     if (const auto* found = link(engine)) {
         return found->setting.address == library;
     }
-    // ADR-0234's placeholders, for an engine not reached yet: its address,
-    // or "remote", the first engine elsewhere.
+    // ADR-0234's placeholder, for an engine not reached yet: its address.
     if (engine.text().startsWith(QStringLiteral("address:"))) {
         return engine.text().mid(8) == library;
-    }
-    if (engine == EngineKey::remote()) {
-        const auto engines = loadRemoteEngines();
-        return !engines.empty() && engines.front().address == library;
     }
     return false;
 }

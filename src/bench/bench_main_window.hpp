@@ -225,7 +225,7 @@ class BenchMainWindow final : public QMainWindow, public WorkspaceView {
     [[nodiscard]] int currentRow(const ListTab& tab) override;
     void artworkLoaded(const QString& key) override;
     void workspaceRestored(bool restored) override;
-    void engineConnected(EngineLink& engine, bool first) override;
+    void engineConnected(EngineLink& engine) override;
     void engineAttached(EngineLink& engine) override;
     void engineRekeyed(EngineLink& engine, const EngineKey& from, bool lists_follow) override;
     void engineRemoving(EngineLink& engine) override;
@@ -704,10 +704,9 @@ class BenchMainWindow final : public QMainWindow, public WorkspaceView {
     // the window already knew of.
     void rememberEngineState(EnginePlayback* playback) { workspace_.rememberEngineState(playback); }
     // Builds the remote connection, its library panel and its default tab.
-    // ADR-0234: one engine elsewhere, as Settings name it; the first is the
-    // one an older release's remote lists belong to.
-    void connectRemoteEngine(const RemoteEngineSetting& setting, bool first) {
-        workspace_.connectRemoteEngine(setting, first);
+    // ADR-0234: one engine elsewhere, as Settings name it.
+    void connectRemoteEngine(const RemoteEngineSetting& setting) {
+        workspace_.connectRemoteEngine(setting);
     }
     // Settings changed: engines listed and not connected are connected,
     // those connected and no longer listed -- or now at another address or

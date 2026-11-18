@@ -156,12 +156,6 @@ void EngineFolderSession::browse(std::string path) {
             emit self->changed();
             return;
         }
-        // Places come with every listing; an older engine says none, and
-        // the ones known are kept.
-        if (self->shown_ && listed->home.empty() && listed->roots.empty()) {
-            listed->home = self->shown_->home;
-            listed->roots = self->shown_->roots;
-        }
         self->shown_ = std::move(*listed);
         self->refilter();
         emit self->changed();

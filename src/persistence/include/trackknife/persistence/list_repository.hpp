@@ -22,10 +22,7 @@
 
 namespace trackknife::persistence {
 
-// mpd documents are client-owned working lists of server tracks
-// (ADR-0181): every item is ListSource::mpd, rendered from its snapshot.
-enum class ListKind : std::uint8_t { scratch, saved, mpd };
-enum class ListSource : std::uint8_t { mpd, local };
+enum class ListKind : std::uint8_t { scratch, saved };
 
 struct SnapshotField {
     std::string name;
@@ -65,7 +62,6 @@ struct ListItem {
     // codebase ask whether two rows describe the same track, and that meaning
     // must not change.
     core::StableId entry_id{core::StableId::random()};
-    ListSource source{ListSource::mpd};
     std::optional<core::StableId> profile_id;
     // MPD URIs and local raw OS paths are stored as SQLite BLOBs. No UTF-8 or
     // URL interpretation occurs at this boundary.
@@ -83,12 +79,12 @@ struct ListItem {
 
     // Value equality over everything but entry_id; see the note above.
     friend bool operator==(const ListItem& left, const ListItem& right) {
-        return std::tie(left.source, left.profile_id, left.source_reference, left.logical_reference,
+        return std::tie(left.profile_id, left.source_reference, left.logical_reference,
                         left.segment, left.source_selection, left.duration_ms, left.source_revision,
-                        left.fields) ==
-               std::tie(right.source, right.profile_id, right.source_reference,
-                        right.logical_reference, right.segment, right.source_selection,
-                        right.duration_ms, right.source_revision, right.fields);
+                        left.fields) == std::tie(right.profile_id, right.source_reference,
+                                                 right.logical_reference, right.segment,
+                                                 right.source_selection, right.duration_ms,
+                                                 right.source_revision, right.fields);
     }
 };
 

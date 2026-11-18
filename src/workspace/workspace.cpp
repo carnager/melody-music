@@ -135,10 +135,8 @@ void Workspace::restoredWorkspace(const QString& error) {
     reattachToEngine();
     // ADR-0227: the remote engines too, after the lists for the same reason
     // -- their tabs may already be among them.
-    bool first = true;
     for (const auto& setting : loadRemoteEngines()) {
-        connectRemoteEngine(setting, first);
-        first = false;
+        connectRemoteEngine(setting);
     }
     view_->workspaceRestored(error.isEmpty());
 }

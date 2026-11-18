@@ -146,7 +146,6 @@ void local_listening_occurrences_are_idempotent_and_source_qualified() {
         auto repository = persistence::ListRepository::open(path);
         require(repository.has_value(), "occurrence database opens");
         persistence::ListItem source;
-        source.source = persistence::ListSource::local;
         source.source_reference = std::string{"/music/raw-"} + char(0xff) + ".flac";
         source.source_revision = core::LocalSourceRevision{.device = 1, .inode = 2, .size = 3};
         const auto unseen = repository->lookup_local_listening_history(source);
@@ -207,9 +206,6 @@ void local_listening_occurrences_are_idempotent_and_source_qualified() {
         ++replacement.source_revision->inode;
         require(repository->local_listening_key(replacement) != key,
                 "reused paths do not inherit counts");
-        replacement.source = persistence::ListSource::mpd;
-        require(!repository->record_local_listen(replacement, core::StableId::random(), 3000),
-                "server sources cannot write local history");
         replacement = source;
         replacement.source_revision.reset();
         require(!repository->local_listening_key(replacement), "revisionless sources are rejected");

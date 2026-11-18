@@ -38,7 +38,6 @@ void BenchMainWindowTest::ListEditing::currentTabHistoryPreservesOccurrences() {
     unplayed.title = "Unplayed";
     unplayed.source_revision = core::LocalSourceRevision{.device = 1, .inode = 3};
     persistence::ListItem source;
-    source.source = persistence::ListSource::local;
     source.source_reference = played.raw_path;
     source.source_revision = played.source_revision;
     QVERIFY(repository->record_local_listen(source, core::StableId::random(), 1000));

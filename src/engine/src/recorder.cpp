@@ -11,7 +11,6 @@ namespace trackknife::engine {
 
 persistence::ListItem listened_item(const audio::TrackSource& source) {
     persistence::ListItem item;
-    item.source = persistence::ListSource::local;
     item.source_reference = source.raw_path;
     // The file as it is now: listening history and resume are kept by what
     // was played, and the store refuses a source it cannot identify -- which,

@@ -520,7 +520,6 @@ void BenchMainWindowTest::Tabs::theWindowKeepsItsTabsNotTheLists() {
         window.show();
         QTRY_VERIFY(window.lists_restored_);
         persistence::ListItem item;
-        item.source = persistence::ListSource::local;
         item.source_reference = raw_path;
         item.duration_ms = 100;
         item.fields.push_back({.name = "title", .value = "Seeded"});
@@ -710,38 +709,26 @@ void BenchMainWindowTest::Tabs::persistsPinnedDuplicatedAndDirtyTabs() {
 }
 
 // ADR-0286: a tab's rows are its only copy now: kept with the window's data,
-// moved there once from the cache they were kept in, and a file that cannot
-// be read set aside and said -- never taken for an empty tab.
+// and a file that cannot be read set aside and said -- never taken for an
+// empty tab.
 void BenchMainWindowTest::Tabs::theTabStoreKeepsWhatItCannotRead() {
-    const auto cache =
-        QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/tabs");
     QDir{TabStore::defaultDirectory()}.removeRecursively();
-    QDir{cache}.removeRecursively();
-    QVERIFY(TabStore::defaultDirectory() != cache);
     const auto id = core::StableId::random();
     persistence::ListItem item;
-    item.source = persistence::ListSource::local;
     item.source_reference = "/music/kept.flac";
-    {
-        TabStore old{cache};
-        old.writeRows(persistence::ListDocument{.id = id,
-                                                .kind = persistence::ListKind::scratch,
-                                                .name = "Kept",
-                                                .pinned = false,
-                                                .dirty = false,
-                                                .items = {item},
-                                                .engine = {}});
-        old.flush();
-    }
-    QVERIFY(QFile::exists(cache + QStringLiteral("/") + QString::fromStdString(id.to_string()) +
-                          QStringLiteral(".tabcache")));
     TabStore store;
     QCOMPARE(store.directory(), TabStore::defaultDirectory());
-    QVERIFY(!QFile::exists(cache + QStringLiteral("/") + QString::fromStdString(id.to_string()) +
-                           QStringLiteral(".tabcache")));
-    const auto moved = store.readRows(id);
-    QVERIFY(moved.has_value() && moved->items.size() == 1U &&
-            moved->items.front().source_reference == "/music/kept.flac");
+    store.writeRows(persistence::ListDocument{.id = id,
+                                              .kind = persistence::ListKind::scratch,
+                                              .name = "Kept",
+                                              .pinned = false,
+                                              .dirty = false,
+                                              .items = {item},
+                                              .engine = {}});
+    store.flush();
+    const auto kept = store.readRows(id);
+    QVERIFY(kept.has_value() && kept->items.size() == 1U &&
+            kept->items.front().source_reference == "/music/kept.flac");
     QVERIFY(store.takeUnreadable().empty());
 
     // Damaged: set aside, named, and nothing read.

@@ -574,7 +574,6 @@ void register_catalogue_methods(protocol::Dispatcher& dispatcher, Catalogue& cat
                     return std::unexpected(bad_params("a path is not an encoded path", "sources"));
                 }
                 persistence::LibraryHistorySource source;
-                source.source.source = persistence::ListSource::local;
                 source.source.source_reference = std::move(*raw);
                 if (const auto revision = value.find("revision");
                     revision != value.end() && revision->is_array() && revision->size() == 5U) {

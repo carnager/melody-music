@@ -78,9 +78,7 @@ void BenchMainWindow::refreshFavorite(const EnginePlayback::State& state) {
             if (entry != favorite_entry_) {
                 return;
             }
-            // An engine older than favourites has none to offer.
             if (!answer) {
-                favorite_button_->setVisible(answer.error().code != core::ErrorCode::unsupported);
                 return;
             }
             const auto said = answer->value("favorites", protocol::Json::array());

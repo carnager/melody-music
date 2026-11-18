@@ -48,8 +48,6 @@ grep -q "password = (set)" "${work}/said" || fail "a password set is not echoed"
 cp "${MELODYD_CONFIG}" "${work}/before"
 ! "${cli}" config agent-stream-home flac 2>"${work}/said" || fail "a bad value is refused"
 grep -q "agent-stream-home is original, or opus" "${work}/said" || fail "and why is said"
-! "${cli}" config agent-bitrate-away 96 2>"${work}/said" || fail "an old key is refused"
-grep -q "it is agent-stream-away now" "${work}/said" || fail "with its new name"
 ! "${cli}" config --engine gemenon name x 2>/dev/null || fail "a key an [engine] has not is refused"
 cmp -s "${work}/before" "${MELODYD_CONFIG}" || fail "a refusal leaves the file as it was"
 

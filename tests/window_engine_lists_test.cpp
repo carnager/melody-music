@@ -34,7 +34,6 @@ class BenchMainWindowTest::EngineLists final : public window_test::Fixture {
     void aScratchTabNeverReachesItsEngine();
     void aPlayingTabsEditsReachTheQueueAsEdits();
     void aListDeletedElsewhereWhileBeingWrittenStaysDeleted();
-    void aRemovalLeftPendingByAnOlderReleaseIsCarriedOut();
     void upNextFromAnotherClientShows();
     void aListReplacedOnTheFollowedEngineMarksWhatPlays();
     void aRatingSetElsewhereShowsInTheTabs();
@@ -713,8 +712,9 @@ void BenchMainWindowTest::EngineLists::libraryAndFoldersAddToAChosenList() {
         return target.first == chosen_id && target.second == QStringLiteral("Chosen");
     }));
     QVERIFY(window
-                .listTargets(window.remoteEngine() != nullptr ? window.remoteEngine()->key
-                                                              : EngineKey::remote())
+                .listTargets(window.remoteEngine() != nullptr
+                                 ? window.remoteEngine()->key
+                                 : EngineKey::fromText(QStringLiteral("elsewhere")))
                 .empty());
 
     persistence::LibraryQuery albums;
@@ -937,39 +937,6 @@ void BenchMainWindowTest::EngineLists::aListDeletedElsewhereWhileBeingWrittenSta
     window.persistNow(false);
     QTRY_VERIFY(!window.list_sync_->busy());
     QVERIFY(!listed(id));
-    (*engine)->close();
-}
-
-// ADR-0234: pending removals are kept by engine key now; one an older release
-// left as "l:<id>" is still carried out on connecting. ADR-0286: it named a
-// working list, which the engine has set aside since -- so it is let go of,
-// and touches no saved playlist.
-void BenchMainWindowTest::EngineLists::aRemovalLeftPendingByAnOlderReleaseIsCarriedOut() {
-    auto engine = protocol::Client::connect(protocol::Endpoint{
-        .socket = engine_.socket().toStdString(), .host = {}, .port = 0, .token = {}});
-    QVERIFY(engine.has_value());
-    const auto kept = (*engine)->call(
-        "list.save",
-        protocol::Json{{"name", "Kept"}, {"kind", "saved"}, {"items", protocol::Json::array()}});
-    QVERIFY(kept.has_value());
-    const auto kept_id = kept->value("id", std::string{});
-    const auto gone_id = core::StableId::random().to_string();
-    QSettings{}.setValue(QStringLiteral("lists/pending-removals"),
-                         QStringList{QStringLiteral("l:") + QString::fromStdString(gone_id)});
-    const auto listed = [&engine](const std::string& id) {
-        auto all = (*engine)->call("list.all");
-        return all && std::ranges::any_of(all->value("lists", protocol::Json::array()),
-                                          [&id](const protocol::Json& list) {
-                                              return list.value("id", std::string{}) == id;
-                                          });
-    };
-    BenchMainWindow window;
-    window.show();
-    QTRY_VERIFY(window.lists_restored_);
-    QTRY_VERIFY(
-        QSettings{}.value(QStringLiteral("lists/pending-removals")).toStringList().isEmpty());
-    QVERIFY(listed(kept_id));
-    QVERIFY((*engine)->call("list.delete", protocol::Json{{"id", kept_id}}).has_value());
     (*engine)->close();
 }
 

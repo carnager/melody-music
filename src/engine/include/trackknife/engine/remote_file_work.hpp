@@ -194,8 +194,7 @@ class RemoteFileWork final {
         std::vector<std::string> folders;
         // Of `folders`, those that are links to a folder (asked for).
         std::vector<std::string> linked;
-        // Where browsing starts: the engine's home and its music folders;
-        // empty from an engine older than level 20.
+        // Where browsing starts: the engine's home and its music folders.
         std::string home;
         std::vector<std::string> roots;
     };

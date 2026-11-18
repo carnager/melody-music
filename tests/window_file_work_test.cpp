@@ -2149,7 +2149,6 @@ void BenchMainWindowTest::FileWork::combinedPublicationStartupRecoversMetadataAn
         window.show();
         QTRY_VERIFY(window.lists_restored_);
         persistence::ListItem item;
-        item.source = persistence::ListSource::local;
         item.source_reference = source_raw;
         item.source_revision = source_read->source_revision;
         auto* tab =

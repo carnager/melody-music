@@ -21,7 +21,6 @@ class EngineKey final {
   public:
     EngineKey() = default;
     [[nodiscard]] static EngineKey local() { return EngineKey{QStringLiteral("local")}; }
-    [[nodiscard]] static EngineKey remote() { return EngineKey{QStringLiteral("remote")}; }
     // The engine a list belongs to, as the list records it.
     [[nodiscard]] static EngineKey of(const persistence::ListDocument& document) {
         return document.engine.empty() ? local()

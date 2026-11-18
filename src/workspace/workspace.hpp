@@ -146,11 +146,10 @@ class Workspace final : public QObject {
     struct PendingRelocation {
         std::string from;
         std::string to;
-        // The engines told, by key; "*" is every engine elsewhere -- what an
-        // older release's "the remote has it" means now.
+        // The engines told, by key.
         std::set<QString> done;
         [[nodiscard]] bool doneFor(const EngineKey& engine) const {
-            return done.contains(engine.text()) || (!engine.isLocal() && done.contains("*"));
+            return done.contains(engine.text());
         }
     };
     struct DiscoveryOutcome {
@@ -685,11 +684,10 @@ class Workspace final : public QObject {
     }
 
     // The engines connected: this computer's first, as the workspace
-    // starts; then each remote in Settings -- the `first` of them owning the
-    // lists an older release made for "the remote".
+    // starts; then each engine elsewhere in Settings.
     void connectLocalEngine();
     // ADR-0286: the working lists an engine set aside, offered once a run.
-    void connectRemoteEngine(const RemoteEngineSetting& setting, bool first);
+    void connectRemoteEngine(const RemoteEngineSetting& setting);
     // Settings changed: engines no longer listed let go, new ones connected.
     void syncRemoteEngines();
     // Settings were saved: the engines, this computer's engine (restarted

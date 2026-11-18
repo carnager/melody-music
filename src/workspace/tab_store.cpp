@@ -124,7 +124,6 @@ void writeItem(QDataStream& out, const persistence::ListItem& item) {
         return false;
     }
     item.entry_id = *id;
-    item.source = persistence::ListSource::local;
     read(in, item.source_reference);
     read(in, item.logical_reference);
     bool present = false;
@@ -189,27 +188,7 @@ QString TabStore::defaultDirectory() {
 
 TabStore::TabStore(QString directory)
     : directory_(directory.isEmpty() ? defaultDirectory() : std::move(directory)),
-      writer_([this] { work(); }) {
-    // ADR-0286: kept in the cache before, where a cleanup takes them: moved
-    // to the window's data once, the first time it has none there.
-    if (directory_ == defaultDirectory()) {
-        const QDir old{QStandardPaths::writableLocation(QStandardPaths::CacheLocation) +
-                       QStringLiteral("/tabs")};
-        const QDir now{directory_};
-        const auto kept = old.entryList({QStringLiteral("*.tabcache")}, QDir::Files);
-        if (!kept.isEmpty() &&
-            now.entryList({QStringLiteral("*.tabcache")}, QDir::Files).isEmpty()) {
-            QDir{}.mkpath(directory_);
-            for (const auto& name : kept) {
-                if (QFile::rename(old.filePath(name), now.filePath(name)) ||
-                    (QFile::copy(old.filePath(name), now.filePath(name)) &&
-                     QFile::remove(old.filePath(name)))) {
-                    continue;
-                }
-            }
-        }
-    }
-}
+      writer_([this] { work(); }) {}
 
 std::vector<QString> TabStore::takeUnreadable() {
     const std::lock_guard guard{unreadable_mutex_};

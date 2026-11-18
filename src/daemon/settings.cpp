@@ -95,20 +95,6 @@ constexpr std::array section_keys{
         .code = core::ErrorCode::invalid_argument, .message = std::move(message), .context = {}};
 }
 
-// What a key once was, for a file written with the old names.
-[[nodiscard]] std::string renamed(const std::string_view key) {
-    if (key == "agent-bitrate-nearby") {
-        return "; it is agent-stream-home now (original, or opus 128)";
-    }
-    if (key == "agent-bitrate-away") {
-        return "; it is agent-stream-away now (original, or opus 128)";
-    }
-    if (key.starts_with("play-for")) {
-        return "; an engine played for is an [engine NAME] section now, with its address";
-    }
-    return {};
-}
-
 [[nodiscard]] std::string section_keys_list() {
     std::string list;
     for (const auto key : section_keys) {
@@ -314,8 +300,8 @@ constexpr std::array section_keys{
         const auto at = origin + ":" + std::to_string(entry.line);
         const auto* key = known(entry.key);
         if (key == nullptr || !key->in_file) {
-            return std::unexpected(refused(
-                at + ": " + entry.key + " is not a setting melodyd.conf has" + renamed(entry.key)));
+            return std::unexpected(
+                refused(at + ": " + entry.key + " is not a setting melodyd.conf has"));
         }
         if (entry.key == "password") {
             password_line = entry.line;
@@ -357,51 +343,6 @@ constexpr std::array section_keys{
         text.remove_suffix(1);
     }
     return text;
-}
-
-[[nodiscard]] std::optional<std::string_view> options_value(std::string_view line) {
-    line = trimmed(line);
-    if (line.starts_with("export ")) {
-        line = trimmed(line.substr(7));
-    }
-    constexpr std::string_view name{"MELODYD_OPTIONS="};
-    if (!line.starts_with(name)) {
-        return std::nullopt;
-    }
-    return line.substr(name.size());
-}
-
-// Words as a shell would split them, quotes grouping and going.
-[[nodiscard]] std::vector<std::string> words(const std::string_view text) {
-    std::vector<std::string> split;
-    std::string word;
-    bool in_word = false;
-    char quote = 0;
-    for (const char c : text) {
-        if (quote != 0) {
-            if (c == quote) {
-                quote = 0;
-            } else {
-                word += c;
-            }
-        } else if (c == '"' || c == '\'') {
-            quote = c;
-            in_word = true;
-        } else if (c == ' ' || c == '\t') {
-            if (in_word) {
-                split.push_back(std::move(word));
-                word.clear();
-                in_word = false;
-            }
-        } else {
-            word += c;
-            in_word = true;
-        }
-    }
-    if (in_word) {
-        split.push_back(std::move(word));
-    }
-    return split;
 }
 
 } // namespace
@@ -450,178 +391,6 @@ std::optional<int> parse_stream(const std::string_view text) {
     return kbps;
 }
 
-std::string stream_text(const int kbps) {
-    return kbps == 0 ? std::string{"original"} : "opus " + std::to_string(kbps);
-}
-
-bool is_options_file(const std::string_view text) {
-    std::size_t start = 0;
-    while (start <= text.size()) {
-        const auto end = text.find('\n', start);
-        if (options_value(text.substr(start, end == std::string_view::npos ? std::string_view::npos
-                                                                           : end - start))) {
-            return true;
-        }
-        if (end == std::string_view::npos) {
-            break;
-        }
-        start = end + 1;
-    }
-    return false;
-}
-
-core::Result<std::string> convert_options_file(const std::string_view text) {
-    std::string kept;
-    std::vector<std::string> flags;
-    std::size_t start = 0;
-    while (start < text.size()) {
-        const auto end = text.find('\n', start);
-        const auto line =
-            text.substr(start, end == std::string_view::npos ? text.size() - start : end - start);
-        if (auto value = options_value(line)) {
-            // As systemd reads an environment file: quotes around the value
-            // are the value's bounds, and $MELODYD_OPTIONS is then split.
-            if (value->size() >= 2 && (value->front() == '"' || value->front() == '\'') &&
-                value->back() == value->front()) {
-                *value = value->substr(1, value->size() - 2);
-            }
-            auto parsed = words(*value);
-            flags.insert(flags.end(), parsed.begin(), parsed.end());
-        } else if (const auto rest = trimmed(line); !rest.empty()) {
-            kept += rest.starts_with('#') ? std::string{rest} : "# " + std::string{rest};
-            kept += '\n';
-        }
-        if (end == std::string_view::npos) {
-            break;
-        }
-        start = end + 1;
-    }
-
-    struct Group {
-        std::string address;
-        std::string name;
-        std::vector<std::pair<std::string, std::string>> keys;
-    };
-    std::vector<std::pair<std::string, std::string>> top;
-    std::vector<std::pair<std::string, std::string>> every_group;
-    std::vector<Group> groups;
-    const auto group_keys = [&]() -> std::vector<std::pair<std::string, std::string>>& {
-        return groups.empty() ? every_group : groups.back().keys;
-    };
-    for (std::size_t index = 0; index < flags.size(); ++index) {
-        const std::string_view flag = flags[index];
-        if (!flag.starts_with("--")) {
-            return std::unexpected(
-                refused("MELODYD_OPTIONS has " + std::string{flag} + ", which is not an option"));
-        }
-        const auto key = flag.substr(2);
-        const auto next = [&]() -> core::Result<std::string> {
-            if (index + 1 >= flags.size()) {
-                return std::unexpected(
-                    refused("MELODYD_OPTIONS has " + std::string{flag} + " without its value"));
-            }
-            return flags[++index];
-        };
-        const auto stream = [&](const std::string& value) -> core::Result<std::string> {
-            const auto kbps = parse_kbps(value);
-            if (!kbps) {
-                return std::unexpected(refused("MELODYD_OPTIONS has " + std::string{flag} + " " +
-                                               value + ", which is not a bit rate"));
-            }
-            return stream_text(*kbps);
-        };
-        if (key == "agent" || key == "local-only" || key == "upnp") {
-            top.emplace_back(key, "yes");
-        } else if (key == "agent-bitrate-nearby" || key == "agent-bitrate-away") {
-            auto value = next();
-            auto rate = value ? stream(*value) : value;
-            if (!rate) {
-                return std::unexpected(rate.error());
-            }
-            top.emplace_back(
-                key == "agent-bitrate-nearby" ? "agent-stream-home" : "agent-stream-away", *rate);
-        } else if (key == "play-for") {
-            auto value = next();
-            if (!value) {
-                return std::unexpected(value.error());
-            }
-            groups.push_back(Group{.address = *value, .name = {}, .keys = {}});
-        } else if (key == "play-for-name") {
-            auto value = next();
-            if (!value) {
-                return std::unexpected(value.error());
-            }
-            if (!groups.empty()) {
-                groups.back().name = *value;
-            }
-        } else if (key == "play-for-password" || key == "play-for-password-file" ||
-                   key == "play-for-music-root") {
-            auto value = next();
-            if (!value) {
-                return std::unexpected(value.error());
-            }
-            group_keys().emplace_back(key.substr(std::string_view{"play-for-"}.size()), *value);
-        } else if (key == "play-for-bitrate-nearby" || key == "play-for-bitrate-away") {
-            auto value = next();
-            auto rate = value ? stream(*value) : value;
-            if (!rate) {
-                return std::unexpected(rate.error());
-            }
-            group_keys().emplace_back(
-                key == "play-for-bitrate-nearby" ? "stream-home" : "stream-away", *rate);
-        } else if (const auto* known_key = known(key);
-                   known_key != nullptr && known_key->in_file && known_key->shape == Shape::value) {
-            auto value = next();
-            if (!value) {
-                return std::unexpected(value.error());
-            }
-            top.emplace_back(key, *value);
-        } else {
-            return std::unexpected(refused("MELODYD_OPTIONS has " + std::string{flag} +
-                                           ", which melodyd.conf has no setting for"));
-        }
-    }
-
-    std::string converted = "# melodyd.conf, written by melodyd from MELODYD_OPTIONS "
-                            "(ADR-0286).\n# The file as it was is melodyd.conf.old.\n";
-    if (!kept.empty()) {
-        converted += "\n" + kept;
-    }
-    // One key given twice on the command line is the last one there.
-    std::vector<std::pair<std::string, std::string>> unique;
-    for (auto& [key, value] : top) {
-        std::erase_if(unique, [&key](const auto& earlier) { return earlier.first == key; });
-        unique.emplace_back(std::move(key), std::move(value));
-    }
-    if (!unique.empty()) {
-        converted += '\n';
-    }
-    const auto line = [&converted](const std::string& key, const std::string& value) {
-        converted.append(key).append(" = ").append(value).append("\n");
-    };
-    for (const auto& [key, value] : unique) {
-        line(key, value);
-    }
-    for (const auto& group : groups) {
-        converted.append("\n[engine ")
-            .append(group.name.empty() ? group.address : group.name)
-            .append("]\n");
-        line("address", group.address);
-        std::vector<std::pair<std::string, std::string>> keys = every_group;
-        for (const auto& [key, value] : group.keys) {
-            std::erase_if(keys, [&key](const auto& earlier) { return earlier.first == key; });
-            keys.emplace_back(key, value);
-        }
-        for (const auto& [key, value] : keys) {
-            line(key, value);
-        }
-    }
-    if (auto check = ConfigFile::parse(converted, "melodyd.conf"); !check) {
-        return std::unexpected(check.error());
-    }
-    return converted;
-}
-
 core::Result<Settings> check_config(const std::string_view text, std::string origin) {
     auto file = ConfigFile::parse(text, std::move(origin));
     if (!file) {
@@ -646,25 +415,6 @@ core::Result<Settings> read_settings(const std::span<const std::string_view> arg
     const auto path = config_path(arguments);
     settings.config_path = path;
     if (auto text = read_text(path)) {
-        if (is_options_file(*text)) {
-            auto converted = convert_options_file(*text);
-            if (!converted) {
-                return std::unexpected(refused(path.string() +
-                                               " is the environment file of before ADR-0286 "
-                                               "and could not be converted: " +
-                                               converted.error().message));
-            }
-            const auto old = std::filesystem::path{path.string() + ".old"};
-            if (auto kept = core::write_config_file(old, *text); !kept) {
-                return std::unexpected(kept.error());
-            }
-            if (auto written = core::write_config_file(path, *converted); !written) {
-                return std::unexpected(written.error());
-            }
-            settings.notes.push_back("converted " + path.string() +
-                                     " from MELODYD_OPTIONS; the old one is " + old.string());
-            text = std::move(*converted);
-        }
         auto file = ConfigFile::parse(*text, path.string());
         if (!file) {
             return std::unexpected(file.error());
