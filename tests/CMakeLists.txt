@@ -1051,7 +1051,9 @@ if(MELODY_BUILD_UI)
     target_link_libraries(trackknife_m3u8_tests PRIVATE Trackknife::BenchUi Qt6::Test
         trackknife_project_options trackknife_project_warnings)
     target_compile_definitions(trackknife_m3u8_tests PRIVATE
-        MELODY_AUDIO_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/audio")
+        MELODY_AUDIO_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/audio"
+        MELODY_ENGINE_BINARY="$<TARGET_FILE:trackknife_engine_daemon>")
+    add_dependencies(trackknife_m3u8_tests trackknife_engine_daemon)
     add_test(NAME m3u8 COMMAND trackknife_m3u8_tests)
     # ADR-0220: the library panel routed through an engine by a setting.
     qt_add_executable(trackknife_library_panel_engine_tests library_panel_engine_test.cpp)

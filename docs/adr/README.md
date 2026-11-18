@@ -7,6 +7,7 @@ they supersede, replace, retire or amend it.
 
 | ADR | Decision | Status | Changed by |
 | --- | --- | --- | --- |
+| 0358 | [The engine reads an imported playlist](0358-the-engine-reads-an-imported-playlist.md) | Accepted, 2026-11-18 |  |
 | 0357 | [One ReplayGain round, in the engine](0357-one-replaygain-round-in-the-engine.md) | Accepted, 2026-11-18 |  |
 | 0356 | [The window reads no files](0356-the-window-reads-no-files.md) | Accepted, 2026-11-18 |  |
 | 0355 | [Every tab fills its rows from its engine](0355-every-tab-fills-its-rows-from-its-engine.md) | Accepted, 2026-11-18 |  |

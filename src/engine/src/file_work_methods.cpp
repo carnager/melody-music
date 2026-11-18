@@ -11,6 +11,7 @@
 #include "trackknife/engine/remote_file_work.hpp"
 #include "trackknife/engine/workspace.hpp"
 #include "trackknife/formats/cue_sheet.hpp"
+#include "trackknife/lists/m3u8.hpp"
 #include "trackknife/metadata/artwork.hpp"
 #include "trackknife/metadata/local_reader.hpp"
 #include "trackknife/operations/artwork_apply.hpp"
@@ -637,6 +638,34 @@ void register_file_work_methods(protocol::Dispatcher& dispatcher, std::filesyste
         return Json{{"items", std::move(items)},
                     {"issues", std::move(issues)},
                     {"truncated", opened.truncated}};
+    });
+
+    // ADR-0358: a playlist file chosen on this machine, read here.
+    //   playlists.read {path} -> {entries: [{path, title, duration_ms?}]}
+    dispatcher.on("playlists.read", [](const Json& params) -> core::Result<Json> {
+        const auto path = params.find("path");
+        auto raw = path != params.end() && path->is_string()
+                       ? protocol::decode_raw_path(path->get<std::string>())
+                       : core::Result<std::string>{std::unexpected(core::Error{})};
+        if (!raw) {
+            return std::unexpected(core::Error{.code = core::ErrorCode::invalid_argument,
+                                               .message = "an encoded playlist path is required",
+                                               .context = {{.key = "param", .value = "path"}}});
+        }
+        auto entries = lists::read_m3u8(*raw);
+        if (!entries) {
+            return std::unexpected(std::move(entries.error()));
+        }
+        auto listed = Json::array();
+        for (const auto& entry : *entries) {
+            Json encoded{{"path", protocol::encode_raw_path(entry.raw_path)},
+                         {"title", entry.title}};
+            if (entry.duration_ms) {
+                encoded["duration_ms"] = *entry.duration_ms;
+            }
+            listed.push_back(std::move(encoded));
+        }
+        return Json{{"entries", std::move(listed)}};
     });
 
     dispatcher.on("files.missing", [](const Json& params) -> core::Result<Json> {

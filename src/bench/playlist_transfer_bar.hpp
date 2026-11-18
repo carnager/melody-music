@@ -13,7 +13,9 @@ class PlaylistTransferBar final : public QToolBar {
   public:
     explicit PlaylistTransferBar(QWidget* parent = nullptr);
     ~PlaylistTransferBar() override;
-    void importFile(std::string raw_path) { transfer_->importFile(std::move(raw_path)); }
+    void importFile(std::string raw_path, std::shared_ptr<engine::RemoteFileWork> work) {
+        transfer_->importFile(std::move(raw_path), std::move(work));
+    }
     void exportFile(std::string raw_path, LocalListModel* model) {
         transfer_->exportFile(std::move(raw_path), model);
     }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 #include "bench/local_list_model.hpp"
+#include "trackknife/engine/remote_file_work.hpp"
 #include "trackknife/lists/m3u8.hpp"
 
 #include <QFutureWatcher>
@@ -19,7 +20,8 @@ class PlaylistTransfer final : public QObject {
   public:
     explicit PlaylistTransfer(QObject* parent = nullptr);
     ~PlaylistTransfer() override;
-    void importFile(std::string raw_path);
+    // ADR-0358: read by `work`, this computer's engine, where the file is.
+    void importFile(std::string raw_path, std::shared_ptr<engine::RemoteFileWork> work);
     void exportFile(std::string raw_path, LocalListModel* model);
     void cancel();
     void stop();

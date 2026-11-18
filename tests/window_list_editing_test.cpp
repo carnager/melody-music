@@ -470,6 +470,8 @@ void BenchMainWindowTest::ListEditing::portablePlaylistImportsPreserveAuthorityA
         QVERIFY(import_action->isEnabled());
         auto* bar = window.findChild<PlaylistTransferBar*>();
         QSignalSpy completed{bar, &PlaylistTransferBar::completed};
+        // ADR-0358: read by this computer's engine, once it is reached.
+        QTRY_VERIFY_WITH_TIMEOUT(window.localEngine().does_file_work, 10'000);
         window.importM3u8Path(QFile::encodeName(playlist).toStdString());
         QTRY_COMPARE(completed.size(), 1);
         QVERIFY(completed[0][0].toBool());
