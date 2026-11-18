@@ -10,6 +10,21 @@ client keeps a path for what an older engine lacked.
 
 ## Protocol 1
 
+### Level 35 (2026-11-18)
+
+ADR-0357: one ReplayGain round, in the engine, for every client.
+
+- `replaygain.apply` takes `{items, grouping?, expression?, true_peak?,
+  sidecar?, preview?}`: an item is an encoded path or `{path, cue?: {sheet,
+  file, track}, stream?, subsong?, start?, end?}`, at most 100,000;
+  grouping is `release` (the default), `discs`, `album`, `track` or
+  `expression`. `paths` is gone.
+- Its result adds `groups: [{album_artist, album, tracks}]`, `more_groups`,
+  `track_only`, `unreadable: [{path, message}]`, `measured`, each track's
+  `album_key` and `peak_kind`, and `applied` (what was written, as
+  `metadata.apply` answers). With `preview`, only the groups and the
+  unreadable files.
+
 ### Level 34 (2026-11-18)
 
 ADR-0356: files and folders opened in a window are walked and read by this

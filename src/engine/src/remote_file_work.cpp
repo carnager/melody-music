@@ -382,6 +382,32 @@ core::Result<OpenedFiles> RemoteFileWork::open_paths(const std::vector<std::stri
     return opened;
 }
 
+core::Result<ReplayGainRound>
+RemoteFileWork::replaygain(const ReplayGainRequest& request, const ReplayGainReport& report,
+                           const core::CancellationToken& cancellation) {
+    auto connection = client();
+    if (!connection) {
+        return std::unexpected(std::move(connection.error()));
+    }
+    auto outcome = (*connection)
+                       ->run_job(
+                           "replaygain.apply", wire::encode(request),
+                           [&report](const Json& reported) {
+                               if (!report) {
+                                   return;
+                               }
+                               if (auto step = wire::decode_replaygain_step(reported)) {
+                                   report(*step);
+                               }
+                           },
+                           cancellation);
+    if (!outcome) {
+        return std::unexpected(std::move(outcome.error()));
+    }
+    return outcome_of<ReplayGainRound>(
+        *outcome, [](const Json& value) { return wire::decode_replaygain_round(value); });
+}
+
 core::Result<FileTechnicals> RemoteFileWork::probe(const std::string& raw_path,
                                                    const core::CancellationToken& cancellation) {
     if (cancellation.is_cancellation_requested()) {

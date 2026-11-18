@@ -19,14 +19,11 @@
 
 namespace trackknife::bench {
 
-ReplayGainDialog::ReplayGainDialog(const std::size_t item_count,
-                                   MetadataPropertiesSourceReader source_reader,
-                                   MetadataWritePlanApplierFactory plan_applier_factory,
-                                   MetadataApplyObserver apply_observer, QWidget* parent,
-                                   FileWorkTools tools)
-    : QDialog(parent),
-      job_(new ReplayGainJob(item_count, std::move(source_reader), std::move(plan_applier_factory),
-                             std::move(apply_observer), std::move(tools), this)) {
+ReplayGainDialog::ReplayGainDialog(const std::size_t item_count, ReplayGainItemReader items,
+                                   std::shared_ptr<engine::RemoteFileWork> work,
+                                   MetadataApplyObserver apply_observer, QWidget* parent)
+    : QDialog(parent), job_(new ReplayGainJob(item_count, std::move(items), std::move(work),
+                                              std::move(apply_observer), this)) {
     setWindowTitle(job_->title());
     setObjectName(QStringLiteral("bench-replaygain-dialog"));
     setAttribute(Qt::WA_DeleteOnClose);

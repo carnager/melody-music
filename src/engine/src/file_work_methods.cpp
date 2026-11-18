@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include "trackknife/engine/file_work_methods.hpp"
+
+#include "cue_items.hpp"
 #include "trackknife/core/local_sources.hpp"
 
 #include "trackknife/engine/file_work_wire.hpp"
@@ -582,6 +584,16 @@ struct OpenedPaths {
 }
 
 } // namespace
+
+namespace detail {
+
+persistence::EngineListItem opened_cue_item(const formats::ResolvedCueSheet& sheet,
+                                            const formats::ResolvedCueTrack& track,
+                                            const metadata::MetadataDocument* embedded) {
+    return cue_item(sheet, track, embedded);
+}
+
+} // namespace detail
 
 void register_file_work_methods(protocol::Dispatcher& dispatcher, std::filesystem::path database,
                                 FileWorkRecovery recovery) {

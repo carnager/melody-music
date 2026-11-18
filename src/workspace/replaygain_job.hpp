@@ -4,7 +4,7 @@
 
 #include "workspace/keep_awake.hpp"
 
-#include "bench/replaygain_scan.hpp"
+#include "trackknife/engine/remote_file_work.hpp"
 #include "workspace/tagger_session.hpp"
 
 #include <QFutureWatcher>
@@ -14,24 +14,29 @@
 
 #include <atomic>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <vector>
 
 namespace trackknife::bench {
 
-// ADR-0156: scanning the selected tracks' loudness and writing ReplayGain
-// tags without the tag editor's review grid -- grouped into albums as
-// chosen, previewed first if wanted, measured, planned and written through
-// the same journaled pipeline. The options are the tag editor's settings.
-// The window's ReplayGain dialog draws it.
+// The selected tracks as the engine is asked to measure them, read from the
+// window's list when a round starts.
+using ReplayGainItemReader = std::function<std::vector<engine::ReplayGainItem>()>;
+
+// ADR-0156, ADR-0357: the selected tracks' loudness measured and their
+// ReplayGain written without the tag editor's review grid -- grouped into
+// albums as chosen, previewed first if wanted. The engine holding the files
+// does the whole round (replaygain.apply); this asks it and tells how far
+// it has got. The options are the tag editor's settings. The window's
+// ReplayGain dialog draws it.
 class ReplayGainJob final : public QObject {
     Q_OBJECT
 
   public:
-    ReplayGainJob(std::size_t item_count, MetadataPropertiesSourceReader source_reader,
-                  MetadataWritePlanApplierFactory plan_applier_factory,
-                  MetadataApplyObserver apply_observer, FileWorkTools tools = {},
-                  QObject* parent = nullptr);
+    ReplayGainJob(std::size_t item_count, ReplayGainItemReader items,
+                  std::shared_ptr<engine::RemoteFileWork> work,
+                  MetadataApplyObserver apply_observer, QObject* parent = nullptr);
     ~ReplayGainJob() override;
 
     [[nodiscard]] static QStringList groupings();
@@ -63,42 +68,26 @@ class ReplayGainJob final : public QObject {
     void changed();
 
   private:
-    struct Capture {
-        core::Result<metadata::StagedMetadataSelection> selection{
-            metadata::StagedMetadataSelection{}};
-        std::vector<MetadataPropertiesAudioSource> audio;
-        QStringList groups;
-        // Files whose tags could not be read: not scanned, not written.
-        std::vector<std::pair<std::string, core::Error>> unreadable;
-    };
-    // How far reading the selection's tags has got, told by the worker.
-    struct Reading {
-        std::atomic_size_t read{0U};
+    // How far the engine has got, told on a worker.
+    struct Progress {
+        // 0 reading, 1 measuring, 2 writing.
+        std::atomic_int phase{0};
+        std::atomic_size_t completed{0U};
         std::atomic_size_t total{0U};
     };
-    struct ApplyOutcome {
-        core::Result<operations::MetadataApplyResult> result{operations::MetadataApplyResult{}};
-        QStringList problems;
-        std::size_t staged_fields{0U};
-    };
+    using Outcome = std::shared_ptr<core::Result<engine::ReplayGainRound>>;
 
     void groupsChanged();
     void setStatusText(const QString& text);
-    void startCapture();
-    // The rows, collected on this thread a few milliseconds at a time: they
-    // are the window's list, which only its thread may read.
-    void collectSlice();
-    void startReading();
-    void finishCapture();
-    void finishScan();
-    void finishApply();
+    void start(bool preview);
+    void showProgress();
+    void finishRound();
     void setRunning(bool running);
 
     std::size_t item_count_{0U};
-    MetadataPropertiesSourceReader source_reader_;
-    MetadataWritePlanApplierFactory plan_applier_factory_;
+    ReplayGainItemReader items_;
+    std::shared_ptr<engine::RemoteFileWork> work_;
     MetadataApplyObserver apply_observer_;
-    FileWorkTools tools_;
 
     int grouping_{0};
     QString expression_;
@@ -114,22 +103,12 @@ class ReplayGainJob final : public QObject {
     bool stopping_{false};
     int progress_value_{0};
     int progress_maximum_{0};
+    loudness::LoudnessGroupingMode mode_{loudness::LoudnessGroupingMode::release};
 
-    QFutureWatcher<std::shared_ptr<Capture>> capture_watcher_;
-    QFutureWatcher<std::shared_ptr<ReplayGainScanOutcome>> scan_watcher_;
-    QFutureWatcher<std::shared_ptr<ApplyOutcome>> apply_watcher_;
+    QFutureWatcher<Outcome> round_watcher_;
     core::CancellationSource cancellation_;
-    std::shared_ptr<std::atomic_size_t> completed_;
-    std::shared_ptr<Reading> reading_;
-    std::size_t collect_next_{0U};
-    std::vector<metadata::StagedMetadataSource> collected_sources_;
-    std::vector<MetadataPropertiesAudioSource> collected_audio_;
+    std::shared_ptr<Progress> progress_;
     QTimer progress_timer_;
-
-    std::shared_ptr<const metadata::StagedMetadataSelection> selection_;
-    std::shared_ptr<const std::vector<MetadataPropertiesAudioSource>> audio_sources_;
-    ReplayGainScanSettings settings_;
-    QStringList scan_problems_;
 };
 
 } // namespace trackknife::bench

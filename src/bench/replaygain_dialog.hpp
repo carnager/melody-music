@@ -23,10 +23,9 @@ class ReplayGainDialog final : public QDialog {
     Q_OBJECT
 
   public:
-    ReplayGainDialog(std::size_t item_count, MetadataPropertiesSourceReader source_reader,
-                     MetadataWritePlanApplierFactory plan_applier_factory,
-                     MetadataApplyObserver apply_observer, QWidget* parent = nullptr,
-                     FileWorkTools tools = {});
+    ReplayGainDialog(std::size_t item_count, ReplayGainItemReader items,
+                     std::shared_ptr<engine::RemoteFileWork> work,
+                     MetadataApplyObserver apply_observer, QWidget* parent = nullptr);
 
   private:
     void sync();

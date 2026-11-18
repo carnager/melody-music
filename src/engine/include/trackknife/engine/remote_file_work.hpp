@@ -5,6 +5,7 @@
 #include "trackknife/core/cancellation.hpp"
 #include "trackknife/core/result.hpp"
 #include "trackknife/engine/metadata_services.hpp"
+#include "trackknife/engine/replaygain_round.hpp"
 #include "trackknife/loudness/scan.hpp"
 #include "trackknife/metadata/local_reader.hpp"
 #include "trackknife/metadata/write_plan.hpp"
@@ -95,6 +96,11 @@ class RemoteFileWork final {
     apply(const metadata::MetadataWritePlan& plan,
           const operations::MetadataApplyProgressCallback& progress,
           const core::CancellationToken& cancellation, bool keep_undo = false);
+
+    // ADR-0357: a whole ReplayGain round, done there (replaygain.apply).
+    [[nodiscard]] core::Result<ReplayGainRound>
+    replaygain(const ReplayGainRequest& request, const ReplayGainReport& report,
+               const core::CancellationToken& cancellation);
 
     // Stage 4, artwork: the planner's reads (artwork.inventory, image_file,
     // image_bytes, destination), an image handed over to be written from

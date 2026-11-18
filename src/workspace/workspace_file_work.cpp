@@ -10,6 +10,7 @@
 #include "bench/bench_main_window_helpers.hpp"
 #include "bench/post_back.hpp"
 #include "bench/remote_mount.hpp"
+#include "trackknife/formats/cue_sheet.hpp"
 #include "trackknife/metadata/local_reader.hpp"
 #include "trackknife/operations/file_publication_apply.hpp"
 #include "trackknife/operations/metadata_commit.hpp"
@@ -483,10 +484,10 @@ Workspace::selectionSourceReader(LocalListModel* source_model,
             if (!parts) {
                 return std::nullopt;
             }
-            auto revision = core::observe_local_source_revision(parts->raw_cue_path);
+            // Its revision is observed by the engine, when the tags are read.
             return metadata::StagedCueSheetBinding{
                 .raw_cue_path = std::move(parts->raw_cue_path),
-                .cue_revision = revision ? std::optional{*revision} : std::nullopt,
+                .cue_revision = std::nullopt,
                 .file_index = parts->file_index,
                 .track_index = parts->track_index,
             };
@@ -525,6 +526,38 @@ Workspace::selectionSourceReader(LocalListModel* source_model,
             .audio = {.selection = row.selection, .range = row.segment},
             .duration_ms = row.duration_ms,
         };
+    };
+}
+
+ReplayGainItemReader Workspace::replayGainItems(LocalListModel* source_model,
+                                                std::vector<QPersistentModelIndex> rows) {
+    const QPointer model{source_model};
+    return [model, rows = std::move(rows)]() {
+        std::vector<engine::ReplayGainItem> items;
+        if (model == nullptr) {
+            return items;
+        }
+        items.reserve(rows.size());
+        for (const auto& index : rows) {
+            if (!index.isValid() || index.row() >= static_cast<int>(model->rows().size())) {
+                continue;
+            }
+            const auto& row = model->rows()[static_cast<std::size_t>(index.row())];
+            engine::ReplayGainItem item{.raw_path = row.raw_path,
+                                        .cue = std::nullopt,
+                                        .selection = row.selection,
+                                        .range = row.segment};
+            if (row.logical_reference) {
+                if (auto parts = formats::parse_cue_logical_reference(*row.logical_reference)) {
+                    item.cue =
+                        engine::ReplayGainItem::Cue{.raw_cue_path = std::move(parts->raw_cue_path),
+                                                    .file_index = parts->file_index,
+                                                    .track_index = parts->track_index};
+                }
+            }
+            items.push_back(std::move(item));
+        }
+        return items;
     };
 }
 

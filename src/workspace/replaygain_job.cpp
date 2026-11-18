@@ -4,16 +4,11 @@
 #include "workspace/keep_awake.hpp"
 
 #include "bench/metadata_dialog_helpers.hpp"
-#include "trackknife/loudness/replaygain.hpp"
-#include "trackknife/metadata/local_reader.hpp"
-#include "trackknife/metadata/write_plan.hpp"
+#include "trackknife/core/local_sources.hpp"
 
-#include <QElapsedTimer>
 #include <QSettings>
 #include <QtConcurrent/QtConcurrentRun>
 
-#include <map>
-#include <set>
 #include <utility>
 
 namespace trackknife::bench {
@@ -24,16 +19,20 @@ namespace {
     return count == 1 ? QStringLiteral("1 track") : QStringLiteral("%1 tracks").arg(count);
 }
 
+[[nodiscard]] QString problem_text(const loudness::ReplayGainProblem& problem) {
+    return QStringLiteral("%1: %2").arg(
+        problem.raw_path ? display_utf8(core::display_raw_path(*problem.raw_path))
+                         : QStringLiteral("Album group"),
+        display_utf8(problem.message));
+}
+
 } // namespace
 
-ReplayGainJob::ReplayGainJob(const std::size_t item_count,
-                             MetadataPropertiesSourceReader source_reader,
-                             MetadataWritePlanApplierFactory plan_applier_factory,
-                             MetadataApplyObserver apply_observer, FileWorkTools tools,
-                             QObject* parent)
-    : QObject(parent), item_count_(item_count), source_reader_(std::move(source_reader)),
-      plan_applier_factory_(std::move(plan_applier_factory)),
-      apply_observer_(std::move(apply_observer)), tools_(std::move(tools)),
+ReplayGainJob::ReplayGainJob(const std::size_t item_count, ReplayGainItemReader items,
+                             std::shared_ptr<engine::RemoteFileWork> work,
+                             MetadataApplyObserver apply_observer, QObject* parent)
+    : QObject(parent), item_count_(item_count), items_(std::move(items)), work_(std::move(work)),
+      apply_observer_(std::move(apply_observer)),
       groups_{QStringLiteral("Preview groups before scanning to check album boundaries.")} {
     // The same persisted policies the tag editor exposes (ADR-0146/0148).
     const QSettings settings;
@@ -44,32 +43,13 @@ ReplayGainJob::ReplayGainJob(const std::size_t item_count,
     status_ = QStringLiteral("%1 selected. Scan writes tags when measurement finishes.")
                   .arg(tracks(static_cast<long long>(item_count_)));
     progress_timer_.setInterval(100);
-    connect(&progress_timer_, &QTimer::timeout, this, [this] {
-        if (!completed_ && reading_ && reading_->total.load() > 0U) {
-            status_ = QStringLiteral("Reading tags · %L1 of %L2 files…")
-                          .arg(reading_->read.load())
-                          .arg(reading_->total.load());
-            emit changed();
-            return;
-        }
-        if (completed_) {
-            progress_value_ = static_cast<int>(completed_->load());
-            status_ = QStringLiteral("Measuring loudness · %1 of %2 files…")
-                          .arg(completed_->load())
-                          .arg(item_count_);
-            emit changed();
-        }
-    });
-    connect(&capture_watcher_, &QFutureWatcherBase::finished, this, &ReplayGainJob::finishCapture);
-    connect(&scan_watcher_, &QFutureWatcherBase::finished, this, &ReplayGainJob::finishScan);
-    connect(&apply_watcher_, &QFutureWatcherBase::finished, this, &ReplayGainJob::finishApply);
+    connect(&progress_timer_, &QTimer::timeout, this, &ReplayGainJob::showProgress);
+    connect(&round_watcher_, &QFutureWatcherBase::finished, this, &ReplayGainJob::finishRound);
 }
 
 ReplayGainJob::~ReplayGainJob() {
     cancellation_.request_cancellation();
-    capture_watcher_.waitForFinished();
-    scan_watcher_.waitForFinished();
-    apply_watcher_.waitForFinished();
+    round_watcher_.waitForFinished();
 }
 
 QStringList ReplayGainJob::groupings() {
@@ -130,21 +110,9 @@ void ReplayGainJob::setRunning(const bool running) {
     emit changed();
 }
 
-void ReplayGainJob::preview() {
-    if (running_) {
-        return;
-    }
-    preview_only_ = true;
-    startCapture();
-}
+void ReplayGainJob::preview() { start(true); }
 
-void ReplayGainJob::run() {
-    if (running_) {
-        return;
-    }
-    preview_only_ = false;
-    startCapture();
-}
+void ReplayGainJob::run() { start(false); }
 
 void ReplayGainJob::stop() {
     if (!running_) {
@@ -156,344 +124,169 @@ void ReplayGainJob::stop() {
     setStatusText(QStringLiteral("Stopping… Any completed tag writes are retained."));
 }
 
-void ReplayGainJob::startCapture() {
-    if (running_ || item_count_ == 0U || !source_reader_ || !plan_applier_factory_) {
+void ReplayGainJob::start(const bool preview) {
+    if (running_ || item_count_ == 0U || !items_ || !work_) {
         return;
     }
-    settings_ = {};
+    engine::ReplayGainRequest request;
     switch (grouping_) {
     case 0:
-        settings_.grouping.mode = loudness::LoudnessGroupingMode::release;
+        request.grouping.mode = loudness::LoudnessGroupingMode::release;
         break;
     case 1:
-        settings_.grouping.mode = loudness::LoudnessGroupingMode::release_merged_discs;
+        request.grouping.mode = loudness::LoudnessGroupingMode::release_merged_discs;
         break;
     case 2:
-        settings_.grouping.mode = loudness::LoudnessGroupingMode::selection_album;
+        request.grouping.mode = loudness::LoudnessGroupingMode::selection_album;
         break;
     case 3:
-        settings_.grouping.mode = loudness::LoudnessGroupingMode::track;
+        request.grouping.mode = loudness::LoudnessGroupingMode::track;
         break;
     default:
-        settings_.grouping.mode = loudness::LoudnessGroupingMode::format_expression;
-        settings_.grouping.expression = expression_.trimmed().toStdString();
-        if (settings_.grouping.expression.empty()) {
-            status_ = QStringLiteral("Enter a tkfmt-1 grouping expression, e.g. %album%");
-            emit changed();
+        request.grouping.mode = loudness::LoudnessGroupingMode::format_expression;
+        request.grouping.expression = expression_.trimmed().toStdString();
+        if (request.grouping.expression.empty()) {
+            setStatusText(QStringLiteral("Enter a tkfmt-1 grouping expression, e.g. %album%"));
             return;
         }
         break;
     }
-    settings_.sidecar_only = sidecar_only_;
-    settings_.true_peak = true_peak_;
+    request.sidecar_only = sidecar_only_;
+    request.true_peak = true_peak_;
+    request.preview = preview;
+    request.items = items_();
+    if (request.items.empty()) {
+        setStatusText(QStringLiteral("Nothing to scan."));
+        return;
+    }
     QSettings settings;
     settings.setValue(QStringLiteral("replaygain/grouping"), grouping_);
     settings.setValue(QStringLiteral("replaygain/grouping-expression"), expression_);
-    settings.setValue(QStringLiteral("replaygain/sidecar-only"), settings_.sidecar_only);
-    settings.setValue(QStringLiteral("replaygain/true-peak"), settings_.true_peak);
+    settings.setValue(QStringLiteral("replaygain/sidecar-only"), sidecar_only_);
+    settings.setValue(QStringLiteral("replaygain/true-peak"), true_peak_);
 
+    preview_only_ = preview;
+    mode_ = request.grouping.mode;
     problems_.clear();
-    scan_problems_.clear();
     cancellation_ = core::CancellationSource{};
+    progress_ = std::make_shared<Progress>();
     status_ = QStringLiteral("Reading the selection…");
     progress_maximum_ = 0;
     progress_value_ = 0;
     setRunning(true);
-    completed_.reset();
-    reading_.reset();
-    collect_next_ = 0U;
-    collected_sources_.clear();
-    collected_audio_.clear();
-    collected_sources_.reserve(item_count_);
-    collected_audio_.reserve(item_count_);
-    collectSlice();
-}
-
-void ReplayGainJob::collectSlice() {
-    if (cancellation_.is_cancellation_requested()) {
-        setRunning(false);
-        setStatusText(QStringLiteral("Stopped. No tags written."));
-        return;
-    }
-    QElapsedTimer slice;
-    slice.start();
-    while (collect_next_ < item_count_ && slice.elapsed() < 4) {
-        if (auto source = source_reader_(collect_next_)) {
-            collected_sources_.push_back(std::move(source->source));
-            collected_audio_.push_back(source->audio);
-        }
-        ++collect_next_;
-    }
-    if (collect_next_ < item_count_) {
-        setStatusText(QStringLiteral("Reading the selection · %L1 of %L2…")
-                          .arg(collect_next_)
-                          .arg(item_count_));
-        QTimer::singleShot(0, this, &ReplayGainJob::collectSlice);
-        return;
-    }
-    startReading();
-}
-
-void ReplayGainJob::startReading() {
-    reading_ = std::make_shared<Reading>();
     progress_timer_.start();
-    capture_watcher_.setFuture(QtConcurrent::run([sources = std::move(collected_sources_),
-                                                  audio = std::move(collected_audio_),
-                                                  grouping = settings_.grouping,
-                                                  access = tools_.access, reading = reading_,
-                                                  token = cancellation_.token()]() mutable {
-        auto capture = std::make_shared<Capture>();
-        capture->audio = std::move(audio);
-        // Every file's own tags, read in batches -- the engine reads a batch
-        // at once -- with how far it has got told as it goes.
-        auto captured = metadata::capture_metadata_sources(
-            std::move(sources), access, token,
-            [&reading](const std::size_t read, const std::size_t total) {
-                reading->total.store(total);
-                reading->read.store(read);
-            });
-        if (!captured) {
-            capture->selection = std::unexpected(captured.error());
-            return capture;
-        }
-        capture->unreadable = std::move(captured->unreadable);
-        capture->selection =
-            metadata::StagedMetadataSelection::create(std::move(captured->sources), {});
-        if (!capture->selection)
-            return capture;
-        std::vector<const metadata::MetadataDocument*> documents;
-        documents.reserve(capture->selection->item_count());
-        for (std::size_t i = 0; i < capture->selection->item_count(); ++i)
-            documents.push_back(&capture->selection->source(i).baseline);
-        const auto keys = loudness::assign_loudness_groups(grouping, documents, token);
-        if (!keys) {
-            capture->selection = std::unexpected(keys.error());
-            return capture;
-        }
-        std::map<std::string, std::pair<QString, int>> groups;
-        int track_only = 0;
-        for (std::size_t i = 0; i < keys->size(); ++i) {
-            if (!(*keys)[i]) {
-                ++track_only;
-                continue;
-            }
-            auto& group = groups[*(*keys)[i]];
-            if (group.second++ == 0) {
-                const auto& doc = *documents[i];
-                group.first =
-                    grouping.mode == loudness::LoudnessGroupingMode::selection_album
-                        ? QStringLiteral("Selection as one album")
-                        : display_utf8(doc.first_effective_value("albumartist")
-                                           .value_or(doc.first_effective_value("artist").value_or(
-                                               "Unknown artist"))) +
-                              QStringLiteral(" — ") +
-                              display_utf8(
-                                  doc.first_effective_value("album").value_or("Untitled album"));
-            }
-        }
-        for (const auto& [key, group] : groups) {
-            (void)key;
-            if (capture->groups.size() >= 200)
-                break;
-            capture->groups << QStringLiteral("%1 · %2").arg(group.first, tracks(group.second));
-        }
-        if (groups.size() > 200)
-            capture->groups << QStringLiteral("… %1 more album groups").arg(groups.size() - 200);
-        if (track_only)
-            capture->groups << QStringLiteral("%1 without album grouping — track gain only")
-                                   .arg(tracks(static_cast<long long>(track_only)));
-        return capture;
-    }));
+    round_watcher_.setFuture(
+        QtConcurrent::run([work = work_, request = std::move(request), progress = progress_,
+                           token = cancellation_.token()]() -> Outcome {
+            return std::make_shared<core::Result<engine::ReplayGainRound>>(work->replaygain(
+                request,
+                [&progress](const engine::ReplayGainStep& step) {
+                    progress->phase.store(step.phase == "writing"     ? 2
+                                          : step.phase == "measuring" ? 1
+                                                                      : 0);
+                    progress->total.store(step.total);
+                    progress->completed.store(step.completed);
+                },
+                token));
+        }));
 }
 
-void ReplayGainJob::finishCapture() {
-    progress_timer_.stop();
-    auto capture = capture_watcher_.result();
-    if (!capture || !capture->selection) {
-        setRunning(false);
-        setStatusText(capture ? display_utf8(capture->selection.error().message)
-                              : QStringLiteral("Capture returned no result"));
+void ReplayGainJob::showProgress() {
+    if (!progress_ || stopping_) {
         return;
     }
-    selection_ =
-        std::make_shared<const metadata::StagedMetadataSelection>(std::move(*capture->selection));
-    audio_sources_ = std::make_shared<const std::vector<MetadataPropertiesAudioSource>>(
-        std::move(capture->audio));
-    item_count_ = selection_->item_count();
-    groups_ = capture->groups;
-    // Said, and left out of the scan: a file whose tags were not read has no
-    // baseline to write gains onto, and would hold up the rest.
-    std::set<std::string> unreadable;
-    for (const auto& [raw_path, error] : capture->unreadable) {
-        unreadable.insert(raw_path);
-        scan_problems_ << QStringLiteral("%1: %2 (not read, left out)")
-                              .arg(display_utf8(core::display_raw_path(raw_path)),
-                                   display_utf8(error.message));
+    const auto total = progress_->total.load();
+    const auto completed = progress_->completed.load();
+    switch (progress_->phase.load()) {
+    case 0:
+        progress_maximum_ = 0;
+        status_ = total > 0U
+                      ? QStringLiteral("Reading tags · %L1 of %L2 files…").arg(completed).arg(total)
+                      : QStringLiteral("Reading the selection…");
+        break;
+    case 1:
+        progress_maximum_ = static_cast<int>(total);
+        progress_value_ = static_cast<int>(completed);
+        status_ = QStringLiteral("Measuring loudness · %1 of %2 files…").arg(completed).arg(total);
+        break;
+    default:
+        progress_maximum_ = 0;
+        status_ = QStringLiteral("Writing ReplayGain tags… Audio samples are not changed.");
+        break;
     }
-    if (item_count_ == 0U) {
-        setRunning(false);
+    emit changed();
+}
+
+void ReplayGainJob::finishRound() {
+    progress_timer_.stop();
+    const auto outcome = round_watcher_.result();
+    const auto stopped = cancellation_.is_cancellation_requested();
+    setRunning(false);
+    if (!outcome || !*outcome) {
+        setStatusText(stopped || (outcome && outcome->error().code == core::ErrorCode::cancelled)
+                          ? QStringLiteral("Stopped. No tags written.")
+                      : outcome ? display_utf8(outcome->error().message)
+                                : QStringLiteral("ReplayGain returned no result"));
+        return;
+    }
+    const auto& round = **outcome;
+    QStringList groups;
+    for (const auto& group : round.groups) {
+        const auto name = mode_ == loudness::LoudnessGroupingMode::selection_album
+                              ? QStringLiteral("Selection as one album")
+                              : (group.album_artist.empty() ? QStringLiteral("Unknown artist")
+                                                            : display_utf8(group.album_artist)) +
+                                    QStringLiteral(" — ") +
+                                    (group.album.empty() ? QStringLiteral("Untitled album")
+                                                         : display_utf8(group.album));
+        groups << QStringLiteral("%1 · %2").arg(name, tracks(static_cast<long long>(group.tracks)));
+    }
+    if (round.more_groups > 0U) {
+        groups << QStringLiteral("… %1 more album groups").arg(round.more_groups);
+    }
+    if (round.track_only > 0U) {
+        groups << QStringLiteral("%1 without album grouping — track gain only")
+                      .arg(tracks(static_cast<long long>(round.track_only)));
+    }
+    groups_ = groups;
+    QStringList problems;
+    for (const auto& problem : round.unreadable) {
+        problems << problem_text(problem) + QStringLiteral(" (not read, left out)");
+    }
+    for (const auto& problem : round.problems) {
+        problems << problem_text(problem);
+    }
+    problems_ = problems;
+    const auto readable = item_count_ - std::min(item_count_, round.unreadable.size());
+    if (preview_only_) {
+        setStatusText(readable == 0U ? QStringLiteral("Nothing to scan.")
+                                     : QStringLiteral("%1 ready. Scan and write tags to measure "
+                                                      "loudness and save the results.")
+                                           .arg(tracks(static_cast<long long>(readable))));
+        return;
+    }
+    if (round.measured_items == 0U) {
         setStatusText(QStringLiteral("Nothing to scan."));
         return;
     }
-    if (preview_only_ || cancellation_.is_cancellation_requested()) {
-        setRunning(false);
-        setStatusText(cancellation_.is_cancellation_requested()
-                          ? QStringLiteral("Stopped. No tags written.")
-                          : QStringLiteral("%1 ready. Scan and write tags to measure "
-                                           "loudness and save the results.")
-                                .arg(tracks(static_cast<long long>(item_count_))));
+    if (round.refused) {
+        setStatusText(QStringLiteral("Nothing written: the write plan is blocked."));
         return;
     }
-    progress_maximum_ = static_cast<int>(item_count_);
-    progress_value_ = 0;
-    completed_ = std::make_shared<std::atomic_size_t>(0U);
-    progress_timer_.start();
-    emit changed();
-    std::vector<std::size_t> items;
-    items.reserve(item_count_);
-    for (std::size_t index = 0U; index < item_count_; ++index) {
-        if (!unreadable.contains(selection_->source(index).raw_path)) {
-            items.push_back(index);
-        }
-    }
-    scan_watcher_.setFuture(
-        QtConcurrent::run([selection = selection_, items = std::move(items), audio = audio_sources_,
-                           settings = settings_, completed = completed_, scanner = tools_.scanner,
-                           token = cancellation_.token()] {
-            return run_replaygain_scan(selection, metadata::StagedMetadataPatchSet{}, items, audio,
-                                       settings, completed, token, scanner);
-        }));
-}
-
-void ReplayGainJob::finishScan() {
-    progress_timer_.stop();
-    auto outcome = scan_watcher_.result();
-    if (cancellation_.is_cancellation_requested()) {
-        setRunning(false);
-        setStatusText(QStringLiteral("Stopped. No tags written."));
-        return;
-    }
-    if (!outcome || !outcome->proposals) {
-        setRunning(false);
-        setStatusText(outcome ? display_utf8(outcome->proposals.error().message)
-                              : QStringLiteral("The scan returned no result"));
-        return;
-    }
-    for (const auto& problem : outcome->problems) {
-        scan_problems_ << QStringLiteral("%1: %2").arg(problem.file, problem.detail);
-    }
-    progress_maximum_ = 0;
-    setStatusText(QStringLiteral("Writing ReplayGain tags… Audio samples are not changed."));
-    apply_watcher_.setFuture(
-        QtConcurrent::run([selection = selection_, proposals = std::move(*outcome->proposals),
-                           settings = settings_, applier = plan_applier_factory_(),
-                           access = tools_.access, token = cancellation_.token()]() {
-            auto apply = std::make_shared<ApplyOutcome>();
-            const auto fail = [&apply](core::Error error) {
-                apply->result = std::unexpected(std::move(error));
-                return apply;
-            };
-            // The measured values become ordinary staged patches on a copy
-            // of the selection whose vocabulary grows the loudness fields.
-            auto staged = loudness::stage_replaygain(*selection, proposals, token);
-            if (!staged) {
-                return fail(std::move(staged.error()));
-            }
-            auto& staged_selection = staged->selection;
-            auto& patches = staged->patches;
-            apply->staged_fields = staged->staged_fields;
-            if (apply->staged_fields == 0U) {
-                return apply;
-            }
-            auto plan = metadata::build_metadata_write_plan(
-                staged_selection, patches, access, token,
-                metadata::MetadataWritePlanOptions{.sidecar_loudness = settings.sidecar_only,
-                                                   .true_peak_loudness = settings.true_peak});
-            if (!plan) {
-                return fail(std::move(plan.error()));
-            }
-            if (!plan->ready()) {
-                for (const auto& source : plan->sources) {
-                    for (const auto& issue : source.issues) {
-                        apply->problems << QStringLiteral("%1: %2").arg(
-                            display_utf8(core::display_raw_path(source.raw_path)),
-                            display_utf8(issue.error.message));
-                    }
-                }
-                for (const auto& sidecar : plan->sidecars) {
-                    for (const auto& issue : sidecar.issues) {
-                        apply->problems << QStringLiteral("%1: %2").arg(
-                            display_utf8(core::display_raw_path(sidecar.raw_audio_path)),
-                            display_utf8(issue.error.message));
-                    }
-                }
-                apply->result =
-                    std::unexpected(core::Error{.code = core::ErrorCode::invalid_argument,
-                                                .message = "the write plan is blocked",
-                                                .context = {}});
-                return apply;
-            }
-            apply->result = applier(*plan, {}, token);
-            return apply;
-        }));
-}
-
-void ReplayGainJob::finishApply() {
-    setRunning(false);
-    auto outcome = apply_watcher_.result();
-    auto problems = scan_problems_;
-    if (outcome) {
-        problems << outcome->problems;
-    }
-    if (!outcome) {
-        setStatusText(QStringLiteral("Apply returned no result"));
-        problems_ = problems;
-        emit changed();
-        return;
-    }
-    if (!outcome->result) {
-        setStatusText(display_utf8(outcome->result.error().message));
-        problems_ = problems;
-        emit changed();
-        return;
-    }
-    if (outcome->staged_fields == 0U) {
+    if (!round.applied) {
         setStatusText(QStringLiteral("Nothing measurable to write."));
-        problems_ = problems;
-        emit changed();
         return;
     }
     if (apply_observer_) {
-        apply_observer_(*outcome->result);
-    }
-    std::size_t committed = 0U;
-    std::size_t failed = 0U;
-    const auto& result = *outcome->result;
-    for (const auto& source : result.sources) {
-        source.commit ? ++committed : ++failed;
-    }
-    for (const auto& sheet : result.cue_sheets) {
-        sheet.commit ? ++committed : ++failed;
-    }
-    for (const auto& sidecar : result.sidecars) {
-        sidecar.commit ? ++committed : ++failed;
+        apply_observer_(*round.applied);
     }
     auto text = QStringLiteral("Saved ReplayGain tags to %1 target%2. Audio samples unchanged.")
-                    .arg(committed)
-                    .arg(committed == 1U ? QString{} : QStringLiteral("s"));
-    if (failed > 0U) {
-        text += QStringLiteral(" %1 failed.").arg(failed);
-        for (const auto& source : result.sources) {
-            if (!source.commit && source.issue) {
-                problems << QStringLiteral("%1: %2").arg(
-                    display_utf8(core::display_raw_path(source.raw_path)),
-                    display_utf8(source.issue->message));
-            }
-        }
+                    .arg(round.written)
+                    .arg(round.written == 1U ? QString{} : QStringLiteral("s"));
+    if (round.failed > 0U) {
+        text += QStringLiteral(" %1 failed.").arg(round.failed);
     }
     setStatusText(text);
-    problems_ = problems;
-    emit changed();
 }
 
 } // namespace trackknife::bench

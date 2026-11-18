@@ -68,18 +68,13 @@ void register_catalogue_jobs(JobCatalog& jobs, LocalCatalogue& catalogue);
 // file moved is followed by `follow` in the same commit, and it finishes
 // with {result} or {error}. A plan that is not ready is refused at submit.
 //
-// replaygain.apply {paths, grouping?, true_peak?, sidecar?} is the ReplayGain
-// window's whole round in one job, for a client with no tag library of its
-// own (melody-cli): the files read, measured (grouping "album", the default:
-// the paths are one programme; "release"; "track": track gains only),
-// proposed and written as the window writes them (loudness/replaygain.hpp),
-// reporting {phase: reading|measuring|writing, completed, total}. It
-// finishes with {result: {tracks: [{path, title, integrated_lufs,
-// track_gain, track_peak, album_gain, album_peak, status}], problems:
-// [{path?, message}], written, failed, refused?}} -- written and failed
-// count files, whether their gains went into tags, a CUE sheet or a sidecar;
-// refused, and nothing written, when the plan has blocking issues -- or
-// {error}.
+// replaygain.apply is one whole ReplayGain round (ADR-0357), for every
+// client: the tracks read -- whole files, streams, subsongs, ranges, CUE
+// sheets' tracks -- grouped into albums, measured, and the gains written
+// into tags, CUE sheet or sidecar, journaled like metadata.apply; or, with
+// preview, only the album groups. Its request and result are
+// replaygain_round.hpp's; it reports {phase: reading|measuring|writing,
+// completed, total}.
 void register_file_work_jobs(JobCatalog& jobs, std::filesystem::path database,
                              LocalCatalogue& catalogue, MoveFollower follow);
 

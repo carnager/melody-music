@@ -14,6 +14,7 @@
 #include "trackknife/engine/player.hpp"
 #include "trackknife/engine/rating_tags.hpp"
 #include "trackknife/engine/remote_file_work.hpp"
+#include "trackknife/engine/replaygain_round.hpp"
 #include "trackknife/engine/server.hpp"
 #include "trackknife/engine/workspace.hpp"
 #include "trackknife/loudness/replaygain.hpp"
@@ -1440,8 +1441,8 @@ void naming_and_destinations_are_the_engines(const std::filesystem::path& direct
     require(top.result && top.result->at("parent").is_null(), "the root has no parent");
 }
 
-// ADR-0237: the ReplayGain window's round as one engine job, for a client
-// with no tag library -- and the same gains the window would write.
+// ADR-0357: a whole ReplayGain round as one engine job, for every client --
+// and the same gains the shared pipeline proposes.
 void the_engine_writes_replaygain_in_one_job(const std::filesystem::path& directory,
                                              const std::filesystem::path& fixtures) {
     namespace metadata = trackknife::metadata;
@@ -1475,23 +1476,46 @@ void the_engine_writes_replaygain_in_one_job(const std::filesystem::path& direct
     require(expected && expected->rows.size() == 2U, "measured here");
 
     Jobs jobs{directory / "replaygain.sqlite3"};
+    const auto gone = (folder / "gone.flac").string();
     require(jobs.run("replaygain.apply", protocol::Json::object()).contains("refused"),
-            "paths are required");
+            "tracks are required");
     require(jobs.run("replaygain.apply",
-                     {{"paths", {protocol::encode_raw_path(first)}}, {"grouping", "loudest"}})
+                     {{"items", {protocol::encode_raw_path(first)}}, {"grouping", "loudest"}})
                 .contains("refused"),
             "and a grouping it knows");
-    const auto outcome = jobs.run(
-        "replaygain.apply",
-        {{"paths", {protocol::encode_raw_path(first), protocol::encode_raw_path(second)}}});
+    require(jobs.run("replaygain.apply",
+                     {{"items", {protocol::encode_raw_path(first)}}, {"grouping", "expression"}})
+                .contains("refused"),
+            "an expression grouping with its expression");
+    const protocol::Json both{protocol::encode_raw_path(first), protocol::encode_raw_path(second),
+                              protocol::encode_raw_path(gone)};
+
+    // ADR-0357: the groups alone, measured and written nothing.
+    const auto previewed =
+        jobs.run("replaygain.apply", {{"items", both}, {"grouping", "album"}, {"preview", true}});
+    require(previewed.contains("result"), "the engine previews the groups");
+    const auto preview = engine::wire::decode_replaygain_round(previewed.at("result"));
+    require(preview && preview->groups.size() == 1U && preview->groups.front().tracks == 2U &&
+                preview->rows.empty() && preview->unreadable.size() == 1U &&
+                preview->unreadable.front().raw_path == std::optional{gone},
+            "one album of the two files it read, the third left out");
+    require(!metadata::read_local_metadata(first)->document.first_effective_value(
+                "REPLAYGAIN_TRACK_GAIN"),
+            "a preview writes nothing");
+
+    const auto outcome = jobs.run("replaygain.apply", {{"items", both}, {"grouping", "album"}});
     require(outcome.contains("result"), "the engine measures and writes");
     const auto& result = outcome.at("result");
     require(result.at("written") == 2 && result.at("failed") == 0 && !result.contains("refused"),
             "both files are written");
+    require(result.at("unreadable").size() == 1U, "the file that is not there is said");
     require(result.at("tracks").size() == 2U &&
                 result.at("tracks")[0].at("track_gain") == expected->rows[0].track_gain &&
                 result.at("tracks")[0].at("album_gain") == expected->rows[0].album_gain,
             "with the gains measured here");
+    const auto round = engine::wire::decode_replaygain_round(result);
+    require(round && round->applied && round->applied->sources.size() == 2U,
+            "and what was written, for a window's rows");
     for (std::size_t index = 0U; index < 2U; ++index) {
         const auto written = metadata::read_local_metadata(index == 0U ? first : second);
         require(written &&
@@ -1510,11 +1534,45 @@ void the_engine_writes_replaygain_in_one_job(const std::filesystem::path& direct
         require(phases > 0, "and says how far it got");
     }
     // Measured again, nothing has changed: nothing is written.
-    const auto again = jobs.run(
-        "replaygain.apply",
-        {{"paths", {protocol::encode_raw_path(first), protocol::encode_raw_path(second)}}});
+    const auto again = jobs.run("replaygain.apply", {{"items", both}, {"grouping", "album"}});
     require(again.contains("result") && again.at("result").at("written") == 0,
             "the same gains again write nothing");
+
+    // ADR-0139: a CUE sheet's tracks (half a second each), measured, take
+    // their gains in the sheet, which the engine reads and writes.
+    const auto image = materialize(fixtures, "rich-metadata-long-flac", folder / "image.flac");
+    const auto sheet = folder / "image.cue";
+    std::ofstream{sheet} << "TITLE \"Gain Album\"\nFILE \"image.flac\" WAVE\n"
+                            "TRACK 01 AUDIO\nTITLE \"One\"\nINDEX 01 00:00:00\n"
+                            "TRACK 02 AUDIO\nTITLE \"Two\"\nINDEX 01 00:00:38\n";
+    auto tracks = protocol::Json::array();
+    for (const auto track : {0, 1}) {
+        tracks.push_back({{"path", protocol::encode_raw_path(image.string())},
+                          {"cue",
+                           {{"sheet", protocol::encode_raw_path(sheet.string())},
+                            {"file", 0},
+                            {"track", track}}}});
+    }
+    const auto sheeted = jobs.run("replaygain.apply", {{"items", tracks}, {"grouping", "album"}});
+    require(sheeted.contains("result") && sheeted.at("result").at("written") == 1 &&
+                sheeted.at("result").at("tracks").size() == 2U,
+            "both tracks measured, the sheet written once");
+    std::ifstream sheet_in{sheet};
+    const std::string sheet_text{std::istreambuf_iterator<char>{sheet_in}, {}};
+    const auto lines_with = [&sheet_text](const std::string_view needle) {
+        std::size_t count = 0U;
+        for (auto at = sheet_text.find(needle); at != std::string::npos;
+             at = sheet_text.find(needle, at + 1U)) {
+            ++count;
+        }
+        return count;
+    };
+    require(lines_with("REM REPLAYGAIN_TRACK_GAIN") == 2U &&
+                lines_with("REM REPLAYGAIN_ALBUM_GAIN") == 1U,
+            "the sheet holds each track's gain and the album's");
+    require(!metadata::read_local_metadata(image.string())
+                 ->document.first_effective_value("REPLAYGAIN_TRACK_GAIN"),
+            "and the image's own tags are left as they were");
 }
 
 void a_client_does_file_work_through_the_engine(const std::filesystem::path& directory,

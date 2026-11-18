@@ -21,6 +21,7 @@ class BenchMainWindowTest::ReplayGain final : public window_test::Fixture {
     void contextReplayGainScansAndApplies_data();
     void contextReplayGainScansAndApplies();
     void replayGainScanPreservesLogicalSources();
+    void contextReplayGainWritesCueSheets();
 };
 
 // ReplayGain as an Apply action: measured first, staged, and written with
@@ -574,6 +575,67 @@ void BenchMainWindowTest::ReplayGain::contextReplayGainScansAndApplies() {
         QCOMPARE((*sidecar)->entries.size(), 1U);
         QVERIFY((*sidecar)->entries.front().track_gain_db.has_value());
     }
+    dialog->close();
+}
+
+// ADR-0357: the dialog asks the engine for the whole round -- here a CUE
+// sheet's tracks, previewed as one album, then measured over their ranges
+// and their gains written into the sheet.
+void BenchMainWindowTest::ReplayGain::contextReplayGainWritesCueSheets() {
+    QTemporaryDir media;
+    QVERIFY(media.isValid());
+    write_sine_wav_fixture(media.filePath(QStringLiteral("disc.wav")), 0.8, 0.2);
+    const auto input = media.filePath(QStringLiteral("disc.cue"));
+    {
+        QFile cue{input};
+        QVERIFY(cue.open(QIODevice::WriteOnly));
+        cue.write("PERFORMER \"Gain Artist\"\nTITLE \"Gain Album\"\nFILE \"disc.wav\" WAVE\n"
+                  "TRACK 01 AUDIO\nTITLE \"Loud\"\nINDEX 01 00:00:00\n"
+                  "TRACK 02 AUDIO\nTITLE \"Quiet\"\nINDEX 01 00:01:00\n");
+    }
+    BenchMainWindow window;
+    window.show();
+    window.openLocalPaths({QFile::encodeName(input).toStdString()});
+    auto* tabs = window.findChild<QTabWidget*>(QStringLiteral("bench-tabs"));
+    QVERIFY(tabs != nullptr);
+    QTRY_COMPARE(tabs->count(), 1);
+    auto* view = qobject_cast<QTableView*>(tabs->currentWidget());
+    QVERIFY(view != nullptr);
+    QTRY_COMPARE_WITH_TIMEOUT(view->model()->rowCount(), 2, 5'000);
+    view->selectAll();
+    QTRY_VERIFY_WITH_TIMEOUT(window.localEngine().does_file_work, 10'000);
+    window.findChild<QAction*>(QStringLiteral("action-replaygain-dialog"))->trigger();
+    QDialog* dialog = nullptr;
+    QTRY_VERIFY((dialog = window.findChild<QDialog*>(QStringLiteral("bench-replaygain-dialog"))) !=
+                nullptr);
+    auto* grouping =
+        dialog->findChild<QComboBox*>(QStringLiteral("bench-replaygain-dialog-grouping"));
+    auto* preview =
+        dialog->findChild<QPushButton*>(QStringLiteral("bench-replaygain-dialog-preview"));
+    auto* run = dialog->findChild<QPushButton*>(QStringLiteral("bench-replaygain-dialog-run"));
+    auto* groups =
+        dialog->findChild<QListWidget*>(QStringLiteral("bench-replaygain-dialog-groups"));
+    auto* status = dialog->findChild<QLabel*>(QStringLiteral("bench-replaygain-dialog-status"));
+    QVERIFY(grouping != nullptr && preview != nullptr && run != nullptr && groups != nullptr &&
+            status != nullptr);
+    grouping->setCurrentIndex(2);
+    preview->click();
+    QTRY_VERIFY_WITH_TIMEOUT(groups->count() == 1 &&
+                                 groups->item(0)->text() ==
+                                     QStringLiteral("Selection as one album · 2 tracks"),
+                             10'000);
+    QTRY_VERIFY(run->isEnabled());
+    run->click();
+    QTRY_VERIFY_WITH_TIMEOUT(run->isEnabled(), 30'000);
+    const auto problems = dialog->findChild<QPlainTextEdit*>();
+    QVERIFY2(status->text().startsWith(QStringLiteral("Saved ReplayGain tags to 1 target")),
+             qPrintable(status->text() + QStringLiteral(" · ") +
+                        (problems ? problems->toPlainText() : QString{})));
+    QFile written{input};
+    QVERIFY(written.open(QIODevice::ReadOnly));
+    const auto text = written.readAll();
+    QCOMPARE(text.count("REM REPLAYGAIN_TRACK_GAIN"), 2);
+    QCOMPARE(text.count("REM REPLAYGAIN_ALBUM_GAIN"), 1);
     dialog->close();
 }
 

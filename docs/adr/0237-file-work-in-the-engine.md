@@ -179,6 +179,10 @@ staging live in the loudness library (`loudness/replaygain.hpp`) for the
 window and the job alike, so a gain is the same whoever asked for it; so does
 laying a file's loudness sidecar over its tags.
 
+2026-11-18 (ADR-0357): the job is now the only round, the window's too, and
+takes items -- CUE tracks, streams, subsongs, ranges -- every grouping and a
+preview.
+
 ## Naming layouts are global; move destinations are the engine's (decided 2026-09-28)
 
 A move destination is a folder on one machine. A naming layout is a rule
