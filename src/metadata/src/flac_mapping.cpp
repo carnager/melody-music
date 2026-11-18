@@ -4,8 +4,10 @@
 
 #include "trackknife/metadata/document.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -165,6 +167,29 @@ constexpr std::array conventional_mappings{
 }
 
 } // namespace
+
+std::optional<std::string_view> stream_tag_alias(const std::string_view native_name) {
+    std::string name{native_name};
+    std::ranges::transform(name, name.begin(), [](const unsigned char c) {
+        return static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    });
+    if (name == "track") {
+        return "tracknumber";
+    }
+    if (name == "disc") {
+        return "discnumber";
+    }
+    if (name == "album_artist") {
+        return "albumartist";
+    }
+    // FFmpeg's "encoder" is the tag TagLib reads as ENCODING (ID3 TSSE, MP4
+    // ©too); without this it came through a second time, as a field that
+    // is not a tag and so could never be edited or removed.
+    if (name == "encoder") {
+        return "encoding";
+    }
+    return std::nullopt;
+}
 
 TextPropertyIdentity resolve_text_property_identity(const std::string_view native_name) {
     const auto property_name = uppercase_ascii(native_name);

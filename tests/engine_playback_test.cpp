@@ -21,6 +21,7 @@
 #include "recording_audition.hpp"
 #include "trackknife/core/stable_id.hpp"
 #include "trackknife/engine/catalogue.hpp"
+#include "trackknife/engine/catalogue_methods.hpp"
 #include "trackknife/engine/dynamic_rules.hpp"
 #include "trackknife/engine/list_continuation.hpp"
 #include "trackknife/engine/list_methods.hpp"
@@ -127,6 +128,12 @@ class RecordingEngine final {
                 return core::Result<protocol::Json>{std::move(answer)};
             });
         }
+        // ADR-0355: and a library, as every engine has, which fills the
+        // rows of its lists -- not recorded, it is not playback.
+        catalogue_ = std::make_unique<engine::LocalCatalogue>(std::filesystem::path{
+            library_.filePath(QStringLiteral("library.sqlite3")).toStdString()});
+        static_cast<void>(catalogue_->prepare());
+        engine::register_catalogue_methods(outer_, *catalogue_);
         // An engine of this build's protocol and level, as every engine says.
         outer_.on("engine.info", [](const protocol::Json&) {
             return core::Result<protocol::Json>{
@@ -155,6 +162,8 @@ class RecordingEngine final {
         commands_.push_back(method);
     }
 
+    QTemporaryDir library_;
+    std::unique_ptr<engine::LocalCatalogue> catalogue_;
     protocol::Dispatcher inner_;
     protocol::Dispatcher outer_;
     mutable std::mutex mutex_;

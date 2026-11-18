@@ -2,6 +2,7 @@
 
 #include "bench/bench_main_window_helpers.hpp"
 
+#include "trackknife/metadata/flac_mapping.hpp"
 #include "trackknife/persistence/rating_identity.hpp"
 #include <QPainter>
 #include <QPainterPath>
@@ -162,31 +163,6 @@ std::string lowercased_ascii(std::string name) {
     return name;
 }
 
-// FFmpeg exposes a few format-native fields through generic AVDictionary
-// spellings. Those spellings are presentation projections, not additional
-// native tag identities. Keep this adapter mapping explicit so ADR-0066's
-// freeform-field identity never mistakes one for an independently writable
-// property.
-std::optional<std::string_view> probed_semantic_alias(const std::string_view native_name) {
-    const auto name = lowercased_ascii(std::string{native_name});
-    if (name == "track") {
-        return "tracknumber";
-    }
-    if (name == "disc") {
-        return "discnumber";
-    }
-    if (name == "album_artist") {
-        return "albumartist";
-    }
-    // FFmpeg's "encoder" is the tag TagLib reads as ENCODING (ID3 TSSE, MP4
-    // ©too); without this it came through a second time, as a field that
-    // is not a tag and so could never be edited or removed.
-    if (name == "encoder") {
-        return "encoding";
-    }
-    return std::nullopt;
-}
-
 void remove_shadowed_probed_metadata(metadata::MetadataDocument& document) {
     std::unordered_set<std::string> embedded_semantic_names;
     embedded_semantic_names.reserve(document.fields.size());
@@ -199,7 +175,7 @@ void remove_shadowed_probed_metadata(metadata::MetadataDocument& document) {
         if (field.provenance != metadata::FieldProvenance::stream) {
             return false;
         }
-        const auto semantic = probed_semantic_alias(field.native_name);
+        const auto semantic = metadata::stream_tag_alias(field.native_name);
         return semantic && embedded_semantic_names.contains(std::string{*semantic});
     });
 }
@@ -268,6 +244,8 @@ LocalTrackRow cached_library_row(persistence::LibraryTrackSnapshot snapshot) {
     if (snapshot.facts.album_rating >= 0) {
         row.album_rating = static_cast<unsigned>(snapshot.facts.album_rating);
     }
+    // ADR-0355: the file as it was read, for the row to follow it by.
+    row.source_revision = snapshot.revision;
     row.probed = true;
     return row;
 }

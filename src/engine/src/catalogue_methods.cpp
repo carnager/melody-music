@@ -43,6 +43,72 @@ using protocol::Json;
     return encoded;
 }
 
+// The paths a catalogue.cached_tracks or catalogue.read_tracks asks about.
+[[nodiscard]] core::Result<std::vector<std::string>> track_paths(const Json& params) {
+    const auto found = params.find("paths");
+    if (found == params.end() || !found->is_array()) {
+        return std::unexpected(bad_params("an array of paths is required", "paths"));
+    }
+    std::vector<std::string> raw_paths;
+    raw_paths.reserve(found->size());
+    for (const auto& value : *found) {
+        if (!value.is_string()) {
+            return std::unexpected(bad_params("each path must be encoded", "paths"));
+        }
+        auto raw = protocol::decode_raw_path(value.get<std::string>());
+        if (!raw) {
+            return std::unexpected(bad_params("a path is not an encoded path", "paths"));
+        }
+        raw_paths.push_back(std::move(*raw));
+    }
+    return raw_paths;
+}
+
+// The tracks they answer: field values with their original and lowercased
+// forms, because the query engine matches on one and displays the other.
+[[nodiscard]] Json
+render_snapshots(const std::vector<persistence::LibraryTrackSnapshot>& snapshots) {
+    auto rendered = Json::array();
+    for (const auto& snapshot : snapshots) {
+        Json entry = Json::object();
+        entry["path"] = protocol::encode_raw_path(snapshot.raw_path);
+        Json fields = Json::object();
+        for (const auto& [name, values] : snapshot.facts.fields) {
+            auto pairs = Json::array();
+            for (const auto& [original, folded] : values) {
+                pairs.push_back(Json::array(
+                    {protocol::displayable_text(original), protocol::displayable_text(folded)}));
+            }
+            fields[protocol::displayable_text(name)] = std::move(pairs);
+        }
+        entry["fields"] = std::move(fields);
+        entry["search_text"] = protocol::displayable_text(snapshot.facts.search_text);
+        entry["title"] = protocol::displayable_text(snapshot.facts.title);
+        entry["artist"] = protocol::displayable_text(snapshot.facts.artist);
+        entry["album"] = protocol::displayable_text(snapshot.facts.album);
+        entry["date"] = protocol::displayable_text(snapshot.facts.date);
+        entry["codec"] = protocol::displayable_text(snapshot.facts.codec);
+        entry["sample_rate"] = snapshot.facts.sample_rate;
+        entry["bits"] = snapshot.facts.bits;
+        entry["channels"] = snapshot.facts.channels;
+        entry["duration_ms"] = snapshot.facts.duration_ms;
+        entry["rating"] = snapshot.facts.rating;
+        entry["album_rating"] = snapshot.facts.album_rating;
+        // Absent history means unavailable, not unplayed, so
+        // it is null rather than zeroes.
+        entry["history"] = snapshot.facts.history ? Json(*snapshot.facts.history) : Json(nullptr);
+        // ADR-0355: the file as it was read, for a list to follow it by.
+        if (snapshot.revision) {
+            const auto& revision = *snapshot.revision;
+            entry["revision"] = Json::array({revision.device, revision.inode, revision.size,
+                                             revision.modification_time_seconds,
+                                             revision.modification_time_nanoseconds});
+        }
+        rendered.push_back(std::move(entry));
+    }
+    return rendered;
+}
+
 } // namespace
 
 protocol::Event catalogue_change_event(const LocalCatalogue::Change& change) {
@@ -429,65 +495,32 @@ void register_catalogue_methods(protocol::Dispatcher& dispatcher, Catalogue& cat
     // search result needs to render: without it a remote library returns
     // paths and no metadata, which looks like a broken library rather than a
     // missing method.
-    dispatcher.on(
-        "catalogue.cached_tracks", [&catalogue](const Json& params) -> core::Result<Json> {
-            const auto found = params.find("paths");
-            if (found == params.end() || !found->is_array()) {
-                return std::unexpected(bad_params("an array of paths is required", "paths"));
-            }
-            std::vector<std::string> raw_paths;
-            raw_paths.reserve(found->size());
-            for (const auto& value : *found) {
-                if (!value.is_string()) {
-                    return std::unexpected(bad_params("each path must be encoded", "paths"));
-                }
-                auto raw = protocol::decode_raw_path(value.get<std::string>());
-                if (!raw) {
-                    return std::unexpected(bad_params("a path is not an encoded path", "paths"));
-                }
-                raw_paths.push_back(std::move(*raw));
-            }
-            auto snapshots = catalogue.cached_tracks(raw_paths);
-            if (!snapshots) {
-                return std::unexpected(std::move(snapshots.error()));
-            }
-            auto rendered = Json::array();
-            for (const auto& snapshot : *snapshots) {
-                Json entry = Json::object();
-                entry["path"] = protocol::encode_raw_path(snapshot.raw_path);
-                // Field values carry both their original and
-                // lowercased forms, because the query engine matches
-                // on one and displays the other.
-                Json fields = Json::object();
-                for (const auto& [name, values] : snapshot.facts.fields) {
-                    auto pairs = Json::array();
-                    for (const auto& [original, folded] : values) {
-                        pairs.push_back(Json::array({protocol::displayable_text(original),
-                                                     protocol::displayable_text(folded)}));
-                    }
-                    fields[protocol::displayable_text(name)] = std::move(pairs);
-                }
-                entry["fields"] = std::move(fields);
-                entry["search_text"] = protocol::displayable_text(snapshot.facts.search_text);
-                entry["title"] = protocol::displayable_text(snapshot.facts.title);
-                entry["artist"] = protocol::displayable_text(snapshot.facts.artist);
-                entry["album"] = protocol::displayable_text(snapshot.facts.album);
-                entry["date"] = protocol::displayable_text(snapshot.facts.date);
-                entry["codec"] = protocol::displayable_text(snapshot.facts.codec);
-                entry["sample_rate"] = snapshot.facts.sample_rate;
-                entry["bits"] = snapshot.facts.bits;
-                entry["channels"] = snapshot.facts.channels;
-                entry["duration_ms"] = snapshot.facts.duration_ms;
-                entry["rating"] = snapshot.facts.rating;
-                entry["album_rating"] = snapshot.facts.album_rating;
-                // Absent history means unavailable, not unplayed, so
-                // it is null rather than zeroes.
-                entry["history"] =
-                    snapshot.facts.history ? Json(*snapshot.facts.history) : Json(nullptr);
-                rendered.push_back(std::move(entry));
-            }
-            return Json{{"tracks", std::move(rendered)}};
-        });
+    dispatcher.on("catalogue.cached_tracks",
+                  [&catalogue](const Json& params) -> core::Result<Json> {
+                      auto raw_paths = track_paths(params);
+                      if (!raw_paths) {
+                          return std::unexpected(std::move(raw_paths.error()));
+                      }
+                      auto snapshots = catalogue.cached_tracks(*raw_paths);
+                      if (!snapshots) {
+                          return std::unexpected(std::move(snapshots.error()));
+                      }
+                      return Json{{"tracks", render_snapshots(*snapshots)}};
+                  });
+
+    // ADR-0355: what a list's rows show -- indexed tracks from the index,
+    // any other file read from its file and not indexed.
+    dispatcher.on("catalogue.read_tracks", [&catalogue](const Json& params) -> core::Result<Json> {
+        auto raw_paths = track_paths(params);
+        if (!raw_paths) {
+            return std::unexpected(std::move(raw_paths.error()));
+        }
+        auto snapshots = catalogue.read_tracks(*raw_paths);
+        if (!snapshots) {
+            return std::unexpected(std::move(snapshots.error()));
+        }
+        return Json{{"tracks", render_snapshots(*snapshots)}};
+    });
 
     // Whether the library changed since a listing, for a client that keeps
     // one: equal revisions, the same library.

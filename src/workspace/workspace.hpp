@@ -158,18 +158,6 @@ class Workspace final : public QObject {
         bool cancelled{false};
         bool truncated{false};
     };
-    struct ProbeJob {
-        QString document_id;
-        std::string raw_path;
-        int hint_row{-1};
-    };
-    struct ProbeOutcome {
-        ProbeJob job;
-        std::vector<LocalTrackRow> rows;
-        LocalTrackRow whole_file_fallback;
-        // Neither its tags nor its stream could be read.
-        bool unreadable{false};
-    };
     struct ArtworkJob {
         QString key;
         std::string raw_path;
@@ -313,8 +301,6 @@ class Workspace final : public QObject {
     bool discovery_anchored_{false};
     bool discovery_replace_and_play_{false};
     bool discovery_running_{false};
-    QFutureWatcher<std::vector<ProbeOutcome>> probe_watcher_;
-    std::deque<ProbeJob> probe_queue_;
     // Tabs being described, and those taken up again meanwhile.
     QSet<QString> describing_;
     std::set<std::string> rows_to_read_;
@@ -323,8 +309,8 @@ class Workspace final : public QObject {
     // ADR-0268: rows whose files changed, described again once the list's
     // describing in flight is done.
     QHash<QString, std::vector<core::StableId>> redescribe_;
-    bool probe_running_{false};
-    core::CancellationSource probe_cancellation_;
+    // What reads files here -- covers, folders opened -- stopped on closing.
+    core::CancellationSource work_cancellation_;
     QFutureWatcher<void> artwork_watcher_;
     std::shared_ptr<ArtworkOutcome> artwork_outcome_;
     std::deque<ArtworkJob> artwork_queue_;
@@ -1025,7 +1011,6 @@ class Workspace final : public QObject {
     void describeEngineEntries(ListTab& tab, std::vector<core::StableId> entries);
     void describeEngineRowsFrom(const QString& document_id, std::vector<core::StableId> entries,
                                 std::size_t from);
-    void enrichRemoteRows(ListTab& tab);
     // Rows from paths a remote engine gave -- a drag from its library --
     // without looking for them on this computer, where they need not be.
     void insertRemotePaths(ListTab& tab, std::vector<std::string> raw_paths, int insertion_row);
@@ -1040,8 +1025,6 @@ class Workspace final : public QObject {
 
   private:
     void finishDiscovery();
-    void pumpProbeQueue();
-    void finishProbeBatch();
     void pumpArtworkQueue();
     void finishArtworkLoad();
 

@@ -2472,11 +2472,16 @@ PreparedFile prepare_file(ScanRequest request, const core::CancellationToken& ca
             prepared.failed = true;
             prepared.reason = "tags could not be read: " + read.error().message;
         }
+        // The stream's tags fill only names the tag reader did not give,
+        // FFmpeg's spellings of those it did taken for them.
         for (const auto& tag : probe->tags) {
-            const auto identity = metadata::resolve_text_property_identity(tag.name);
-            if (!prepared.document.first_effective_value(identity.canonical_name)) {
+            const auto alias = metadata::stream_tag_alias(tag.name);
+            const auto canonical_name =
+                alias ? std::string{*alias}
+                      : metadata::resolve_text_property_identity(tag.name).canonical_name;
+            if (!prepared.document.first_effective_value(canonical_name)) {
                 prepared.document.fields.push_back(
-                    {.canonical_name = identity.canonical_name,
+                    {.canonical_name = canonical_name,
                      .native_name = tag.name,
                      .values = {tag.value},
                      .qualifier = {},
@@ -2701,7 +2706,76 @@ class PreparationPipeline {
     return std::clamp<std::size_t>(hardware == 0U ? 2U : hardware / 2U, 2U, 8U);
 }
 
+// ADR-0355: a file read as a scan reads it, as the snapshot the index would
+// give once it stored it -- its tags, technicals and revision. No rating or
+// date added: only the index keeps those.
+LibraryTrackSnapshot unindexed_snapshot(const PreparedFile& prepared) {
+    LibraryTrackSnapshot snapshot;
+    snapshot.raw_path = prepared.raw_path;
+    snapshot.revision = prepared.before;
+    auto& facts = snapshot.facts;
+    for (const auto& field : prepared.document.fields) {
+        if (field.canonical_name.empty()) {
+            continue;
+        }
+        for (const auto& value : field.values) {
+            if (!value.empty()) {
+                facts.fields[field.canonical_name].emplace_back(value, lower(value));
+            }
+        }
+    }
+    if (prepared.popularimeter) {
+        const auto text = std::to_string(*prepared.popularimeter);
+        facts.fields[std::string{popularimeter_field}].emplace_back(text, text);
+    }
+    facts.title = prepared.tags.title;
+    facts.artist = prepared.tags.artist;
+    facts.album = prepared.tags.album;
+    facts.date = prepared.tags.date;
+    facts.search_text = prepared.tags.search_track;
+    facts.codec = prepared.technicals.codec;
+    facts.sample_rate = prepared.technicals.sample_rate;
+    facts.bits = prepared.technicals.bits;
+    facts.channels = prepared.technicals.channels;
+    facts.duration_ms = prepared.technicals.duration_ms;
+    return snapshot;
+}
+
 } // namespace
+
+core::Result<std::vector<LibraryTrackSnapshot>>
+LocalLibrary::read_tracks(const std::vector<std::string>& raw_paths,
+                          const core::CancellationToken& cancellation) const {
+    auto described = described_tracks(raw_paths, cancellation);
+    if (!described) {
+        return std::unexpected(std::move(described.error()));
+    }
+    std::vector<LibraryTrackSnapshot> result;
+    result.reserve(described->size());
+    for (std::size_t index = 0; index < raw_paths.size(); ++index) {
+        if (cancellation.is_cancellation_requested()) {
+            return std::unexpected(core::Error{.code = core::ErrorCode::cancelled,
+                                               .message = "Reading tracks cancelled",
+                                               .context = {}});
+        }
+        if (auto& indexed = (*described)[index]) {
+            result.push_back(std::move(*indexed));
+            continue;
+        }
+        const auto& raw_path = raw_paths[index];
+        const auto before = core::observe_local_source_revision(raw_path);
+        if (!before) {
+            continue;
+        }
+        const auto prepared = prepare_file(
+            ScanRequest{.raw_path = raw_path, .root = {}, .revision = {}, .before = *before},
+            cancellation);
+        if (!prepared.failed) {
+            result.push_back(unindexed_snapshot(prepared));
+        }
+    }
+    return result;
+}
 
 core::Result<std::vector<AlbumArrival>>
 LocalLibrary::albums_arrived_since(const std::int64_t since) const {

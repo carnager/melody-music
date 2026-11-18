@@ -84,6 +84,10 @@ class UnavailableCatalogue final : public engine::Catalogue {
     cached_tracks(const std::vector<std::string>&, const core::CancellationToken&) const override {
         return refuse<std::vector<persistence::LibraryTrackSnapshot>>();
     }
+    [[nodiscard]] core::Result<std::vector<persistence::LibraryTrackSnapshot>>
+    read_tracks(const std::vector<std::string>&, const core::CancellationToken&) const override {
+        return refuse<std::vector<persistence::LibraryTrackSnapshot>>();
+    }
     [[nodiscard]] core::Result<std::vector<std::array<std::int64_t, 6>>>
     history_facts(const std::vector<persistence::LibraryHistorySource>&,
                   const core::CancellationToken&) const override {
@@ -173,6 +177,11 @@ class DeferredCatalogue final : public engine::Catalogue {
     cached_tracks(const std::vector<std::string>& raw_paths,
                   const core::CancellationToken& cancellation) const override {
         return get().cached_tracks(raw_paths, cancellation);
+    }
+    [[nodiscard]] core::Result<std::vector<persistence::LibraryTrackSnapshot>>
+    read_tracks(const std::vector<std::string>& raw_paths,
+                const core::CancellationToken& cancellation) const override {
+        return get().read_tracks(raw_paths, cancellation);
     }
     // Forwarded, so an engine elsewhere formats the lines where the tags are.
     [[nodiscard]] core::Result<std::vector<FoundTrack>>

@@ -2,6 +2,7 @@
 
 // The window test: converting files.
 
+#include "trackknife/metadata/flac_mapping.hpp"
 #include "window_test.hpp"
 
 #include "uicommon/library_tree_view.hpp"
@@ -41,7 +42,7 @@ void BenchMainWindowTest::Convert::ffmpegEncoderIsTheTagTagLibCallsEncoding() {
     remove_shadowed_probed_metadata(document);
     QCOMPARE(document.fields.size(), std::size_t{1});
     QCOMPARE(document.fields.front().canonical_name, std::string{"encoding"});
-    QCOMPARE(probed_semantic_alias("ENCODER"), std::optional<std::string_view>{"encoding"});
+    QCOMPARE(metadata::stream_tag_alias("ENCODER"), std::optional<std::string_view>{"encoding"});
 }
 
 void BenchMainWindowTest::Convert::convertDialogPlansAndConvertsSelection() {

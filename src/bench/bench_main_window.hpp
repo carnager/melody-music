@@ -124,8 +124,6 @@ class BenchMainWindow final : public QMainWindow, public WorkspaceView {
     using CrossTabMoveEdit = Workspace::CrossTabMoveEdit;
     using PendingRelocation = Workspace::PendingRelocation;
     using DiscoveryOutcome = Workspace::DiscoveryOutcome;
-    using ProbeJob = Workspace::ProbeJob;
-    using ProbeOutcome = Workspace::ProbeOutcome;
     using ArtworkJob = Workspace::ArtworkJob;
     using ArtworkOutcome = Workspace::ArtworkOutcome;
     using SeenEngine = Workspace::SeenEngine;
@@ -160,10 +158,7 @@ class BenchMainWindow final : public QMainWindow, public WorkspaceView {
     bool& discovery_anchored_{workspace_.discovery_anchored_};
     bool& discovery_replace_and_play_{workspace_.discovery_replace_and_play_};
     bool& discovery_running_{workspace_.discovery_running_};
-    QFutureWatcher<std::vector<ProbeOutcome>>& probe_watcher_{workspace_.probe_watcher_};
-    std::deque<ProbeJob>& probe_queue_{workspace_.probe_queue_};
-    bool& probe_running_{workspace_.probe_running_};
-    core::CancellationSource& probe_cancellation_{workspace_.probe_cancellation_};
+    core::CancellationSource& work_cancellation_{workspace_.work_cancellation_};
     QFutureWatcher<void>& artwork_watcher_{workspace_.artwork_watcher_};
     std::shared_ptr<ArtworkOutcome>& artwork_outcome_{workspace_.artwork_outcome_};
     std::deque<ArtworkJob>& artwork_queue_{workspace_.artwork_queue_};

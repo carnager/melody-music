@@ -30,6 +30,11 @@ struct TextPropertyIdentity {
 // Unknown names retain their case-folded native spelling, including spaces,
 // underscores, hyphens, and punctuation; similarity never creates an alias.
 [[nodiscard]] TextPropertyIdentity resolve_text_property_identity(std::string_view native_name);
+// FFmpeg exposes a few format-native fields through generic AVDictionary
+// spellings ("track", "disc", "album_artist", "encoder"). Those are
+// projections of tags the tag reader already has, not further identities:
+// the canonical name each stands for, or nothing for any other name.
+[[nodiscard]] std::optional<std::string_view> stream_tag_alias(std::string_view native_name);
 [[nodiscard]] bool is_conventional_metadata_field(std::string_view canonical_name);
 
 // Picard-paired native spellings for one canonical identity, primary first.

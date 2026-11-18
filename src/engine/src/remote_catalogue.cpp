@@ -89,6 +89,76 @@ constexpr std::size_t request_budget_bytes = 256U * 1024U;
     return joined;
 }
 
+// The tracks catalogue.cached_tracks and catalogue.read_tracks answer.
+[[nodiscard]] core::Result<std::vector<persistence::LibraryTrackSnapshot>>
+decode_snapshots(const Json& joined) {
+    const auto* tracks = &joined;
+    std::vector<persistence::LibraryTrackSnapshot> snapshots;
+    snapshots.reserve(tracks->size());
+    for (const auto& value : *tracks) {
+        if (!value.is_object() || !value.contains("path")) {
+            return std::unexpected(malformed("tracks"));
+        }
+        auto raw = protocol::decode_raw_path(value.at("path").get<std::string>());
+        if (!raw) {
+            return std::unexpected(malformed("tracks"));
+        }
+        persistence::LibraryTrackSnapshot snapshot;
+        snapshot.raw_path = std::move(*raw);
+        if (const auto fields = value.find("fields");
+            fields != value.end() && fields->is_object()) {
+            for (const auto& [name, values] : fields->items()) {
+                if (!values.is_array()) {
+                    return std::unexpected(malformed("tracks"));
+                }
+                std::vector<std::pair<std::string, std::string>> pairs;
+                for (const auto& pair : values) {
+                    if (!pair.is_array() || pair.size() != 2U) {
+                        return std::unexpected(malformed("tracks"));
+                    }
+                    pairs.emplace_back(pair[0].get<std::string>(), pair[1].get<std::string>());
+                }
+                snapshot.facts.fields.emplace(name, std::move(pairs));
+            }
+        }
+        snapshot.facts.search_text = value.value("search_text", std::string{});
+        snapshot.facts.title = value.value("title", std::string{});
+        snapshot.facts.artist = value.value("artist", std::string{});
+        snapshot.facts.album = value.value("album", std::string{});
+        snapshot.facts.date = value.value("date", std::string{});
+        snapshot.facts.codec = value.value("codec", std::string{});
+        snapshot.facts.sample_rate = value.value("sample_rate", std::int64_t{0});
+        snapshot.facts.bits = value.value("bits", std::int64_t{0});
+        snapshot.facts.channels = value.value("channels", std::int64_t{0});
+        snapshot.facts.duration_ms = value.value("duration_ms", std::int64_t{-1});
+        snapshot.facts.rating = value.value("rating", std::int64_t{-1});
+        snapshot.facts.album_rating = value.value("album_rating", std::int64_t{-1});
+        // Null history means unavailable; zeroes would mean never played.
+        if (const auto history = value.find("history");
+            history != value.end() && history->is_array() && history->size() == 6U) {
+            std::array<std::int64_t, 6> facts{};
+            for (std::size_t index = 0; index < 6U; ++index) {
+                facts[index] = (*history)[index].get<std::int64_t>();
+            }
+            snapshot.facts.history = facts;
+        }
+        // ADR-0355: the file as it was read, for a list to follow it by.
+        if (const auto revision = value.find("revision");
+            revision != value.end() && revision->is_array() && revision->size() == 5U &&
+            std::ranges::all_of(*revision,
+                                [](const Json& part) { return part.is_number_integer(); })) {
+            snapshot.revision = core::LocalSourceRevision{
+                .device = (*revision)[0].get<std::uint64_t>(),
+                .inode = (*revision)[1].get<std::uint64_t>(),
+                .size = (*revision)[2].get<std::uint64_t>(),
+                .modification_time_seconds = (*revision)[3].get<std::int64_t>(),
+                .modification_time_nanoseconds = (*revision)[4].get<std::int64_t>()};
+        }
+        snapshots.push_back(std::move(snapshot));
+    }
+    return snapshots;
+}
+
 } // namespace
 
 core::Result<std::vector<persistence::LibraryRoot>> RemoteCatalogue::roots() const {
@@ -628,59 +698,21 @@ RemoteCatalogue::cached_tracks(const std::vector<std::string>& raw_paths,
     if (!joined) {
         return std::unexpected(std::move(joined.error()));
     }
-    const auto* tracks = &*joined;
-    std::vector<persistence::LibraryTrackSnapshot> snapshots;
-    snapshots.reserve(tracks->size());
-    for (const auto& value : *tracks) {
-        if (!value.is_object() || !value.contains("path")) {
-            return std::unexpected(malformed("tracks"));
-        }
-        auto raw = protocol::decode_raw_path(value.at("path").get<std::string>());
-        if (!raw) {
-            return std::unexpected(malformed("tracks"));
-        }
-        persistence::LibraryTrackSnapshot snapshot;
-        snapshot.raw_path = std::move(*raw);
-        if (const auto fields = value.find("fields");
-            fields != value.end() && fields->is_object()) {
-            for (const auto& [name, values] : fields->items()) {
-                if (!values.is_array()) {
-                    return std::unexpected(malformed("tracks"));
-                }
-                std::vector<std::pair<std::string, std::string>> pairs;
-                for (const auto& pair : values) {
-                    if (!pair.is_array() || pair.size() != 2U) {
-                        return std::unexpected(malformed("tracks"));
-                    }
-                    pairs.emplace_back(pair[0].get<std::string>(), pair[1].get<std::string>());
-                }
-                snapshot.facts.fields.emplace(name, std::move(pairs));
-            }
-        }
-        snapshot.facts.search_text = value.value("search_text", std::string{});
-        snapshot.facts.title = value.value("title", std::string{});
-        snapshot.facts.artist = value.value("artist", std::string{});
-        snapshot.facts.album = value.value("album", std::string{});
-        snapshot.facts.date = value.value("date", std::string{});
-        snapshot.facts.codec = value.value("codec", std::string{});
-        snapshot.facts.sample_rate = value.value("sample_rate", std::int64_t{0});
-        snapshot.facts.bits = value.value("bits", std::int64_t{0});
-        snapshot.facts.channels = value.value("channels", std::int64_t{0});
-        snapshot.facts.duration_ms = value.value("duration_ms", std::int64_t{-1});
-        snapshot.facts.rating = value.value("rating", std::int64_t{-1});
-        snapshot.facts.album_rating = value.value("album_rating", std::int64_t{-1});
-        // Null history means unavailable; zeroes would mean never played.
-        if (const auto history = value.find("history");
-            history != value.end() && history->is_array() && history->size() == 6U) {
-            std::array<std::int64_t, 6> facts{};
-            for (std::size_t index = 0; index < 6U; ++index) {
-                facts[index] = (*history)[index].get<std::int64_t>();
-            }
-            snapshot.facts.history = facts;
-        }
-        snapshots.push_back(std::move(snapshot));
+    return decode_snapshots(*joined);
+}
+
+core::Result<std::vector<persistence::LibraryTrackSnapshot>>
+RemoteCatalogue::read_tracks(const std::vector<std::string>& raw_paths,
+                             const core::CancellationToken&) const {
+    auto encoded = Json::array();
+    for (const auto& raw_path : raw_paths) {
+        encoded.push_back(protocol::encode_raw_path(raw_path));
     }
-    return snapshots;
+    auto joined = call_in_chunks(*client_, "catalogue.read_tracks", "paths", encoded, "tracks");
+    if (!joined) {
+        return std::unexpected(std::move(joined.error()));
+    }
+    return decode_snapshots(*joined);
 }
 
 core::Result<std::vector<std::array<std::int64_t, 6>>>

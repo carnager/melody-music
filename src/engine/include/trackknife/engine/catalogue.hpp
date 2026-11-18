@@ -137,6 +137,13 @@ class Catalogue {
     [[nodiscard]] virtual core::Result<std::vector<persistence::LibraryTrackSnapshot>>
     cached_tracks(const std::vector<std::string>& raw_paths,
                   const core::CancellationToken& cancellation = {}) const = 0;
+    // ADR-0355: what a list's rows show for these files, in input order --
+    // an indexed track as the index has it, any other file read from its
+    // file and not indexed. One that cannot be read is left out. How every
+    // tab fills its rows, whichever engine it is of.
+    [[nodiscard]] virtual core::Result<std::vector<persistence::LibraryTrackSnapshot>>
+    read_tracks(const std::vector<std::string>& raw_paths,
+                const core::CancellationToken& cancellation = {}) const = 0;
 
     // A query's matches, each as its file and one line in `format` (tkfmt-1,
     // formatted with the track's whole row), at most `limit` (0: every one),
@@ -281,6 +288,9 @@ class LocalCatalogue final : public Catalogue {
     [[nodiscard]] core::Result<std::vector<persistence::LibraryTrackSnapshot>>
     cached_tracks(const std::vector<std::string>& raw_paths,
                   const core::CancellationToken& cancellation = {}) const override;
+    [[nodiscard]] core::Result<std::vector<persistence::LibraryTrackSnapshot>>
+    read_tracks(const std::vector<std::string>& raw_paths,
+                const core::CancellationToken& cancellation = {}) const override;
     // ADR-0259: each path's indexed tags and revision, nothing for one the
     // library does not index. The engine's own; no client asks it of a
     // catalogue.

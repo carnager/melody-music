@@ -10,6 +10,17 @@ client keeps a path for what an older engine lacked.
 
 ## Protocol 1
 
+### Level 33 (2026-11-18)
+
+ADR-0355: every tab fills its rows from its engine.
+
+- `catalogue.read_tracks {paths}` answers as `catalogue.cached_tracks`
+  does, in the order asked: an indexed track from the index, any other
+  file read from its file, as a scan reads it, and not indexed. A file
+  that cannot be read is left out rather than failing the rest.
+- The tracks of both carry `revision: [device, inode, size, seconds,
+  nanoseconds]`, the file as it was read or indexed.
+
 ### Level 32 (2026-11-11)
 
 ADR-0352: a scan names the files it could not read.

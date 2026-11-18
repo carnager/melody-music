@@ -7,6 +7,7 @@ they supersede, replace, retire or amend it.
 
 | ADR | Decision | Status | Changed by |
 | --- | --- | --- | --- |
+| 0355 | [Every tab fills its rows from its engine](0355-every-tab-fills-its-rows-from-its-engine.md) | Accepted, 2026-11-18 |  |
 | 0354 | [One schema, no migrations](0354-one-schema-no-migrations.md) | Accepted, 2026-11-17 |  |
 | 0353 | [Looks for the Lyrics panel](0353-lyrics-looks.md) | Accepted, 2026-11-17 |  |
 | 0352 | [A scan names the files it could not read](0352-a-scan-names-the-files-it-could-not-read.md) | Accepted, 2026-11-11 |  |
