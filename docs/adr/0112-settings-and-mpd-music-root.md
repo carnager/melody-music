@@ -1,6 +1,6 @@
 # ADR-0112: Settings dialog and the MPD music-root bridge
 
-- Status: accepted
+- Status: retired by ADR-0224 (Melody no longer speaks MPD); was accepted
 - Date: 2026-09-03
 - Owners: Trackknife project
 - Extends: ADR-0058 explicit MPD authority, ADR-0083 trust over

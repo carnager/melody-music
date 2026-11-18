@@ -10,14 +10,15 @@ Before changing code, read:
    ADRs, `MILESTONES.md`, and `docs/architecture.md`.**
 2. [ADR-0221](docs/adr/0221-entry-and-track-identity.md) if the work touches
    lists, queues, playback position, ratings or listening history.
-3. `MILESTONES.md` and identify the active milestone.
+3. `MILESTONES.md` for the 1.0 criteria; its milestones up to M11 are done.
 4. `docs/product.md`.
 5. `docs/compatibility.md`.
 6. The feature-specific document linked from `docs/README.md`.
 7. `docs/architecture.md`.
 
 Do not invent missing product decisions silently. Record consequential
-decisions as an ADR under `docs/adr/`.
+decisions as an ADR under `docs/adr/`, then run `python3 scripts/adr_index.py`
+to update the index (`docs/adr/README.md`).
 
 ## Product identity
 
@@ -62,19 +63,12 @@ repeatedly.
   re-evaluates. Search results are not a special kind of tab. The tagger is the
   one exception and stays a separate window (ADR-0221 rationale in
   `docs/unified-engine.md`, Phase 1).
-- **`quick::MpdQueueModel` and its tab type are being deleted, not
-  generalised.** They exist only because Melody is currently an MPD client
-  when talking to the Go daemon. Do not build new abstractions over them.
 - **The UI asks; the core answers.** The UI tells the core what to do and the
   core owns the database, looks things up, and returns what was asked for.
   Nothing in `src/bench` or `src/uicommon` should open a `LocalLibrary` or a
   `ListRepository`, or hold a database path. `ui::ListPersistenceService` does
   both today and is being moved to the other side of that line, not copied --
   do not model new code on it.
-- **Melody's daemon is not the place for new server-side features.** Its
-  catalogue, scanner, tagging, query, history and Last.fm code are all retired
-  in favour of the C++ engine, which already implements them at greater depth.
-  Only the MPD bridge and the agent/streaming/player stack survive.
 
 **During the transition**, existing authority code keeps working until its phase
 lands. Do not break the current application to anticipate a later phase; the

@@ -1,6 +1,6 @@
 # ADR-0058: Unified Trackbench MPD and local workspace
 
-- Status: accepted; implementation in progress
+- Status: retired: its MPD side by ADR-0224, its two-sided workspace by ADR-0220; was accepted
 - Date: 2026-08-30
 - Owners: Trackknife project
 - Supersedes: the process-boundary parts of ADR-0025

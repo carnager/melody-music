@@ -55,6 +55,6 @@ engine's anchors.
 
 ## Consequences
 
-`docs/architecture.md` and `docs/mpd-client.md` describe the retired backend
+`docs/architecture.md` and `docs/history/mpd-client.md` describe the retired backend
 and are marked as such; the architecture document needs rewriting around the
 engine rather than patching.

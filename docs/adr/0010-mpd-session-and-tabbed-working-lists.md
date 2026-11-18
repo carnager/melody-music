@@ -1,6 +1,6 @@
 # ADR-0010: Separate the live MPD queue from tabbed working lists
 
-- Status: accepted
+- Status: retired by ADR-0224 (Melody no longer speaks MPD); was accepted
 - Date: 2026-08-24
 - Owners: Trackknife project
 - Amended by: ADR-0020 removes `mixed_session_queue`; the remaining queue/list

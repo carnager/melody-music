@@ -1,6 +1,6 @@
 # ADR-0120: MPD search in the library panel
 
-- Status: accepted; result presentation and keyboard behavior superseded by ADR-0122
+- Status: retired by ADR-0224 (Melody no longer speaks MPD); was accepted; result presentation and keyboard behavior superseded by ADR-0122
 - Date: 2026-09-06
 - Owners: Trackknife project
 

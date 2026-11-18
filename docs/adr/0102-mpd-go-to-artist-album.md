@@ -1,6 +1,6 @@
 # ADR-0102: Go to Artist/Album in the MPD library
 
-- Status: accepted
+- Status: retired by ADR-0224 (Melody no longer speaks MPD); was accepted
 - Date: 2026-09-02
 - Owners: Trackknife project
 

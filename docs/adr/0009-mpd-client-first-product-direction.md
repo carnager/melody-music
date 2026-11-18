@@ -1,6 +1,6 @@
 # ADR-0009: Make the MPD client the primary product
 
-- Status: accepted
+- Status: retired by ADR-0224 (Melody no longer speaks MPD); was accepted
 - Date: 2026-08-24
 - Owners: Trackknife project
 - Amended by: ADR-0020 removes the proposed mixed-session playback coordinator

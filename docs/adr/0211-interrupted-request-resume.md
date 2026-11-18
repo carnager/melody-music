@@ -1,6 +1,6 @@
 # ADR-0211: Resume interrupted Up Next requests paused
 
-Status: Accepted
+Status: Accepted for the two-authority model, which ADR-0220 replaced; what holds now is the engine's.
 
 ## Decision
 

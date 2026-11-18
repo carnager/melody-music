@@ -1,7 +1,7 @@
 # MPD client, sources, queues, and Melody capabilities
 
 > **Superseded.** Trackknife no longer contains an MPD client
-> ([ADR-0224](adr/0224-retire-the-mpd-backend.md)). This document describes the
+> ([ADR-0224](../adr/0224-retire-the-mpd-backend.md)). This document describes the
 > retired backend and is kept for history.
 
 ## Scope
@@ -115,7 +115,7 @@ track count, duration, stored and computed ratings painted as yellow stars
 over the covers — instead of being derived from returned songs. The Search
 dialog additionally gains a **Server library** scope that translates tkq
 queries to the server's filter grammar (see
-[query-language.md](query-language.md)), with saved searches and committed
+[query-language.md](../query-language.md)), with saved searches and committed
 `tkq:` result tabs. When the server also advertises `filtergrammar`
 (Melody grammar level 2), the translator emits the full structured
 grammar — `OR`/`NOT` trees, `PRESENT`/`MISSING` via the MPD empty-value

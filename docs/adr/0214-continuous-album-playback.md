@@ -1,6 +1,6 @@
 # ADR-0214: Continuous album-oriented playback
 
-Status: Accepted
+Status: Accepted for the two-authority model, which ADR-0220 replaced; what holds now is the engine's.
 
 ## Decision
 

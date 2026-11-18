@@ -1,6 +1,6 @@
 # ADR-0220: One engine process, thin clients, and remote output agents
 
-Status: Proposed
+Status: Accepted, and carried out: docs/unified-engine.md has its phases, ADR-0259 the last of them.
 
 ## Context
 

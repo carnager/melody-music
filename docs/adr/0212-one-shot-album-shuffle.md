@@ -1,6 +1,6 @@
 # ADR-0212: One-shot album-preserving list shuffle
 
-Status: Accepted
+Status: Accepted for the two-authority model, which ADR-0220 replaced; what holds now is the engine's.
 
 ## Decision
 
