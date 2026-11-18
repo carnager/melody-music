@@ -5,10 +5,33 @@
 namespace trackknife::persistence::detail {
 
 // The whole state schema, version 58, as one script (ADR-0354). A database
-// is created from it; one at another version is not opened. 58 dropped the
-// lists, profiles, view presets and metadata cache the window kept before
-// its tabs were its own (ADR-0259, ADR-0286), and the lists retired by 56.
+// is created from it; one at the version before is upgraded by the step
+// below, and one older than that is not opened. 58 dropped the lists,
+// profiles, view presets and metadata cache the window kept before its tabs
+// were its own (ADR-0259, ADR-0286), and the lists retired by 56.
 inline constexpr unsigned current_schema_version = 58U;
+
+// The one step from the version before (ADR-0354, amendment of 2026-11-18).
+// A schema change edits the script above and replaces this step with its
+// own; tests/fixtures/state-schema-previous.sql is the schema it starts from.
+inline constexpr unsigned previous_schema_version = 57U;
+
+inline constexpr const char* upgrade_from_previous_sql = R"sql(
+DROP TABLE list_item_fields;
+DROP TABLE list_items;
+DROP TABLE list_documents;
+DROP TABLE connection_profiles;
+DROP TABLE track_view_presets;
+DROP TABLE local_metadata_cache_fields;
+DROP TABLE local_metadata_cache;
+DROP TABLE local_metadata_refreshes;
+DROP TABLE retired_engine_list_items;
+DROP TABLE retired_engine_lists;
+ALTER TABLE local_source_relocations DROP COLUMN affected_occurrences;
+ALTER TABLE local_source_relocations DROP COLUMN cache_rekeyed;
+ALTER TABLE local_source_relocations DROP COLUMN metadata_refreshed;
+UPDATE schema_version SET version = 58;
+)sql";
 
 inline constexpr const char* current_schema_sql = R"sql(
 CREATE TABLE operation_journal_occurrences (journal_id TEXT NOT NULL REFERENCES operation_journal(id) ON DELETE CASCADE, position INTEGER NOT NULL, item_index INTEGER NOT NULL, PRIMARY KEY(journal_id, position));
