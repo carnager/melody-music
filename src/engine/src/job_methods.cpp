@@ -4,6 +4,7 @@
 
 #include "trackknife/core/local_sources.hpp"
 #include "trackknife/engine/file_work_wire.hpp"
+#include "trackknife/engine/replaygain_round.hpp"
 #include "trackknife/loudness/replaygain.hpp"
 #include "trackknife/loudness/scan.hpp"
 #include "trackknife/metadata/local_reader.hpp"
@@ -567,192 +568,29 @@ void register_file_work_jobs(JobCatalog& jobs, std::filesystem::path database,
     jobs.on(
         "replaygain.apply",
         [database = database, &catalogue](const Json& params) -> core::Result<JobRegistry::Work> {
-            const auto listed = params.find("paths");
-            if (listed == params.end() || !listed->is_array() || listed->empty() ||
-                listed->size() > 10'000U) {
-                return std::unexpected(
-                    bad_params("between 1 and 10000 paths are required", "paths"));
+            auto request = wire::decode_replaygain_request(params);
+            if (!request) {
+                return std::unexpected(std::move(request.error()));
             }
-            std::vector<std::string> paths;
-            for (const auto& encoded : *listed) {
-                auto path = encoded.is_string()
-                                ? protocol::decode_raw_path(encoded.get<std::string>())
-                                : core::Result<std::string>{std::unexpected(core::Error{})};
-                if (!path) {
-                    return std::unexpected(bad_params("a path is not an encoded path", "paths"));
-                }
-                paths.push_back(std::move(*path));
-            }
-            loudness::ReplayGainSettings settings{
-                .grouping = {.mode = loudness::LoudnessGroupingMode::selection_album,
-                             .expression = {}},
-                .true_peak = params.value("true_peak", false),
-                .sidecar_only = params.value("sidecar", false)};
-            const auto grouping = params.value("grouping", std::string{"album"});
-            if (grouping == "track") {
-                settings.grouping.mode = loudness::LoudnessGroupingMode::track;
-            } else if (grouping == "release") {
-                settings.grouping.mode = loudness::LoudnessGroupingMode::release;
-            } else if (grouping != "album") {
-                return std::unexpected(
-                    bad_params("grouping is album, release or track", "grouping"));
-            }
-            return [paths = std::move(paths), settings, database, &catalogue](
+            return [request = std::move(*request), database, &catalogue](
                        const core::CancellationToken& token, const JobRegistry::Reporter& report) {
-                const auto failed = [](const core::Error& error) {
-                    return Json{{"error", wire::encode(error)}};
-                };
-                report(Json{{"phase", "reading"}, {"completed", 0}, {"total", paths.size()}});
-                std::vector<metadata::StagedMetadataSource> sources;
-                sources.reserve(paths.size());
-                for (const auto& path : paths) {
-                    sources.push_back(
-                        metadata::StagedMetadataSource{.raw_path = path,
-                                                       .source_revision = std::nullopt,
-                                                       .baseline = {},
-                                                       .logical_track = false,
-                                                       .cue_sheet = std::nullopt,
-                                                       .logical_identity = std::nullopt,
-                                                       .needs_metadata_capture = true});
-                }
-                const auto access = metadata::local_metadata_file_access();
-                auto captured =
-                    metadata::capture_uncached_metadata_sources(std::move(sources), access, token);
-                if (!captured) {
-                    return failed(captured.error());
-                }
-                // Gains already in a file's sidecar are part of what it says,
-                // as Trackknife reads it: the same gains again change nothing.
-                for (auto& source : *captured) {
-                    if (!source.source_revision) {
-                        continue;
-                    }
-                    const auto sidecar = metadata::read_loudness_sidecar(source.raw_path);
-                    if (sidecar && *sidecar && (*sidecar)->matches(*source.source_revision)) {
-                        loudness::project_loudness_sidecar(source.baseline, **sidecar, {},
-                                                           std::nullopt);
-                    }
-                }
-                auto selection =
-                    metadata::StagedMetadataSelection::create(std::move(*captured), {});
-                if (!selection) {
-                    return failed(selection.error());
-                }
-                std::vector<std::size_t> items(paths.size());
-                for (std::size_t index = 0U; index < items.size(); ++index) {
-                    items[index] = index;
-                }
-                const std::vector<loudness::ReplayGainAudio> audio(paths.size());
-                auto measured = loudness::measure_replaygain(
-                    *selection, metadata::StagedMetadataPatchSet{}, items, audio, settings,
-                    [&report](const loudness::LoudnessScanProgress& progress) {
-                        report(Json{{"phase", "measuring"},
-                                    {"completed", progress.completed_items},
-                                    {"total", progress.total_items}});
+                auto round = run_replaygain_round(
+                    request,
+                    [&database, &catalogue,
+                     &token](const metadata::MetadataWritePlan& plan,
+                             const operations::MetadataApplyProgressCallback& progress) {
+                        return apply_metadata_plan(plan, database, catalogue, progress, token);
+                    },
+                    [&report](const ReplayGainStep& step) {
+                        report(Json{{"phase", step.phase},
+                                    {"completed", step.completed},
+                                    {"total", step.total}});
                     },
                     token);
-                if (!measured) {
-                    return failed(measured.error());
+                if (!round) {
+                    return Json{{"error", wire::encode(round.error())}};
                 }
-                auto problems = Json::array();
-                for (const auto& problem : measured->problems) {
-                    problems.push_back(
-                        Json{{"path", problem.raw_path
-                                          ? Json(protocol::encode_raw_path(*problem.raw_path))
-                                          : Json()},
-                             {"message", wire::encode_text(problem.message)}});
-                }
-                auto tracks = Json::array();
-                for (const auto& row : measured->rows) {
-                    tracks.push_back(Json{{"path", protocol::encode_raw_path(row.raw_path)},
-                                          {"title", wire::encode_text(row.title)},
-                                          {"integrated_lufs", row.integrated_lufs},
-                                          {"track_gain", row.track_gain},
-                                          {"track_peak", row.track_peak},
-                                          {"album_gain", row.album_gain},
-                                          {"album_peak", row.album_peak},
-                                          {"status", row.status}});
-                }
-                Json result{{"tracks", std::move(tracks)},
-                            {"problems", std::move(problems)},
-                            {"written", 0},
-                            {"failed", 0}};
-                auto staged = loudness::stage_replaygain(*selection, measured->proposals, token);
-                if (!staged) {
-                    return failed(staged.error());
-                }
-                if (staged->staged_fields == 0U) {
-                    return Json{{"result", std::move(result)}};
-                }
-                auto plan = metadata::build_metadata_write_plan(
-                    staged->selection, staged->patches, access, token,
-                    metadata::MetadataWritePlanOptions{.sidecar_loudness = settings.sidecar_only,
-                                                       .true_peak_loudness = settings.true_peak});
-                if (!plan) {
-                    return failed(plan.error());
-                }
-                // As the ReplayGain window does: what was measured is written
-                // whole or not at all.
-                if (!plan->ready()) {
-                    for (const auto& source : plan->sources) {
-                        for (const auto& issue : source.issues) {
-                            result["problems"].push_back(
-                                Json{{"path", protocol::encode_raw_path(source.raw_path)},
-                                     {"message", wire::encode_text(issue.error.message)}});
-                        }
-                    }
-                    for (const auto& sidecar : plan->sidecars) {
-                        for (const auto& issue : sidecar.issues) {
-                            result["problems"].push_back(
-                                Json{{"path", protocol::encode_raw_path(sidecar.raw_audio_path)},
-                                     {"message", wire::encode_text(issue.error.message)}});
-                        }
-                    }
-                    result["refused"] = true;
-                    return Json{{"result", std::move(result)}};
-                }
-                auto applied = apply_metadata_plan(
-                    *plan, database, catalogue,
-                    [&report](const operations::MetadataApplyProgress& progress) {
-                        report(Json{{"phase", "writing"},
-                                    {"completed", progress.completed_sources},
-                                    {"total", progress.total_sources}});
-                    },
-                    token);
-                if (!applied) {
-                    return failed(applied.error());
-                }
-                // Files whose gains went into their tags, a CUE sheet or a
-                // sidecar: each counts once, wherever they went.
-                std::size_t written = 0U;
-                std::size_t not_written = 0U;
-                const auto count = [&written, &not_written,
-                                    &result](const operations::MetadataApplySourceState state,
-                                             const std::string& raw_path,
-                                             const std::optional<core::Error>& issue) {
-                    if (state == operations::MetadataApplySourceState::committed) {
-                        ++written;
-                    } else if (state == operations::MetadataApplySourceState::failed) {
-                        ++not_written;
-                    }
-                    if (issue) {
-                        result["problems"].push_back(
-                            Json{{"path", protocol::encode_raw_path(raw_path)},
-                                 {"message", wire::encode_text(issue->message)}});
-                    }
-                };
-                for (const auto& source : applied->sources) {
-                    count(source.state, source.raw_path, source.issue);
-                }
-                for (const auto& sheet : applied->cue_sheets) {
-                    count(sheet.state, sheet.raw_cue_path, sheet.issue);
-                }
-                for (const auto& sidecar : applied->sidecars) {
-                    count(sidecar.state, sidecar.raw_audio_path, sidecar.issue);
-                }
-                result["written"] = written;
-                result["failed"] = not_written;
-                return Json{{"result", std::move(result)}};
+                return Json{{"result", wire::encode(*round)}};
             };
         });
 }

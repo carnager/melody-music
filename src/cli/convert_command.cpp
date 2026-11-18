@@ -378,7 +378,7 @@ int convert_command(protocol::Client& client, const bool json,
         const auto count = made.size();
         auto measured = client.run_job(
             "replaygain.apply",
-            Json{{"paths", made}, {"grouping", "album"}, {"true_peak", false}, {"sidecar", false}},
+            Json{{"items", made}, {"grouping", "album"}, {"true_peak", false}, {"sidecar", false}},
             [](const Json&) {});
         if (!measured || measured->contains("error")) {
             std::cerr << "melody-cli: ReplayGain not measured: "
@@ -388,6 +388,8 @@ int convert_command(protocol::Client& client, const bool json,
             ++problems;
         } else {
             gained = measured->value("result", Json::object());
+            // What was written, file by file, is for a window's rows.
+            gained.erase("applied");
             const auto written = gained.value("written", std::size_t{0});
             if (gained.value("refused", false) || written < count) {
                 std::cerr << "melody-cli: ReplayGain written to " << written << " of " << count

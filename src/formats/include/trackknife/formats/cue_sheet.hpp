@@ -209,4 +209,15 @@ resolve_external_cue_sheet(std::string raw_cue_path,
                                                       std::size_t file_index,
                                                       std::size_t track_index);
 
+struct CueLogicalReferenceParts {
+    std::string raw_cue_path;
+    std::size_t file_index{0U};
+    std::size_t track_index{0U};
+};
+
+// The sheet and place a CUE track's logical identity names; none for one
+// that is not such an identity.
+[[nodiscard]] std::optional<CueLogicalReferenceParts>
+parse_cue_logical_reference(const std::string& reference);
+
 } // namespace trackknife::formats

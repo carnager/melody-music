@@ -441,7 +441,19 @@ core::Result<CapturedMetadataSources> capture_metadata_sources(
     CapturedMetadataSources captured;
     captured.unreadable = std::move(unreadable);
     captured.sources.reserve(sources.size());
+    // ADR-0139: a CUE track's gains go into its sheet, whose revision is
+    // observed where the files are, as the tags are read there.
+    std::map<std::string, std::optional<core::LocalSourceRevision>> sheets;
     for (auto& source : sources) {
+        if (source.cue_sheet && !source.cue_sheet->cue_revision && access.revision) {
+            auto [sheet, fresh] = sheets.try_emplace(source.cue_sheet->raw_cue_path);
+            if (fresh) {
+                if (auto revision = access.revision(sheet->first)) {
+                    sheet->second = *revision;
+                }
+            }
+            source.cue_sheet->cue_revision = sheet->second;
+        }
         if (!source.needs_metadata_capture || source.source_revision || source.logical_track) {
             captured.sources.push_back(std::move(source));
             continue;

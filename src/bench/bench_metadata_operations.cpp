@@ -140,9 +140,8 @@ void BenchMainWindow::showReplayGainForView(QTableView* view) {
     }
     const auto count = selected_rows.size();
     auto* dialog =
-        new ReplayGainDialog(count, selectionSourceReader(model, std::move(selected_rows)),
-                             engineMetadataPlanApplierFactory(work), metadataApplyObserver(), this,
-                             engineFileWorkTools(work));
+        new ReplayGainDialog(count, workspace_.replayGainItems(model, std::move(selected_rows)),
+                             std::move(work), metadataApplyObserver(), this);
     // Observable for tests and diagnostics: which did the work.
     dialog->setProperty("trackknife-file-work", QStringLiteral("engine"));
     dialog->show();

@@ -7,6 +7,7 @@ they supersede, replace, retire or amend it.
 
 | ADR | Decision | Status | Changed by |
 | --- | --- | --- | --- |
+| 0357 | [One ReplayGain round, in the engine](0357-one-replaygain-round-in-the-engine.md) | Accepted, 2026-11-18 |  |
 | 0356 | [The window reads no files](0356-the-window-reads-no-files.md) | Accepted, 2026-11-18 |  |
 | 0355 | [Every tab fills its rows from its engine](0355-every-tab-fills-its-rows-from-its-engine.md) | Accepted, 2026-11-18 |  |
 | 0354 | [One schema, no migrations](0354-one-schema-no-migrations.md) | Accepted, 2026-11-17 |  |
@@ -125,7 +126,7 @@ they supersede, replace, retire or amend it.
 | 0240 | [The Qt Quick window is a second view of one workspace, in Fusion everywhere](0240-qt-quick-window.md) | Superseded by ADR-0252 (2026-10-02): the window is retired | [0247](0247-light-and-dark-color-schemes.md), [0252](0252-retire-the-qt-quick-window.md) |
 | 0239 | [A desktop agent asks for Opus when its engine is far away](0239-streams-follow-the-route.md) | Accepted, 2026-09-29 |  |
 | 0238 | [The Actions button opens a popover, and remembers](0238-actions-popover.md) | Accepted, 2026-09-29 | [0262](0262-one-apply-for-both-windows.md) |
-| 0237 | [File work moves into the engine](0237-file-work-in-the-engine.md) | Accepted (2026-09-27) | [0263](0263-undo-what-was-written.md), [0266](0266-undo-copies-where-the-person-says.md), [0278](0278-results-name-what-was-written.md), [0281](0281-tags-written-in-place.md) |
+| 0237 | [File work moves into the engine](0237-file-work-in-the-engine.md) | Accepted (2026-09-27) | [0263](0263-undo-what-was-written.md), [0266](0266-undo-copies-where-the-person-says.md), [0278](0278-results-name-what-was-written.md), [0281](0281-tags-written-in-place.md), [0357](0357-one-replaygain-round-in-the-engine.md) |
 | 0236 | [Playback states are numbered, and say what the output was told](0236-playback-states-are-numbered.md) | Accepted (2026-09-26) |  |
 | 0235 | [UPnP renderers as outputs (optional)](0235-upnp-renderers-as-outputs.md) | accepted and implemented |  |
 | 0234 | [Engines are connections, not a switch](0234-engines-are-connections.md) | Accepted (2026-09-26) |  |
@@ -204,7 +205,7 @@ they supersede, replace, retire or amend it.
 | 0159 | [Staged bulk artwork editing](0159-staged-bulk-artwork-editing.md) | accepted |  |
 | 0158 | [MusicBrainz track review and throttle recovery](0158-musicbrainz-track-review-and-throttle-recovery.md) | accepted |  |
 | 0157 | [Tag field review controls](0157-tag-field-review-controls.md) | accepted |  |
-| 0156 | [ReplayGain from the track context menu](0156-context-menu-replaygain.md) | accepted |  |
+| 0156 | [ReplayGain from the track context menu](0156-context-menu-replaygain.md) | accepted | [0357](0357-one-replaygain-round-in-the-engine.md) |
 | 0155 | [Conversions write tags through the tag layer](0155-convert-tags-via-tag-layer.md) | accepted |  |
 | 0154 | [Mirror conversions recreate the full source path](0154-explicit-mirror-root.md) | accepted |  |
 | 0153 | [Search dialog and probe-technicals on rows](0153-search-dialog-and-row-technicals.md) | accepted |  |

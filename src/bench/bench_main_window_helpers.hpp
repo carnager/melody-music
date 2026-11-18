@@ -104,13 +104,7 @@ void project_display_metadata(LocalTrackRow& row);
 // ADR-0139: the stable CUE logical identity, as formats writes it.
 using formats::cue_track_logical_reference;
 
-struct CueLogicalReferenceParts {
-    std::string raw_cue_path;
-    std::size_t file_index{0U};
-    std::size_t track_index{0U};
-};
-
-[[nodiscard]] std::optional<CueLogicalReferenceParts>
-parse_cue_logical_reference(const std::string& reference);
+using formats::CueLogicalReferenceParts;
+using formats::parse_cue_logical_reference;
 
 } // namespace trackknife::bench

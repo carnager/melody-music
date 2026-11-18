@@ -26,6 +26,7 @@
 #include "uicommon/track_view_layout.hpp"
 #include "workspace/convert_job.hpp"
 #include "workspace/plugins.hpp"
+#include "workspace/replaygain_job.hpp"
 #include "workspace/tagger_session.hpp"
 
 #include <QElapsedTimer>
@@ -402,6 +403,9 @@ class Workspace final : public QObject {
     [[nodiscard]] MetadataPropertiesSourceReader
     selectionSourceReader(LocalListModel* model, std::vector<QPersistentModelIndex> rows,
                           std::optional<std::vector<LocalTrackRow>> snapshot = std::nullopt);
+    // ADR-0357: the rows as the engine is asked to measure their ReplayGain.
+    [[nodiscard]] ReplayGainItemReader replayGainItems(LocalListModel* model,
+                                                       std::vector<QPersistentModelIndex> rows);
     [[nodiscard]] MetadataApplyObserver metadataApplyObserver();
     [[nodiscard]] MetadataWritePlanApplierFactory
     engineMetadataPlanApplierFactory(std::shared_ptr<engine::RemoteFileWork> work,

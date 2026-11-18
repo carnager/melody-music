@@ -1613,7 +1613,7 @@ int run(const Options& options) {
             std::cerr << "melody-cli: " << chosen << "\n";
         }
         auto outcome = client->run_job("replaygain.apply",
-                                       Json{{"paths", std::move(paths)},
+                                       Json{{"items", std::move(paths)},
                                             {"grouping", grouping},
                                             {"true_peak", true_peak},
                                             {"sidecar", sidecar}},
@@ -1634,7 +1634,9 @@ int run(const Options& options) {
         if (const auto error = outcome->find("error"); error != outcome->end()) {
             fail(error->value("message", std::string{"the engine could not do it"}));
         }
-        const auto result = outcome->value("result", Json::object());
+        auto result = outcome->value("result", Json::object());
+        // What was written, file by file, is for a window's rows.
+        result.erase("applied");
         if (options.json) {
             std::cout << result.dump() << "\n";
             return result.contains("refused") ? EXIT_FAILURE : EXIT_SUCCESS;
@@ -1665,13 +1667,19 @@ int run(const Options& options) {
             lines += "  " + title + "\n";
         }
         std::cout << lines;
-        for (const auto& problem : result.value("problems", Json::array())) {
+        const auto said = [&shown_path, &text](const Json& problem, const std::string& after) {
             const auto path = problem.find("path");
             const auto where = path != problem.end() && path->is_string()
                                    ? shown_path(path->get<std::string>())
                                    : std::string{"the album"};
             std::cerr << "melody-cli: " << where << ": " << text(problem.value("message", Json{}))
-                      << "\n";
+                      << after << "\n";
+        };
+        for (const auto& problem : result.value("unreadable", Json::array())) {
+            said(problem, " (not read, left out)");
+        }
+        for (const auto& problem : result.value("problems", Json::array())) {
+            said(problem, "");
         }
         if (result.contains("refused")) {
             fail("nothing was written: not every file could take its gain");

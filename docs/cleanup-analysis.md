@@ -67,10 +67,8 @@ Not dead, though a scan says so: Qt overrides (`renderItem`, `tabSizeHint`,
 
 ## Tier 3 -- written more than once
 
-- **ReplayGain:** the desktop drives `loudness.scan` then `metadata.apply`
-  step by step (`bench/replaygain_scan.cpp:38`); the CLI uses the engine's
-  `replaygain.apply` (`job_methods.cpp:568-650`). One path, with a preview
-  mode for the desktop.
+- **ReplayGain:** done 2026-11-18 (ADR-0357): the dialog and the CLI both
+  ask the engine for `replaygain.apply`, with a preview mode.
 - **Client-side file access still possible:** `FileWorkTools{}` defaults to
   this process (`file_work_tools.hpp:38-50`, defaults in
   `replaygain_dialog.hpp:29`, `replaygain_job.hpp:33`,
