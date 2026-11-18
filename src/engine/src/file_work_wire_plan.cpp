@@ -303,12 +303,7 @@ core::Result<metadata::MetadataWritePlan> decode_write_plan(const Json& value) {
             });
         source.issues = source_in.list<metadata::MetadataWritePlanIssue>("issues", read_issue);
         if (const auto* artwork = source_in.find("artwork")) {
-            if (artwork->is_boolean()) {
-                // An older client's marker: no artwork, or refused.
-                if (artwork->get<bool>()) {
-                    source_in.fail("artwork was marked but not sent");
-                }
-            } else if (auto decoded = decode_artwork_source(*artwork)) {
+            if (auto decoded = decode_artwork_source(*artwork)) {
                 source.artwork =
                     std::make_shared<const metadata::ArtworkWritePlanSource>(std::move(*decoded));
             } else {

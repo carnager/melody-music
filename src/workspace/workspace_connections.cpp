@@ -121,8 +121,8 @@ void Workspace::connectLocalEngine() {
 }
 
 // ADR-0234: an engine elsewhere has said who it is. Known until now by a
-// placeholder -- the remote of an older release, or its address -- its
-// lists and everything kept for it take its id. Known by another id, the
+// placeholder, its address, its lists and everything kept for it take its
+// id. Known by another id, the
 // address now leads to another engine: its link takes the new id, and the
 // lists of the one it led to before stay that engine's.
 void Workspace::adoptEngineIdentity(EngineLink& engine) {
@@ -141,8 +141,7 @@ void Workspace::adoptEngineIdentity(EngineLink& engine) {
     }
     const auto from = remote->key;
     const auto to = EngineKey::fromText(id);
-    const bool lists_follow =
-        from == EngineKey::remote() || from.text().startsWith(QStringLiteral("address:"));
+    const bool lists_follow = from.text().startsWith(QStringLiteral("address:"));
     remote->key = to;
     remote->setting.id = id;
     rememberEngineId(remote->setting.address, id);
@@ -198,9 +197,7 @@ void Workspace::syncRemoteEngines() {
             return !engine->key.isLocal() && engine->setting.address == setting.address;
         });
         if (!connected) {
-            // An engine added now is new to this window: it has no lists of
-            // an older release to be the owner of.
-            connectRemoteEngine(setting, false);
+            connectRemoteEngine(setting);
         }
     }
     // What mounts and names say now.
@@ -247,14 +244,13 @@ void Workspace::disconnectEngine(const EngineKey& key) {
     view_->refreshTransport();
 }
 
-void Workspace::connectRemoteEngine(const RemoteEngineSetting& setting, const bool first) {
+void Workspace::connectRemoteEngine(const RemoteEngineSetting& setting) {
     auto added = std::make_unique<EngineLink>();
-    // ADR-0234: by the id it gave when last reached. Until it has been, a
-    // placeholder: "remote" for the one remote of an older release, whose
-    // lists say so, or its address for one added since.
-    added->key = !setting.id.isEmpty() ? EngineKey::fromText(setting.id)
-                 : first ? EngineKey::remote()
-                         : EngineKey::fromText(QStringLiteral("address:") + setting.address);
+    // ADR-0234: by the id it gave when last reached; until it has been, by
+    // its address.
+    added->key = !setting.id.isEmpty()
+                     ? EngineKey::fromText(setting.id)
+                     : EngineKey::fromText(QStringLiteral("address:") + setting.address);
     added->setting = setting;
     added->password = setting.effectivePassword();
     added->catalogue =
@@ -368,7 +364,7 @@ void Workspace::connectRemoteEngine(const RemoteEngineSetting& setting, const bo
         // back to.
         static_cast<void>(engineTab(*link));
     }
-    view_->engineConnected(*link, first);
+    view_->engineConnected(*link);
 }
 
 void Workspace::adoptListen(const EngineKey& engine, const std::string& raw_path) {
@@ -794,14 +790,6 @@ void Workspace::loadPendingRelocations() {
                 if (engine.is_string()) {
                     pending.done.insert(QString::fromStdString(engine.get<std::string>()));
                 }
-            }
-            // An older release said only whether this computer's and the
-            // remote had it.
-            if (move.value("local", false)) {
-                pending.done.insert(EngineKey::local().text());
-            }
-            if (move.value("remote", false)) {
-                pending.done.insert(QStringLiteral("*"));
             }
             pending_relocations_.push_back(std::move(pending));
         }

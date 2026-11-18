@@ -209,11 +209,9 @@ void history_crosses_with_its_sources(engine::Catalogue& catalogue, const std::s
                                              .modification_time_nanoseconds = 5};
 
     persistence::LibraryHistorySource first;
-    first.source.source = persistence::ListSource::local;
     first.source.source_reference = "/music/a.flac";
     first.source.source_revision = revision;
     persistence::LibraryHistorySource second;
-    second.source.source = persistence::ListSource::local;
     second.source.source_reference = "/music/b.flac";
     second.source.source_revision = revision;
     second.source.source_selection = persistence::ListItemSourceSelection{std::nullopt, 2};

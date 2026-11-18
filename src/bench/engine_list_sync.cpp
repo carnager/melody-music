@@ -232,7 +232,6 @@ EngineListSync::documentFromAnswer(const Json& answer, const EngineKey& engine) 
             continue;
         }
         persistence::ListItem row{.entry_id = item->entry_id,
-                                  .source = persistence::ListSource::local,
                                   .profile_id = std::nullopt,
                                   .source_reference = item->raw_path,
                                   .logical_reference = std::move(item->logical_reference),
@@ -256,14 +255,10 @@ EngineListSync::documentFromAnswer(const Json& answer, const EngineKey& engine) 
 
 EngineListSync::EngineListSync(QObject* parent) : QObject(parent) {
     for (const auto& pending : QSettings{}.value(QLatin1String(removals_key)).toStringList()) {
-        // "engine<TAB>id"; before engines had keys, "r:id" or "l:id".
+        // "engine<TAB>id".
         if (const auto tab = pending.indexOf(QLatin1Char('\t')); tab > 0) {
             removals_.emplace(EngineKey::fromText(pending.left(tab)),
                               pending.mid(tab + 1).toStdString());
-        } else if (pending.size() > 2 && pending.at(1) == QLatin1Char(':')) {
-            removals_.emplace(pending.front() == QLatin1Char('r') ? EngineKey::remote()
-                                                                  : EngineKey::local(),
-                              pending.mid(2).toStdString());
         }
     }
 }
@@ -387,10 +382,6 @@ void EngineListSync::update(const std::vector<persistence::ListDocumentWrite>& d
     items_of_ = items_of;
     std::unordered_set<std::string> present;
     for (const auto& write : documents) {
-        // Server URIs of the retired MPD backend: no engine plays those.
-        if (write.document.kind == persistence::ListKind::mpd) {
-            continue;
-        }
         present.insert(write.document.id.to_string());
         take(write, items_of);
     }

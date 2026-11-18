@@ -117,7 +117,7 @@ void BenchMainWindow::engineAttached(EngineLink& engine) {
 }
 
 // An engine elsewhere connected: its library beside this computer's.
-void BenchMainWindow::engineConnected(EngineLink& engine, const bool first) {
+void BenchMainWindow::engineConnected(EngineLink& engine) {
     auto* link = &engine;
     link->library = new LocalLibraryPanel(*link->catalogue, link->key, source_stack_);
     // Its Folders…: Settings › Engines, which shows the music folders of
@@ -125,9 +125,11 @@ void BenchMainWindow::engineConnected(EngineLink& engine, const bool first) {
     // (ADR-0286).
     connect(link->library, &LocalLibraryPanel::manageFoldersRequested, this,
             [this] { static_cast<void>(showSettingsDialog(SettingsDialog::Page::engine)); });
-    link->library->setObjectName(
-        first ? QStringLiteral("bench-remote-library")
-              : QStringLiteral("bench-remote-library-%1").arg(engines_.size() - 1));
+    // The first engine elsewhere is after this computer's.
+    const auto position = engines_.size() - 1;
+    link->library->setObjectName(position == 1
+                                     ? QStringLiteral("bench-remote-library")
+                                     : QStringLiteral("bench-remote-library-%1").arg(position));
     source_stack_->addWidget(link->library);
     workspace_.attachLibrary(&link->library->browser());
     refreshLocalRatings();

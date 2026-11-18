@@ -108,13 +108,5 @@ struct Settings {
 
 // "original" is 0, "opus N" is N, for N in 16..512 (ADR-0239).
 [[nodiscard]] std::optional<int> parse_stream(std::string_view text);
-// The other way round, for a file written from flags.
-[[nodiscard]] std::string stream_text(int kbps);
-
-// The environment file melodyd.conf was until ADR-0286 -- MELODYD_OPTIONS
-// holding flags -- written as settings. Lines other than MELODYD_OPTIONS are
-// kept, commented out. Refuses flags it does not know.
-[[nodiscard]] core::Result<std::string> convert_options_file(std::string_view text);
-[[nodiscard]] bool is_options_file(std::string_view text);
 
 } // namespace trackknife::daemon

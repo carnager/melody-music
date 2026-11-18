@@ -175,7 +175,6 @@ std::vector<LocalListModel::HistoryRequest> LocalListModel::takeHistoryRequests(
         }
         row.history_requested = true;
         persistence::ListItem source;
-        source.source = persistence::ListSource::local;
         source.source_reference = row.raw_path;
         source.source_revision = row.source_revision;
         source.source_selection = persistence::ListItemSourceSelection{row.selection.stream_index,

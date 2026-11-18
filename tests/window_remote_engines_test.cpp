@@ -114,9 +114,9 @@ void BenchMainWindowTest::RemoteEngines::tabsAreGroupedByEngine() {
     }
 }
 
-// ADR-0234: an older release's remote lists said only "the remote". Reached,
-// the remote says who it is: its lists take its id, which is remembered, and
-// a restart finds them under it without asking again.
+// ADR-0234: an engine elsewhere not reached yet is known by its address.
+// Reached, it says who it is: its lists take its id, which is remembered,
+// and a restart finds them under it without asking again.
 void BenchMainWindowTest::RemoteEngines::theRemotesListsTakeItsIdOnceItSaysIt() {
     QTemporaryDir remote_state;
     QVERIFY(remote_state.isValid());

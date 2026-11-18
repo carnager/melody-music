@@ -12,6 +12,16 @@ from the Qt Quick window, and helpers written several times.
 
 ## Tier 1 -- compatibility nobody needs (nothing is released)
 
+Done: the migration chain, backfills, adopters, retired lists and most
+old-level paths in the merge of 2026-11-17 (32e115e2); schema 58 and the
+client-era lists 2026-11-17; the last of it 2026-11-18 -- `ListKind::mpd`
+and `ListSource`, the "remote" placeholder key of an older release and the
+pending-move and pending-removal formats it wrote, the tab cache's move
+from the cache folder, the old-engine branches for favourites, folder
+places and the artwork marker, and melodyd's conversion of the
+`MELODYD_OPTIONS` file with its renamed-key hints. What stays reads a field
+a protocol answer may leave out, which is tolerance, not compatibility.
+
 | What | Where | Lines |
 | --- | --- | --- |
 | 57-step schema migration chain; squash into one v57 `CREATE` and refuse older | `persistence/src/list_repository.cpp:323-1665` | ~1,340 |
@@ -34,6 +44,9 @@ that TabStore has adopted their lists and view presets.
 Tier 1 total: **~5,000 lines**, mostly in one file.
 
 ## Tier 2 -- dead code (verified by hand)
+
+Done in the merge of 2026-11-17 (32e115e2); checked again 2026-11-18, none
+of the names below is left.
 
 | Area | Items | Lines |
 | --- | --- | --- |

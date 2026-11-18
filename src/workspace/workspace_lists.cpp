@@ -37,9 +37,6 @@ std::vector<LocalTrackRow> rowsOfItems(const std::span<const persistence::ListIt
     std::vector<LocalTrackRow> rows;
     rows.reserve(items.size());
     for (const auto& item : items) {
-        if (item.source != persistence::ListSource::local) {
-            continue;
-        }
         LocalTrackRow row;
         row.entry_id = item.entry_id;
         row.raw_path = item.source_reference;
@@ -388,7 +385,6 @@ persistence::ListDocument Workspace::documentOf(const ListTab& tab) const {
             // Carry the row's identity rather than letting ListItem mint a
             // fresh one, which would reassign every entry on every save.
             .entry_id = row.entry_id,
-            .source = persistence::ListSource::local,
             .profile_id = std::nullopt,
             .source_reference = row.raw_path,
             .logical_reference = row.logical_reference,
@@ -572,11 +568,6 @@ void Workspace::restoreLists(std::vector<PreparedList> documents) {
         qCDebug(tkDebug) << "  list" << displayText(document.name) << "kind"
                          << static_cast<int>(document.kind) << "items"
                          << static_cast<int>(prepared.rows.size());
-        // Documents of the retired MPD backend name server URIs, not files;
-        // opened as local lists they would be rows that cannot play.
-        if (document.kind == persistence::ListKind::mpd) {
-            continue;
-        }
         // As stored: saving it again writes its header, not its items.
         if (auto* tab = addList(std::move(prepared), false); tab != nullptr) {
             tab->saved = savedStateOf(*tab);
