@@ -79,7 +79,7 @@ Not dead, though a scan says so: Qt overrides (`renderItem`, `tabSizeHint`,
   the local/remote branch AGENTS.md is removing; ~25 `isLocal()` sites.
 - **Encoder probing in the client** (`convert_job.cpp:203`) beside the
   engine's (`convert_methods.cpp:97`), which is the right one for a remote engine.
-- **Two cover loaders with their own caches:** Workspace
+- **Two cover loaders with their own caches:** done 2026-11-18 (one CoverLoader). Workspace
   (`workspace_ingest.cpp:645-785`) and `LibraryBrowser::wantCovers`
   (`library_browser.cpp:1738`).
 - **UI helpers:** ~~12 colour-mix helpers~~ done 2026-11-18 (`ui::mix`,

@@ -243,7 +243,6 @@ std::vector<persistence::LibraryEntry> LibraryBrowser::selectedEntries(QModelInd
 LibraryBrowser::LibraryBrowser(const CatalogueSource& catalogues, EngineKey engine, QObject* parent)
     : QObject(parent), catalogues_(&catalogues), engine_(std::move(engine)) {
     pool_.setMaxThreadCount(2);
-    artwork_pool_.setMaxThreadCount(1);
     status_ = tr("Press Refresh to scan your music folders.");
     query_mode_ = QSettings{}.value(QStringLiteral("library/query-mode"), false).toBool();
     newest_first_ = QSettings{}.value(QStringLiteral("library/newest-first"), false).toBool();
@@ -316,18 +315,8 @@ LibraryBrowser::LibraryBrowser(const CatalogueSource& catalogues, EngineKey engi
         loadRoots();
         emit libraryContentChanged();
     });
-    connect(&artwork_watcher_, &QFutureWatcherBase::finished, this, [this] {
-        artwork_running_ = false;
-        if (stopped_) {
-            return;
-        }
-        if (artwork_job_generation_ == artwork_generation_ &&
-            !artwork_cancellation_.is_cancellation_requested()) {
-            artwork_cache_.insert(artwork_key_, new QImage(artwork_watcher_.result()));
-            emit coverLoaded(artwork_key_);
-        }
-        pumpCovers();
-    });
+    connect(&covers_, &CoverLoader::loaded, this,
+            [this](const QString& key, const QImage&) { emit coverLoaded(key); });
     reload();
     loadRoots();
     refreshSourceLabel();
@@ -411,13 +400,12 @@ void LibraryBrowser::stop() {
     lifetime_cancellation_.request_cancellation();
     view_cancellation_.request_cancellation();
     scan_cancellation_.request_cancellation();
-    artwork_cancellation_.request_cancellation();
+    covers_.stop();
     search_timer_.stop();
     poll_timer_.stop();
     change_timer_.stop();
     tasks_.clear();
     pool_.waitForDone();
-    artwork_pool_.waitForDone();
 }
 
 void LibraryBrowser::enqueue(Task task) {
@@ -680,7 +668,8 @@ QString LibraryBrowser::emptyLibraryText() const {
 void LibraryBrowser::reload() {
     locating_ = {};
     ++generation_;
-    artwork_cancellation_.request_cancellation();
+    // Asked again for what is in view once it is shown again.
+    covers_.keepOnly({});
     view_cancellation_.request_cancellation();
     view_cancellation_ = core::CancellationSource{};
     std::erase_if(tasks_, [](const Task& task) { return task.view_query; });
@@ -888,10 +877,10 @@ void LibraryBrowser::applyChanges(const std::vector<std::string>& albums, const 
         // Asked again when shown; the old one stays until the new arrives.
         for (const auto& album : albums) {
             const auto key = text(album);
-            artwork_cache_.remove(key);
+            covers_.forget(key);
             emit coverLoaded(key);
         }
-        pumpCovers();
+        requestCovers();
     }
     change_timer_.start();
 }
@@ -1672,62 +1661,49 @@ void LibraryBrowser::updateProgress() {
 // --- Covers -------------------------------------------------------------------
 
 QImage LibraryBrowser::cover(const QString& album_key) const {
-    const auto* image = artwork_cache_.object(album_key);
-    return image != nullptr ? *image : QImage{};
+    return covers_.cached(album_key).value_or(QImage{});
 }
 
 bool LibraryBrowser::hasCover(const QString& album_key) const {
-    return artwork_cache_.contains(album_key);
+    return covers_.cached(album_key).has_value();
 }
 
 void LibraryBrowser::invalidateCovers() {
-    ++artwork_generation_;
-    artwork_cancellation_.request_cancellation();
-    artwork_cache_.clear();
+    covers_.clear();
     emit coverLoaded({});
 }
 
 void LibraryBrowser::wantCovers(const QStringList& album_keys) {
     wanted_covers_ = album_keys;
-    if (artwork_running_) {
-        // A cover no longer in view is not waited for.
-        if (!wanted_covers_.contains(artwork_key_)) {
-            artwork_cancellation_.request_cancellation();
-        }
-        return;
-    }
-    pumpCovers();
+    // A cover no longer in view is not waited for.
+    covers_.keepOnly(QSet<QString>{album_keys.begin(), album_keys.end()});
+    requestCovers();
 }
 
-void LibraryBrowser::pumpCovers() {
-    if (stopped_ || artwork_running_) {
+void LibraryBrowser::requestCovers() {
+    if (stopped_) {
         return;
     }
     for (const auto& key : wanted_covers_) {
-        if (artwork_cache_.contains(key)) {
+        if (covers_.pending(key) || covers_.cached(key)) {
             continue;
         }
-        artwork_key_ = key;
-        artwork_job_generation_ = artwork_generation_;
-        artwork_cancellation_ = core::CancellationSource{};
-        artwork_running_ = true;
-        artwork_watcher_.setFuture(
-            QtConcurrent::run(&artwork_pool_, [catalogue = openCatalogue(), key = key.toStdString(),
-                                               cancellation = artwork_cancellation_.token()] {
-                if (cancellation.is_cancellation_requested()) {
-                    return QImage{};
-                }
-                // ADR-0220: ask the core, do not open its database. Read by
-                // the engine, where the files are: a remote library shows its
-                // covers with nothing of it mounted here.
-                const auto source = catalogue->artwork_source(key, cancellation);
-                if (!source || !source->has_value() || cancellation.is_cancellation_requested()) {
-                    return QImage{};
-                }
-                const auto bytes = catalogue->artwork(**source, cancellation);
-                return bytes ? ui::artworkThumbnail(*bytes) : QImage{};
-            }));
-        return;
+        covers_.request(key,
+                        [catalogue = openCatalogue(),
+                         key = key.toStdString()](const core::CancellationToken& cancellation)
+                            -> core::Result<std::vector<unsigned char>> {
+                            // ADR-0220: ask the core, do not open its database. Read by the
+                            // engine, where the files are: a remote library shows its covers
+                            // with nothing of it mounted here.
+                            const auto source = catalogue->artwork_source(key, cancellation);
+                            if (!source) {
+                                return std::unexpected(source.error());
+                            }
+                            if (!source->has_value()) {
+                                return std::vector<unsigned char>{};
+                            }
+                            return catalogue->artwork(**source, cancellation);
+                        });
     }
 }
 

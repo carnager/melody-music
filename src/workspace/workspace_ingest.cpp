@@ -192,6 +192,15 @@ void Workspace::insertRemotePaths(ListTab& tab, std::vector<std::string> raw_pat
     enqueueUnprobedRows(tab);
 }
 
+// A tab's cover of a track, asked of the engine holding it.
+[[nodiscard]] static CoverLoader::Fetch cover_of(std::shared_ptr<engine::Catalogue> engine,
+                                                 std::string raw_path) {
+    return [engine = std::move(engine),
+            raw_path = std::move(raw_path)](const core::CancellationToken& cancellation) {
+        return engine->artwork(raw_path, cancellation);
+    };
+}
+
 void Workspace::syncArtwork(ListTab& tab) {
     // ADR-0356: a tab's covers come from its engine, as its rows do --
     // this computer's as well as one elsewhere, of which nothing need be
@@ -208,20 +217,14 @@ void Workspace::syncArtwork(ListTab& tab) {
             continue;
         }
         const auto key = tab.model->groupKey(row);
-        if (const auto cached = artwork_cache_.constFind(key);
-            cached != artwork_cache_.constEnd()) {
+        if (const auto cached = covers_.cached(key)) {
             if (!cached->isNull() && !tab.model->hasArtwork(key)) {
                 tab.model->setArtwork(key, *cached);
             }
             continue;
         }
-        if (!artwork_pending_.contains(key)) {
-            artwork_pending_.insert(key);
-            artwork_queue_.push_back(
-                ArtworkJob{.key = key, .raw_path = track.raw_path, .engine = engine});
-        }
+        covers_.request(key, cover_of(engine, track.raw_path));
     }
-    pumpArtworkQueue();
 }
 
 QImage Workspace::coverFor(const LocalTrackRow& track, const EngineKey& engine_key) {
@@ -234,21 +237,14 @@ QImage Workspace::coverFor(const LocalTrackRow& track, const EngineKey& engine_k
             return tab->model->artwork(key);
         }
     }
-    if (const auto cached = artwork_cache_.constFind(key); cached != artwork_cache_.constEnd()) {
+    if (const auto cached = covers_.cached(key)) {
         return *cached;
     }
     // Not in any list: fetched as a tab's would be, from the engine that has
     // the file.
-    auto* catalogue = catalogueOf(engine_key);
-    if (catalogue == nullptr) {
-        return {};
-    }
-    std::shared_ptr<engine::Catalogue> engine{catalogue->openDeferred()};
-    if (!artwork_pending_.contains(key)) {
-        artwork_pending_.insert(key);
-        artwork_queue_.push_back(
-            ArtworkJob{.key = key, .raw_path = track.raw_path, .engine = engine});
-        pumpArtworkQueue();
+    if (auto* catalogue = catalogueOf(engine_key)) {
+        covers_.request(key, cover_of(std::shared_ptr<engine::Catalogue>{catalogue->openDeferred()},
+                                      track.raw_path));
     }
     return {};
 }
@@ -271,12 +267,7 @@ void Workspace::invalidateArtwork(const std::set<std::string>& raw_paths) {
         }
     }
     for (const auto& key : keys) {
-        artwork_cache_.remove(key);
-        artwork_pending_.remove(key);
-        std::erase_if(artwork_queue_, [&key](const ArtworkJob& job) { return job.key == key; });
-        if (artwork_running_ && artwork_outcome_ && artwork_outcome_->key == key) {
-            artwork_invalidated_while_loading_.insert(key);
-        }
+        covers_.forget(key);
         for (const auto& tab : list_tabs_) {
             tab->model->setArtwork(key, {});
         }
@@ -286,77 +277,29 @@ void Workspace::invalidateArtwork(const std::set<std::string>& raw_paths) {
     }
 }
 
-void Workspace::pumpArtworkQueue() {
-    if (artwork_running_ || artwork_queue_.empty()) {
-        return;
-    }
-    auto job = std::move(artwork_queue_.front());
-    artwork_queue_.pop_front();
-    artwork_running_ = true;
-    connect(&artwork_watcher_, &QFutureWatcher<void>::finished, this, &Workspace::finishArtworkLoad,
-            Qt::SingleShotConnection);
-    artwork_outcome_ =
-        std::make_shared<ArtworkOutcome>(ArtworkOutcome{.key = std::move(job.key), .image = {}});
-    artwork_watcher_.setFuture(
-        QtConcurrent::run([raw_path = std::move(job.raw_path), engine = std::move(job.engine),
-                           outcome = artwork_outcome_, cancellation = work_cancellation_.token()] {
-            const auto bytes = engine->artwork(raw_path, cancellation);
-            outcome->image = bytes ? ui::artworkThumbnail(*bytes) : QImage{};
-            outcome->failed = !bytes;
-#if defined(MELODY_THREAD_SANITIZER)
-            __tsan_release(outcome.get());
-#endif
-        }));
-}
-
-void Workspace::finishArtworkLoad() {
-    artwork_running_ = false;
-    auto outcome = artwork_outcome_;
-    if (!outcome) {
-        pumpArtworkQueue();
-        return;
-    }
-#if defined(MELODY_THREAD_SANITIZER)
-    __tsan_acquire(outcome.get());
-#endif
-    if (artwork_invalidated_while_loading_.remove(outcome->key)) {
-        // Invalidation already queued a fresh read and its pending marker now
-        // owns this key. Discard only the stale in-flight result.
-        pumpArtworkQueue();
-        return;
-    }
-    if (outcome->failed) {
-        // Not known to have no cover: asked again when the tab next looks.
-        artwork_pending_.remove(outcome->key);
-        pumpArtworkQueue();
-        return;
-    }
-    // Failed lookups are cached as null so a missing cover is asked once, not
-    // on every metadata refresh.
-    artwork_cache_.insert(outcome->key, outcome->image);
-    if (!outcome->image.isNull()) {
+void Workspace::coverLoaded(const QString& key, const QImage& image) {
+    if (!image.isNull()) {
         for (const auto& tab : list_tabs_) {
-            if (!tab->model->hasArtwork(outcome->key)) {
-                tab->model->setArtwork(outcome->key, outcome->image);
+            if (!tab->model->hasArtwork(key)) {
+                tab->model->setArtwork(key, image);
             }
         }
         // Up Next and the header may have asked for it without a tab.
         if (up_next_local_model_ != nullptr) {
             for (int row = 0; row < up_next_local_model_->rowCount(); ++row) {
-                if (up_next_local_model_->groupKey(row) == outcome->key) {
-                    up_next_local_model_->setArtwork(outcome->key, outcome->image);
+                if (up_next_local_model_->groupKey(row) == key) {
+                    up_next_local_model_->setArtwork(key, image);
                     break;
                 }
             }
         }
-        view_->artworkLoaded(outcome->key);
+        view_->artworkLoaded(key);
     }
     // The cover a notification waits for: it goes now, with it.
-    if (outcome->key == desktop_cover_waiting_) {
+    if (key == desktop_cover_waiting_) {
         desktop_cover_waiting_.clear();
         publishDesktopState();
     }
-    pumpArtworkQueue();
 }
 
 void Workspace::startDiscovery(std::vector<std::string> raw_paths, QString target_document_id,

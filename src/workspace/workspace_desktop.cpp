@@ -227,7 +227,7 @@ MprisPlaybackState Workspace::desktopStateOf(const EnginePlayback::State& engine
             // Asked for just now, or on its way: worth a moment's wait.
             const auto key = LocalListModel::groupKeyOf(*track);
             desktop_cover_waiting_ =
-                state.art_path.isEmpty() && artwork_pending_.contains(key) ? key : QString{};
+                state.art_path.isEmpty() && covers_.pending(key) ? key : QString{};
         } else {
             desktop_cover_waiting_.clear();
         }

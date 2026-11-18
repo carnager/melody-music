@@ -11,6 +11,8 @@
 #include "trackknife/query/tkq.hpp"
 #include "workspace/library_tree_model.hpp"
 
+#include "workspace/cover_loader.hpp"
+
 #include <QCache>
 #include <QElapsedTimer>
 #include <QFutureWatcher>
@@ -269,7 +271,7 @@ class LibraryBrowser final : public QObject {
                             std::shared_ptr<const query::CompiledTkq> compiled);
     void refreshSourceLabel();
     void updateProgress();
-    void pumpCovers();
+    void requestCovers();
     void setStatus(const QString& status);
     void setQueryError(const QString& error);
     [[nodiscard]] QString emptyLibraryText() const;
@@ -284,15 +286,9 @@ class LibraryBrowser final : public QObject {
     QThreadPool pool_;
     QFutureWatcher<Outcome> query_watcher_;
     QFutureWatcher<ScanOutcome> scan_watcher_;
-    QThreadPool artwork_pool_;
-    QFutureWatcher<QImage> artwork_watcher_;
-    core::CancellationSource artwork_cancellation_;
-    QCache<QString, QImage> artwork_cache_{256};
-    QString artwork_key_;
+    // The albums' covers, by album key; the ones in view.
+    CoverLoader covers_{256};
     QStringList wanted_covers_;
-    std::size_t artwork_generation_{0};
-    std::size_t artwork_job_generation_{0};
-    bool artwork_running_{false};
     std::deque<Task> tasks_;
     std::function<void(Outcome)> completion_;
     core::CancellationSource lifetime_cancellation_;

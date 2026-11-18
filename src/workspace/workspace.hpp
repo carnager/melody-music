@@ -25,6 +25,7 @@
 #include "uicommon/list_persistence_service.hpp"
 #include "uicommon/track_view_layout.hpp"
 #include "workspace/convert_job.hpp"
+#include "workspace/cover_loader.hpp"
 #include "workspace/plugins.hpp"
 #include "workspace/replaygain_job.hpp"
 #include "workspace/tagger_session.hpp"
@@ -172,20 +173,6 @@ class Workspace final : public QObject {
         bool cancelled{false};
         bool truncated{false};
     };
-    struct ArtworkJob {
-        QString key;
-        std::string raw_path;
-        // Asked for the cover when the file is on its machine, not this one:
-        // a remote tab's (ADR-0227). Unset, the file is read here.
-        std::shared_ptr<engine::Catalogue> engine;
-    };
-    struct ArtworkOutcome {
-        QString key;
-        QImage image;
-        // The engine could not be asked -- unreachable, say -- which is not
-        // the same as "this album has no cover", and is not remembered as it.
-        bool failed{false};
-    };
     struct SeenEngine {
         QString status;
         QString entry;
@@ -326,13 +313,8 @@ class Workspace final : public QObject {
     QHash<QString, std::vector<core::StableId>> redescribe_;
     // What reads files here -- covers, folders opened -- stopped on closing.
     core::CancellationSource work_cancellation_;
-    QFutureWatcher<void> artwork_watcher_;
-    std::shared_ptr<ArtworkOutcome> artwork_outcome_;
-    std::deque<ArtworkJob> artwork_queue_;
-    QHash<QString, QImage> artwork_cache_;
-    QSet<QString> artwork_pending_;
-    QSet<QString> artwork_invalidated_while_loading_;
-    bool artwork_running_{false};
+    // The tabs', Up Next's and the desktop's covers, by album group.
+    CoverLoader covers_{100'000};
     std::optional<CrossTabMoveEdit> cross_tab_move_edit_;
     std::vector<EngineInterruption> engine_interruptions_;
     // This computer's move destinations as last loaded, for offering them to
@@ -1045,8 +1027,7 @@ class Workspace final : public QObject {
     void finishDiscovery();
     // The next of what was opened, once this computer's engine is reached.
     void startNextDiscovery();
-    void pumpArtworkQueue();
-    void finishArtworkLoad();
+    void coverLoaded(const QString& key, const QImage& image);
 
     WorkspaceView* view_{nullptr};
 };

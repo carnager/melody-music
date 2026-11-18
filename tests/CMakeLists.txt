@@ -1118,11 +1118,16 @@ if(MELODY_BUILD_UI)
     target_link_libraries(trackknife_track_list_find_tests PRIVATE Trackknife::BenchUi Qt6::Test
         trackknife_project_options trackknife_project_warnings)
     add_test(NAME track-list-find COMMAND trackknife_track_list_find_tests)
+    qt_add_executable(trackknife_cover_loader_tests cover_loader_test.cpp)
+    target_link_libraries(trackknife_cover_loader_tests PRIVATE Trackknife::BenchUi Qt6::Test
+        trackknife_project_options trackknife_project_warnings)
+    add_test(NAME cover-loader COMMAND trackknife_cover_loader_tests)
     qt_add_executable(trackknife_single_instance_tests single_instance_test.cpp)
     target_link_libraries(trackknife_single_instance_tests PRIVATE Trackknife::BenchUi Qt6::Test
         Qt6::Concurrent trackknife_project_options trackknife_project_warnings)
     add_test(NAME single-instance COMMAND trackknife_single_instance_tests)
     set_tests_properties(m3u8 local-list-edit local-list-model track-list-find single-instance
+        cover-loader
         PROPERTIES TIMEOUT 30 ENVIRONMENT
         "QT_QPA_PLATFORM=offscreen;LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/lsan.supp")
 
