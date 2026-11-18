@@ -1044,4 +1044,17 @@ core::Result<CueReplayGainRewrite> rewrite_cue_replay_gain(const std::string_vie
     return result;
 }
 
+std::string cue_track_logical_reference(const std::string& raw_cue_path,
+                                        const std::size_t file_index,
+                                        const std::size_t track_index) {
+    std::string reference{"cue-v1"};
+    reference.push_back('\0');
+    reference += raw_cue_path;
+    reference.push_back('\0');
+    reference += std::to_string(file_index);
+    reference.push_back('\0');
+    reference += std::to_string(track_index);
+    return reference;
+}
+
 } // namespace trackknife::formats

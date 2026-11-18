@@ -3,6 +3,7 @@
 #include "trackknife/engine/remote_file_work.hpp"
 
 #include "trackknife/engine/file_work_wire.hpp"
+#include "trackknife/engine/list_methods.hpp"
 #include "trackknife/formats/probe.hpp"
 
 #include <curl/curl.h>
@@ -346,6 +347,39 @@ RemoteFileWork::scan(const std::span<const loudness::LoudnessScanItem> items,
         }
     }
     return merged;
+}
+
+core::Result<OpenedFiles> RemoteFileWork::open_paths(const std::vector<std::string>& raw_paths) {
+    auto connection = client();
+    if (!connection) {
+        return std::unexpected(std::move(connection.error()));
+    }
+    auto encoded = Json::array();
+    for (const auto& raw_path : raw_paths) {
+        encoded.push_back(protocol::encode_raw_path(raw_path));
+    }
+    auto answer = (*connection)->call("files.open", Json{{"paths", std::move(encoded)}});
+    if (!answer) {
+        return std::unexpected(std::move(answer.error()));
+    }
+    const auto items = answer->find("items");
+    if (items == answer->end() || !items->is_array()) {
+        return std::unexpected(unexpected_answer("files.open"));
+    }
+    OpenedFiles opened;
+    opened.items.reserve(items->size());
+    for (const auto& value : *items) {
+        auto item = list_item_from_json(value);
+        if (!item) {
+            return std::unexpected(unexpected_answer("files.open"));
+        }
+        opened.items.push_back(std::move(*item));
+    }
+    if (const auto issues = answer->find("issues"); issues != answer->end() && issues->is_array()) {
+        opened.unopened = issues->size();
+    }
+    opened.truncated = answer->value("truncated", false);
+    return opened;
 }
 
 core::Result<FileTechnicals> RemoteFileWork::probe(const std::string& raw_path,

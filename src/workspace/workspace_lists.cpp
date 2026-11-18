@@ -31,6 +31,38 @@ namespace trackknife::bench {
 
 namespace {
 
+// A big list in parts, on a pool as wide as the machine: each row's tags are
+// rebuilt and its content identity hashed, and 66,841 rows took 2.8 s on one
+// thread -- on the window's own, at every start.
+std::vector<LocalTrackRow> rowsOfDocument(const persistence::ListDocument& document) {
+    constexpr std::size_t part = 2'048U;
+    const std::span<const persistence::ListItem> items{document.items};
+    if (items.size() <= part) {
+        return rowsOfItems(items);
+    }
+    std::vector<std::vector<LocalTrackRow>> parts((items.size() + part - 1U) / part);
+    {
+        QThreadPool pool;
+        pool.setMaxThreadCount(std::max(1, QThread::idealThreadCount()));
+        for (std::size_t index = 0; index < parts.size(); ++index) {
+            pool.start([&parts, items, index, part] {
+                const auto first = index * part;
+                parts[index] =
+                    rowsOfItems(items.subspan(first, std::min(part, items.size() - first)));
+            });
+        }
+        pool.waitForDone();
+    }
+    std::vector<LocalTrackRow> rows;
+    rows.reserve(items.size());
+    for (auto& rows_of_part : parts) {
+        std::ranges::move(rows_of_part, std::back_inserter(rows));
+    }
+    return rows;
+}
+
+} // namespace
+
 // A stored list's rows, as a tab shows them: what was cached with each is
 // taken for what the file says until it is read again.
 std::vector<LocalTrackRow> rowsOfItems(const std::span<const persistence::ListItem> items) {
@@ -81,38 +113,6 @@ std::vector<LocalTrackRow> rowsOfItems(const std::span<const persistence::ListIt
     }
     return rows;
 }
-
-// A big list in parts, on a pool as wide as the machine: each row's tags are
-// rebuilt and its content identity hashed, and 66,841 rows took 2.8 s on one
-// thread -- on the window's own, at every start.
-std::vector<LocalTrackRow> rowsOfDocument(const persistence::ListDocument& document) {
-    constexpr std::size_t part = 2'048U;
-    const std::span<const persistence::ListItem> items{document.items};
-    if (items.size() <= part) {
-        return rowsOfItems(items);
-    }
-    std::vector<std::vector<LocalTrackRow>> parts((items.size() + part - 1U) / part);
-    {
-        QThreadPool pool;
-        pool.setMaxThreadCount(std::max(1, QThread::idealThreadCount()));
-        for (std::size_t index = 0; index < parts.size(); ++index) {
-            pool.start([&parts, items, index, part] {
-                const auto first = index * part;
-                parts[index] =
-                    rowsOfItems(items.subspan(first, std::min(part, items.size() - first)));
-            });
-        }
-        pool.waitForDone();
-    }
-    std::vector<LocalTrackRow> rows;
-    rows.reserve(items.size());
-    for (auto& rows_of_part : parts) {
-        std::ranges::move(rows_of_part, std::back_inserter(rows));
-    }
-    return rows;
-}
-
-} // namespace
 
 std::vector<Workspace::PreparedList>
 Workspace::prepareLists(std::vector<persistence::ListDocument> documents) {
@@ -1083,6 +1083,7 @@ void Workspace::addImportedList(std::vector<LocalTrackRow> rows, const QString& 
                          .items = {}},
                         true);
     tab->model->replaceRows(std::move(rows));
+    enqueueUnprobedRows(*tab);
     syncArtwork(*tab);
     schedulePersist();
 }

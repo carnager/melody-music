@@ -728,6 +728,9 @@ void Workspace::watchFileWork(EngineLink& link) {
                                  }
                              }
                          }
+                         // What was opened before this computer's engine
+                         // was reached.
+                         workspace->startNextDiscovery();
                      });
         }));
     };

@@ -589,9 +589,8 @@ void BenchMainWindow::openSearchDialog() {
         search_dialog_->focusInput();
         return;
     }
-    // ADR-0153: database scope reads the workspace index; tab scope
-    // snapshots the current local tab's rows and reports on-demand
-    // technicals back onto every tab holding the probed file.
+    // ADR-0153: database scope reads the library; tab scope snapshots the
+    // current tab's rows, which their engine filled (ADR-0355).
     search_dialog_ = new SearchDialog(
         *catalogues, library,
         [this]() -> std::optional<SearchDialog::TabSnapshot> {
@@ -601,11 +600,6 @@ void BenchMainWindow::openSearchDialog() {
             }
             return SearchDialog::TabSnapshot{QString::fromUtf8(tab->document.name),
                                              tab->model->rows()};
-        },
-        [this](std::string raw_path, LocalTrackTechnicals technicals) {
-            for (const auto& tab : list_tabs_) {
-                tab->model->applyTechnicals(raw_path, technicals);
-            }
         },
         this);
     search_dialog_->setAttribute(Qt::WA_DeleteOnClose);

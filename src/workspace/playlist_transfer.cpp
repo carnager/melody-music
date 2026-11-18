@@ -138,30 +138,15 @@ void PlaylistTransfer::importFile(std::string raw_path) {
                 LocalTrackRow row;
                 row.raw_path = std::move(entry.raw_path);
                 row.duration_ms = entry.duration_ms;
-                // This is one physical playlist occurrence. Never expand its source
-                // into chapters/subsongs or recurse into nested playlists.
-                if (core::observe_local_source_revision(row.raw_path)) {
-                    if (auto read = metadata::read_local_metadata(row.raw_path, token)) {
-                        row.metadata = std::move(read->document);
-                        row.source_revision = read->source_revision;
-                    }
-                }
-                project_display_metadata(row);
+                // ADR-0355: one physical playlist occurrence, filled by the
+                // tab's engine as every row is; until then -- and where the
+                // file has no title -- the playlist's own words for it.
+                row.title = std::move(entry.title);
                 if (row.title.empty()) {
-                    row.title = std::move(entry.title);
-                    if (row.title.empty()) {
-                        row.title = std::filesystem::path{row.raw_path}.filename().native();
-                        if (!core::unicodeCodePointCount(row.title))
-                            row.title = core::display_raw_path(row.title);
-                    }
-                    row.metadata.fields.push_back(
-                        {.canonical_name = "title",
-                         .native_name = "TITLE",
-                         .values = {row.title},
-                         .qualifier = {},
-                         .provenance = metadata::FieldProvenance::cached_snapshot});
+                    row.title = std::filesystem::path{row.raw_path}.filename().native();
+                    if (!core::unicodeCodePointCount(row.title))
+                        row.title = core::display_raw_path(row.title);
                 }
-                row.probed = true;
                 bytes += rowBytes(row);
                 if (bytes > imported_metadata_limit) {
                     result.error = limitError();

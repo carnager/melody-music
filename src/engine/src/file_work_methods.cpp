@@ -8,6 +8,7 @@
 #include "trackknife/engine/player.hpp"
 #include "trackknife/engine/remote_file_work.hpp"
 #include "trackknife/engine/workspace.hpp"
+#include "trackknife/formats/cue_sheet.hpp"
 #include "trackknife/metadata/artwork.hpp"
 #include "trackknife/metadata/local_reader.hpp"
 #include "trackknife/operations/artwork_apply.hpp"
@@ -24,13 +25,18 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <ctime>
 #include <fstream>
 #include <iostream>
 
+#include <optional>
+#include <span>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace trackknife::engine {
@@ -389,11 +395,238 @@ void register_backup_methods(protocol::Dispatcher& dispatcher, std::filesystem::
     });
 }
 
+namespace {
+
+// ADR-0356: what a folder opened offers a list -- audio files and CUE
+// sheets. A file opened by name always passes.
+constexpr std::array<std::string_view, 28> audio_extensions{
+    "flac", "mp3", "ogg",  "oga", "opus", "m4a", "mp4", "aac", "wv",  "wav",
+    "rf64", "w64", "aiff", "aif", "aifc", "ape", "mpc", "tta", "spx", "mka",
+    "wma",  "dsf", "dff",  "cue", "mod",  "xm",  "s3m", "it"};
+constexpr std::size_t opened_item_limit = 100'000U;
+
+[[nodiscard]] bool is_cue_path(const std::string& raw_path) {
+    const auto slash = raw_path.find_last_of('/');
+    const auto dot = raw_path.find_last_of('.');
+    if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) {
+        return false;
+    }
+    auto extension = raw_path.substr(dot + 1U);
+    std::ranges::transform(extension, extension.begin(), [](const unsigned char c) {
+        return static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    });
+    return extension == "cue";
+}
+
+[[nodiscard]] std::string cue_remark(const formats::CueLogicalTrack& track,
+                                     const std::string_view name) {
+    const auto found = std::ranges::find_if(
+        track.remarks.rbegin(), track.remarks.rend(),
+        [name](const formats::CueMetadataField& field) { return field.name == name; });
+    return found == track.remarks.rend() ? std::string{} : found->value;
+}
+
+// A sheet's REM REPLAYGAIN_* value ("-6.02 dB", "0.98"), as a number.
+[[nodiscard]] std::optional<double> cue_gain(const formats::CueLogicalTrack& track,
+                                             const std::string_view name) {
+    auto text = cue_remark(track, name);
+    if (const auto unit = text.find("dB"); unit != std::string::npos) {
+        text.resize(unit);
+    }
+    while (!text.empty() && text.back() == ' ') {
+        text.pop_back();
+    }
+    double value = 0.0;
+    const auto* end = text.data() + text.size();
+    const auto [stop, error] = std::from_chars(text.data(), end, value);
+    if (text.empty() || error != std::errc{} || stop != end) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+// A sheet's track as a list item: the sheet's words where it has them, the
+// audio file's own tags where it has not.
+[[nodiscard]] persistence::EngineListItem cue_item(const formats::ResolvedCueSheet& sheet,
+                                                   const formats::ResolvedCueTrack& resolved,
+                                                   const metadata::MetadataDocument* embedded) {
+    const auto& cue = resolved.cue;
+    const auto pick = [embedded](const std::optional<std::string>& said,
+                                 const std::string_view field) {
+        if (said && !said->empty()) {
+            return *said;
+        }
+        return embedded != nullptr ? embedded->first_effective_value(field).value_or("")
+                                   : std::string{};
+    };
+    auto date = cue_remark(cue, "DATE");
+    if (date.empty() && embedded != nullptr) {
+        date = embedded->first_effective_value("date").value_or("");
+    }
+    return persistence::EngineListItem{
+        .entry_id = core::StableId::random(),
+        .raw_path = resolved.raw_source_path,
+        .logical_reference = formats::cue_track_logical_reference(sheet.raw_cue_path,
+                                                                  cue.file_index, cue.track_index),
+        .segment = persistence::ListItemSegment{.start_sample = resolved.sample_range.start_sample,
+                                                .end_sample = resolved.sample_range.end_sample},
+        .source_selection = std::nullopt,
+        .duration_ms = resolved.duration_ms,
+        .title = pick(cue.title, "title"),
+        .artist = pick(cue.performer, "artist"),
+        .album = pick(cue.album_title, "album"),
+        .album_artist = pick(cue.album_performer, "albumartist"),
+        .date = std::move(date),
+        // ADR-0139: a sheet's ReplayGain is not in the file; the engine plays
+        // it from the item.
+        .replay_gain = [&cue] {
+            persistence::ListItemReplayGain gain{
+                .track_gain_db = cue_gain(cue, "REPLAYGAIN_TRACK_GAIN"),
+                .track_peak = cue_gain(cue, "REPLAYGAIN_TRACK_PEAK"),
+                .album_gain_db = cue_gain(cue, "REPLAYGAIN_ALBUM_GAIN"),
+                .album_peak = cue_gain(cue, "REPLAYGAIN_ALBUM_PEAK")};
+            return gain.track_gain_db || gain.album_gain_db
+                       ? std::optional{gain}
+                       : std::optional<persistence::ListItemReplayGain>{};
+        }()};
+}
+
+struct OpenedPaths {
+    std::vector<persistence::EngineListItem> items;
+    std::vector<core::LocalSourceIssue> issues;
+    bool truncated{false};
+};
+
+// ADR-0356: files and folders opened, as list items -- a folder's audio
+// files and CUE sheets, each sheet's tracks with their ranges and the files
+// they name not again, any other file bare, for the list to fill
+// (catalogue.read_tracks).
+[[nodiscard]] OpenedPaths open_paths(const std::vector<std::string>& raw_paths,
+                                     const core::CancellationToken& cancellation) {
+    auto discovered =
+        core::discover_local_sources(std::span{raw_paths.data(), raw_paths.size()}, cancellation,
+                                     opened_item_limit, std::span{audio_extensions});
+    OpenedPaths opened{
+        .items = {}, .issues = std::move(discovered.issues), .truncated = discovered.truncated};
+    // Sheets first, so an audio file one names is not also a row of its own
+    // when both were opened together.
+    std::vector<std::optional<formats::ResolvedCueSheet>> sheets(discovered.raw_files.size());
+    std::unordered_set<std::string> named;
+    std::unordered_map<std::string, metadata::MetadataDocument> embedded;
+    for (std::size_t index = 0U; index < discovered.raw_files.size(); ++index) {
+        const auto& raw_path = discovered.raw_files[index];
+        if (cancellation.is_cancellation_requested() || !is_cue_path(raw_path)) {
+            continue;
+        }
+        auto resolved = formats::resolve_external_cue_sheet(raw_path, cancellation);
+        if (!resolved) {
+            opened.issues.push_back(
+                core::LocalSourceIssue{.raw_path = raw_path, .error = std::move(resolved.error())});
+            continue;
+        }
+        for (const auto& physical : resolved->physical_sources) {
+            named.insert(physical);
+            if (!embedded.contains(physical)) {
+                if (auto read = metadata::read_local_metadata(physical, cancellation)) {
+                    embedded.emplace(physical, std::move(read->document));
+                }
+            }
+        }
+        sheets[index] = std::move(*resolved);
+    }
+    const auto full = [&opened]() {
+        if (opened.items.size() < opened_item_limit) {
+            return false;
+        }
+        opened.truncated = true;
+        return true;
+    };
+    for (std::size_t index = 0U; index < discovered.raw_files.size(); ++index) {
+        if (cancellation.is_cancellation_requested() || full()) {
+            break;
+        }
+        const auto& raw_path = discovered.raw_files[index];
+        if (is_cue_path(raw_path)) {
+            if (!sheets[index]) {
+                continue;
+            }
+            for (const auto& track : sheets[index]->tracks) {
+                if (full()) {
+                    break;
+                }
+                const auto found = embedded.find(track.raw_source_path);
+                opened.items.push_back(cue_item(
+                    *sheets[index], track, found == embedded.end() ? nullptr : &found->second));
+            }
+            continue;
+        }
+        std::error_code ignored;
+        const auto canonical = std::filesystem::canonical(std::filesystem::path{raw_path}, ignored);
+        if (!ignored && named.contains(canonical.native())) {
+            continue;
+        }
+        opened.items.push_back(persistence::EngineListItem{.entry_id = core::StableId::random(),
+                                                           .raw_path = raw_path,
+                                                           .logical_reference = std::nullopt,
+                                                           .segment = std::nullopt,
+                                                           .source_selection = std::nullopt,
+                                                           .duration_ms = std::nullopt,
+                                                           .title = {},
+                                                           .artist = {},
+                                                           .album = {},
+                                                           .album_artist = {},
+                                                           .date = {},
+                                                           .replay_gain = std::nullopt});
+    }
+    return opened;
+}
+
+} // namespace
+
 void register_file_work_methods(protocol::Dispatcher& dispatcher, std::filesystem::path database,
                                 FileWorkRecovery recovery) {
     // ADR-0268: which of these files are not there, looked for on this
     // machine -- a list's rows greyed for what is gone.
     //   files.missing {paths: [raw path]} -> {missing: [raw path]}
+    // ADR-0356: files and folders opened on this machine, as list items.
+    //   files.open {paths: [raw path]} -> {items: [item], issues: [{path,
+    //   reason}], truncated}
+    dispatcher.on("files.open", [](const Json& params) -> core::Result<Json> {
+        const auto paths = params.find("paths");
+        if (paths == params.end() || !paths->is_array()) {
+            return std::unexpected(core::Error{.code = core::ErrorCode::invalid_argument,
+                                               .message = "paths are required",
+                                               .context = {{.key = "param", .value = "paths"}}});
+        }
+        std::vector<std::string> raw_paths;
+        raw_paths.reserve(paths->size());
+        for (const auto& encoded : *paths) {
+            auto raw = encoded.is_string()
+                           ? protocol::decode_raw_path(encoded.get<std::string>())
+                           : core::Result<std::string>{std::unexpected(core::Error{})};
+            if (!raw) {
+                return std::unexpected(
+                    core::Error{.code = core::ErrorCode::invalid_argument,
+                                .message = "a path is not an encoded path",
+                                .context = {{.key = "param", .value = "paths"}}});
+            }
+            raw_paths.push_back(std::move(*raw));
+        }
+        const auto opened = open_paths(raw_paths, {});
+        auto items = Json::array();
+        for (const auto& item : opened.items) {
+            items.push_back(list_item_json(item));
+        }
+        auto issues = Json::array();
+        for (const auto& issue : opened.issues) {
+            issues.push_back(Json{{"path", protocol::encode_raw_path(issue.raw_path)},
+                                  {"reason", protocol::displayable_text(issue.error.message)}});
+        }
+        return Json{{"items", std::move(items)},
+                    {"issues", std::move(issues)},
+                    {"truncated", opened.truncated}};
+    });
+
     dispatcher.on("files.missing", [](const Json& params) -> core::Result<Json> {
         constexpr std::size_t limit = 5'000U;
         const auto paths = params.find("paths");

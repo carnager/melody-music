@@ -202,4 +202,11 @@ resolve_external_cue_sheet(std::string raw_cue_path,
                            const core::CancellationToken& cancellation = {},
                            const CueParseLimits& limits = {});
 
+// ADR-0139: a CUE track's stable logical identity -- "cue-v1" NUL sheet
+// path NUL file index NUL track index -- shared by opening a sheet, writing
+// it, and a written sheet's view refresh.
+[[nodiscard]] std::string cue_track_logical_reference(const std::string& raw_cue_path,
+                                                      std::size_t file_index,
+                                                      std::size_t track_index);
+
 } // namespace trackknife::formats

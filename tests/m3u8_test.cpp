@@ -176,12 +176,12 @@ void M3u8Test::asynchronousImportAndExport() {
     QVERIFY(completed[0][0].toBool());
     QCOMPARE(model.rowCount(), 3);
     QCOMPARE(name, QStringLiteral("input"));
-    QVERIFY(model.rows()[0].source_revision);
-    QVERIFY(!model.rows()[0].metadata.fields.empty());
+    // ADR-0355: read by the engine of the tab they go into, not here.
+    QVERIFY(!model.rows()[0].probed);
     QCOMPARE(model.rows()[1].title, std::string{"Gone"});
     QCOMPARE(model.rows()[1].duration_ms, std::optional<std::int64_t>{1250});
     QCOMPARE(model.rows()[1].raw_path, model.rows()[2].raw_path);
-    QVERIFY(model.rows()[1].probed);
+    QVERIFY(!model.rows()[1].probed);
     bar->exportFile(path(dir, "output.m3u8"), &model);
     QTRY_COMPARE(completed.size(), 2);
     QVERIFY(completed[1][0].toBool());

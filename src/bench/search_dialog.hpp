@@ -45,11 +45,10 @@ class SearchDialog final : public QDialog {
   public:
     using TabSnapshot = SearchSession::TabSnapshot;
     using TabAccess = SearchSession::TabAccess;
-    using TechnicalsSink = SearchSession::TechnicalsSink;
 
     // ADR-0286: the library, on the engine holding it.
     SearchDialog(const CatalogueSource& library, EngineKey library_engine, TabAccess tab_access,
-                 TechnicalsSink technicals_sink, QWidget* parent = nullptr);
+                 QWidget* parent = nullptr);
     ~SearchDialog() override;
 
     void watchCurrentModel(QAbstractItemModel* model) { session_->watchCurrentModel(model); }

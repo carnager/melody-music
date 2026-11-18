@@ -127,21 +127,6 @@ void LocalListModel::replaceRows(std::vector<LocalTrackRow> rows, const bool rem
     }
 }
 
-void LocalListModel::applyTechnicals(const std::string& raw_path,
-                                     const LocalTrackTechnicals& technicals) {
-    bool changed = false;
-    for (auto& row : rows_) {
-        if (row.raw_path == raw_path) {
-            row.technicals = technicals;
-            forgetEvaluation(row);
-            changed = true;
-        }
-    }
-    if (changed) {
-        scheduleEvaluation();
-    }
-}
-
 void LocalListModel::setMissing(const std::vector<std::string>& checked,
                                 const std::vector<std::string>& missing) {
     const std::unordered_set<std::string> gone{missing.begin(), missing.end()};

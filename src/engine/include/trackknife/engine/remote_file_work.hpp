@@ -57,6 +57,15 @@ probe_local_technicals(const std::string& raw_path, const core::CancellationToke
 // with each album whole in one.
 inline constexpr std::size_t remote_job_bytes = 512U * 1024U;
 
+// ADR-0356: files and folders opened on an engine's machine, as list items
+// -- a CUE sheet's tracks with their ranges, any other file bare -- and how
+// many of the paths could not be opened.
+struct OpenedFiles {
+    std::vector<persistence::EngineListItem> items;
+    std::size_t unopened{0};
+    bool truncated{false};
+};
+
 class RemoteFileWork final {
   public:
     explicit RemoteFileWork(protocol::Endpoint endpoint);
@@ -74,6 +83,8 @@ class RemoteFileWork final {
          const loudness::LoudnessScanProgressCallback& progress,
          const core::CancellationToken& cancellation);
 
+    // files.open: what these paths offer a list, walked and read there.
+    [[nodiscard]] core::Result<OpenedFiles> open_paths(const std::vector<std::string>& raw_paths);
     // media.probe: the file's technicals as the engine's decoder sees them.
     [[nodiscard]] core::Result<FileTechnicals> probe(const std::string& raw_path,
                                                      const core::CancellationToken& cancellation);

@@ -10,6 +10,18 @@ client keeps a path for what an older engine lacked.
 
 ## Protocol 1
 
+### Level 34 (2026-11-18)
+
+ADR-0356: files and folders opened in a window are walked and read by this
+computer's engine.
+
+- `files.open {paths}` answers `{items, issues: [{path, reason}],
+  truncated}`: a folder's audio files and CUE sheets, each sheet's tracks
+  as items with their `logical` reference, `segment`, words and ReplayGain,
+  the files a sheet names not again, any other file a bare item (`path`
+  and `entry`) for the list to fill through `catalogue.read_tracks`. At
+  most 100,000 items.
+
 ### Level 33 (2026-11-18)
 
 ADR-0355: every tab fills its rows from its engine.

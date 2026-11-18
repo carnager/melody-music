@@ -41,7 +41,6 @@ class SearchSession final : public QObject {
         std::vector<LocalTrackRow> rows;
     };
     using TabAccess = std::function<std::optional<TabSnapshot>()>;
-    using TechnicalsSink = std::function<void(std::string, LocalTrackTechnicals)>;
 
     struct Scope {
         QString label;
@@ -80,7 +79,7 @@ class SearchSession final : public QObject {
     // ADR-0286: the one library, on the engine holding it, and the current
     // tab.
     SearchSession(const CatalogueSource& library, EngineKey library_engine, TabAccess tab_access,
-                  TechnicalsSink technicals_sink, QObject* parent = nullptr);
+                  QObject* parent = nullptr);
     ~SearchSession() override;
 
     // The draft.
@@ -154,9 +153,7 @@ class SearchSession final : public QObject {
         bool grouped{false};
         std::vector<persistence::LibraryEntry> artists;
         std::vector<persistence::LibraryEntry> albums;
-        std::vector<std::pair<std::string, LocalTrackTechnicals>> probed;
         QString error;
-        std::size_t scanned{0U};
     };
 
     void loadSavedSearches(std::optional<persistence::SavedSearch> write = std::nullopt,
@@ -181,7 +178,6 @@ class SearchSession final : public QObject {
     const CatalogueSource* catalogues_{nullptr};
     EngineKey library_engine_;
     TabAccess tab_access_;
-    TechnicalsSink technicals_sink_;
     std::vector<Scope> scopes_;
     int scope_{0};
     QString text_;

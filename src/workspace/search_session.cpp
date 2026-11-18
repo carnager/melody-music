@@ -35,25 +35,6 @@ constexpr int result_display_limit = 20'000;
 constexpr std::size_t grouped_limit = 20U;
 constexpr std::size_t grouped_track_limit = 200U;
 
-// The dialog's technical-need test mirrors the planner's pseudo-field
-// vocabulary without depending on persistence internals.
-[[nodiscard]] bool references_technicals(const query::CompiledTkq& compiled) {
-    static const std::set<std::string> technicals{"codec", "samplerate", "bitspersample",
-                                                  "channels", "lengthms"};
-    for (const auto& name : compiled.field_dependencies()) {
-        if (technicals.contains(metadata::canonicalize_field_name(name))) {
-            return true;
-        }
-    }
-    const auto program_needs = [](const titleformat::Program& program) {
-        return !program.technicalDependencies().empty();
-    };
-    if (std::ranges::any_of(compiled.programs, program_needs)) {
-        return true;
-    }
-    return compiled.sort && program_needs(compiled.sort->program);
-}
-
 // The same line, formatted by a library from what it holds of a track: the
 // first artist or "Unknown artist", the first track number, the title.
 constexpr auto result_format = "$if2($getmulti(artist,0),Unknown artist) — "
@@ -73,9 +54,9 @@ constexpr auto result_format = "$if2($getmulti(artist,0),Unknown artist) — "
 } // namespace
 
 SearchSession::SearchSession(const CatalogueSource& library, EngineKey library_engine,
-                             TabAccess tab_access, TechnicalsSink technicals_sink, QObject* parent)
+                             TabAccess tab_access, QObject* parent)
     : QObject(parent), catalogues_(&library), library_engine_(std::move(library_engine)),
-      tab_access_(std::move(tab_access)), technicals_sink_(std::move(technicals_sink)),
+      tab_access_(std::move(tab_access)),
       query_mode_(QSettings{}.value(QStringLiteral("search/query-mode"), false).toBool()),
       saved_status_(QStringLiteral("Loading saved searches…")) {
     // ADR-0286: one library, searched on the engine holding it -- whichever
@@ -552,12 +533,10 @@ void SearchSession::startSearch() {
         return;
     }
     searching_ = true;
-    const auto needs_technicals = references_technicals(*compiled);
     watcher_.setFuture(QtConcurrent::run([handle = std::shared_ptr{catalogues_->openDeferred()},
                                           rows = std::move(snapshot->rows),
                                           shared = std::make_shared<query::CompiledTkq>(
                                               std::move(*compiled)),
-                                          needs_technicals,
                                           token = cancellation_.token()]() mutable {
         Outcome outcome;
         if (rows.size() > 100'000U) {
@@ -595,45 +574,6 @@ void SearchSession::startSearch() {
                 return outcome;
             }
             histories = std::move(*loaded);
-        }
-        // ADR-0153: probe exactly the rows a technical query needs and
-        // report the results back so the next search is instant.
-        std::map<std::string, std::optional<LocalTrackTechnicals>> probed;
-        if (needs_technicals) {
-            for (auto& row : rows) {
-                if (row.technicals || token.is_cancellation_requested()) {
-                    continue;
-                }
-                auto cached = probed.find(row.raw_path);
-                if (cached == probed.end()) {
-                    std::optional<LocalTrackTechnicals> technicals;
-                    if (auto probe = formats::probe_local_media(row.raw_path, token);
-                        probe && probe->best_audio_stream) {
-                        const auto found =
-                            std::ranges::find(probe->audio_streams, *probe->best_audio_stream,
-                                              &formats::AudioStreamInfo::stream_index);
-                        if (found != probe->audio_streams.end()) {
-                            technicals = LocalTrackTechnicals{
-                                .codec = found->codec_name,
-                                .sample_rate = found->sample_rate,
-                                .bits = formats::bits_per_sample_hint(found->sample_format),
-                                .channels = found->channels,
-                                .bit_rate = found->bit_rate > 0 ? found->bit_rate : probe->bit_rate,
-                            };
-                        }
-                    }
-                    cached = probed.emplace(row.raw_path, std::move(technicals)).first;
-                    ++outcome.scanned;
-                }
-                if (cached->second) {
-                    row.technicals = *cached->second;
-                }
-            }
-            for (auto& [path, technicals] : probed) {
-                if (technicals) {
-                    outcome.probed.emplace_back(path, *technicals);
-                }
-            }
         }
         struct Keyed {
             std::string key;
@@ -703,11 +643,6 @@ void SearchSession::finishSearch() {
         emit changed();
         return;
     }
-    for (auto& [path, technicals] : outcome.probed) {
-        if (technicals_sink_) {
-            technicals_sink_(path, technicals);
-        }
-    }
     results_.clear();
     result_rows_ = std::move(outcome.rows);
     result_paths_ = std::move(outcome.paths);
@@ -774,11 +709,6 @@ void SearchSession::finishSearch() {
         if (total > shown) {
             text += QStringLiteral(" · showing first %1").arg(shown);
         }
-    }
-    if (outcome.scanned > 0U) {
-        text += QStringLiteral(" · scanned %1 file%2")
-                    .arg(outcome.scanned)
-                    .arg(outcome.scanned == 1U ? QString{} : QStringLiteral("s"));
     }
     status_ = text;
     emit resultsChanged();

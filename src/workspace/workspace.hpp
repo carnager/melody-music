@@ -67,6 +67,10 @@ enum class LocalLibraryAction;
 class TabStore;
 class WorkspaceView;
 
+// A stored list's rows, as a tab shows them: what was cached with each is
+// taken for what the file says until it is read again.
+[[nodiscard]] std::vector<LocalTrackRow> rowsOfItems(std::span<const persistence::ListItem> items);
+
 // Widget properties, persisted UI state and JSON all carry a document identity
 // as text. ADR-0220 Phase 0 makes the playback anchor hold the identity itself,
 // so these two are the only places the two spellings meet.
@@ -152,9 +156,18 @@ class Workspace final : public QObject {
             return done.contains(engine.text());
         }
     };
+    struct PendingDiscovery {
+        std::vector<std::string> raw_paths;
+        QString target_document_id;
+        int insertion_row{-1};
+        bool replace_and_play{false};
+    };
     struct DiscoveryOutcome {
         std::vector<LocalTrackRow> rows;
-        std::vector<core::LocalSourceIssue> issues;
+        // How many of the paths could not be opened, and why none could:
+        // this computer's engine not reached.
+        std::size_t unopened{0};
+        QString failure;
         bool cancelled{false};
         bool truncated{false};
     };
@@ -301,6 +314,7 @@ class Workspace final : public QObject {
     bool discovery_anchored_{false};
     bool discovery_replace_and_play_{false};
     bool discovery_running_{false};
+    std::deque<PendingDiscovery> pending_discoveries_;
     // Tabs being described, and those taken up again meanwhile.
     QSet<QString> describing_;
     std::set<std::string> rows_to_read_;
@@ -1025,6 +1039,8 @@ class Workspace final : public QObject {
 
   private:
     void finishDiscovery();
+    // The next of what was opened, once this computer's engine is reached.
+    void startNextDiscovery();
     void pumpArtworkQueue();
     void finishArtworkLoad();
 

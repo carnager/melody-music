@@ -42,12 +42,10 @@ void BenchMainWindowTest::ListEditing::currentTabHistoryPreservesOccurrences() {
     source.source_revision = played.source_revision;
     QVERIFY(repository->record_local_listen(source, core::StableId::random(), 1000));
     CatalogueSource catalogues{database};
-    SearchDialog dialog(catalogues, EngineKey::local(),
-                        [&]() -> std::optional<SearchDialog::TabSnapshot> {
-                            return SearchDialog::TabSnapshot{QStringLiteral("Current"),
-                                                             {played, unplayed, played}};
-                        },
-                        {});
+    SearchDialog dialog(
+        catalogues, EngineKey::local(), [&]() -> std::optional<SearchDialog::TabSnapshot> {
+            return SearchDialog::TabSnapshot{QStringLiteral("Current"), {played, unplayed, played}};
+        });
     dialog.show();
     dialog.findChild<QComboBox*>(QStringLiteral("bench-search-scope"))->setCurrentIndex(1);
     dialog.findChild<QCheckBox*>(QStringLiteral("bench-search-query-mode"))->setChecked(true);
