@@ -690,10 +690,19 @@ void BenchMainWindowTest::RemoteEngines::theWindowFollowsAnEngineStartedElsewher
                                          protocol::Json{{"entries", std::move(entries)}}));
         return ids;
     };
-    // The server's tab already shows a list: an album played there before.
+    // A list of the user's on that engine, which what plays never replaces.
+    auto* mine =
+        window.addListTab(persistence::ListDocument{.id = core::StableId::random(),
+                                                    .kind = persistence::ListKind::saved,
+                                                    .name = "Mine",
+                                                    .pinned = false,
+                                                    .dirty = false,
+                                                    .items = {},
+                                                    .engine = window.remoteEngine()->key.stored()},
+                          false);
+    QVERIFY(mine != nullptr);
+    // The server's queue already holds an album played there before.
     static_cast<void>(queue({0}));
-    auto* tab = window.remoteQueueTab();
-    QVERIFY(tab != nullptr);
 
     // A picker replaces it with an album and plays its second track -- both
     // reaching the window in one report.
@@ -702,11 +711,16 @@ void BenchMainWindowTest::RemoteEngines::theWindowFollowsAnEngineStartedElsewher
     std::this_thread::sleep_for(std::chrono::milliseconds{600});
 
     QTRY_VERIFY_WITH_TIMEOUT(window.transport_ == window.remotePlayback(), 10'000);
+    // No list holds it, so it is shown in the engine's playing list.
+    auto* tab = window.playingTab(window.remoteEngine()->key);
+    QVERIFY(tab != nullptr);
+    QVERIFY(tab != mine);
     const auto id = [](const std::string& text) { return *core::StableId::parse(text); };
     QTRY_VERIFY(tab->model->rowOfEntry(id(album[0]), -1) >= 0 &&
                 tab->model->rowOfEntry(id(album[2]), -1) >= 0);
     QCOMPARE(tab->model->rowCount(), 3);
     QCOMPARE(window.playback_.anchors.document, tab->document.id);
+    QCOMPARE(mine->model->rowCount(), 0);
     // Its row is marked as the one playing, and stays so -- not the row
     // where the list's old track was, and not only once the next one plays.
     const auto marked = [&](const std::string& entry) {

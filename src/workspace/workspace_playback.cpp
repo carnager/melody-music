@@ -450,17 +450,8 @@ void Workspace::reattachToQueue(std::vector<LocalTrackRow> rows) {
         }
     }
     auto stated = queue_prints(rows);
-    auto* playing_engine = linkOf(transport_);
-    // An engine elsewhere's queue goes into its tab, which it always has.
-    auto* tab = playing_engine != nullptr && !playing_engine->key.isLocal()
-                    ? engineTab(*playing_engine)
-                    : addList(persistence::ListDocument{.id = core::StableId::random(),
-                                                        .kind = persistence::ListKind::scratch,
-                                                        .name = "Playing on the engine",
-                                                        .pinned = false,
-                                                        .dirty = false,
-                                                        .items = {}},
-                              true);
+    const auto* playing_engine = linkOf(transport_);
+    auto* tab = playingTab(playing_engine != nullptr ? playing_engine->key : EngineKey::local());
     if (tab == nullptr) {
         return;
     }
@@ -731,6 +722,28 @@ Workspace::EngineLink* Workspace::linkOf(const EnginePlayback* playback) const {
 Workspace::ListTab* Workspace::remoteQueueTab() {
     auto* remote = remoteEngine();
     return remote != nullptr ? engineTab(*remote) : nullptr;
+}
+
+// What an engine plays when no list holds it -- another client's queue, say
+// -- is shown in a list of its own, the same for every engine: made the first
+// time and followed from then on, never taking the place of another list.
+Workspace::ListTab* Workspace::playingTab(const EngineKey& engine) {
+    const auto name = utf8Bytes(QStringLiteral("Playing on %1").arg(engineName(engine)));
+    for (const auto& tab : list_tabs_) {
+        if (EngineKey::of(tab->document) == engine && tab->document.name == name) {
+            return tab.get();
+        }
+    }
+    auto* tab = addList(persistence::ListDocument{.id = core::StableId::random(),
+                                                  .kind = persistence::ListKind::scratch,
+                                                  .name = name,
+                                                  .pinned = false,
+                                                  .dirty = false,
+                                                  .items = {},
+                                                  .engine = engine.stored()},
+                        true);
+    schedulePersist();
+    return tab;
 }
 
 Workspace::ListTab* Workspace::engineTab(EngineLink& engine) {

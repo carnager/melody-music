@@ -388,6 +388,8 @@ class Workspace final : public QObject {
     // ADR-0357: the rows as the engine is asked to measure their ReplayGain.
     [[nodiscard]] ReplayGainItemReader replayGainItems(LocalListModel* model,
                                                        std::vector<QPersistentModelIndex> rows);
+    // ADR-0359: this computer's move destinations, once into its engine.
+    void moveDestinationsToEngine(std::shared_ptr<engine::RemoteFileWork> work);
     [[nodiscard]] MetadataApplyObserver metadataApplyObserver();
     [[nodiscard]] MetadataWritePlanApplierFactory
     engineMetadataPlanApplierFactory(std::shared_ptr<engine::RemoteFileWork> work,
@@ -659,6 +661,7 @@ class Workspace final : public QObject {
     [[nodiscard]] EngineLink* linkOf(const EnginePlayback* playback) const;
     // An engine's own list: its first, or one made for it, named after it.
     [[nodiscard]] ListTab* engineTab(EngineLink& engine);
+    ListTab* playingTab(const EngineKey& engine);
     [[nodiscard]] ListTab* remoteQueueTab();
     [[nodiscard]] EngineLink* remoteEngine() const {
         for (const auto& engine : engines_) {
