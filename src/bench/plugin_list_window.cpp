@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include "bench/plugin_list_window.hpp"
+#include "uicommon/colour_mix.hpp"
 
 #include <QClipboard>
 #include <QDesktopServices>
@@ -22,14 +23,6 @@ namespace {
 
 constexpr int detail_role = Qt::UserRole + 1;
 constexpr int url_role = Qt::UserRole;
-
-[[nodiscard]] QColor mixed(const QColor& from, const QColor& to, const int percent) {
-    const auto mix = [percent](const int a, const int b) {
-        return (a * (100 - percent) + b * percent) / 100;
-    };
-    return QColor::fromRgb(mix(from.red(), to.red()), mix(from.green(), to.green()),
-                           mix(from.blue(), to.blue()));
-}
 
 [[nodiscard]] QFont smaller(const QFont& font) {
     auto small = font;
@@ -62,11 +55,11 @@ class PluginListDelegate final : public QStyledItemDelegate {
         const bool selected = option.state.testFlag(QStyle::State_Selected);
         const bool hovered = option.state.testFlag(QStyle::State_MouseOver);
         painter->fillRect(option.rect, selected
-                                           ? mixed(base, palette.color(QPalette::Highlight), 32)
-                                       : hovered ? mixed(base, text_color, 6)
+                                           ? ui::mix(base, palette.color(QPalette::Highlight), 0.32)
+                                       : hovered ? ui::mix(base, text_color, 0.06)
                                                  : base);
         if (index.row() > 0) {
-            painter->setPen(mixed(base, text_color, 10));
+            painter->setPen(ui::mix(base, text_color, 0.1));
             painter->drawLine(option.rect.left() + 10, option.rect.top(), option.rect.right() - 10,
                               option.rect.top());
         }

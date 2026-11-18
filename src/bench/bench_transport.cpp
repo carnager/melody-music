@@ -16,6 +16,7 @@
 #include "uicommon/rating_stars.hpp"
 #include "workspace/color_scheme.hpp"
 
+#include "uicommon/colour_mix.hpp"
 #include "uicommon/track_row_roles.hpp"
 #include "workspace/language_reference.hpp"
 #include "workspace/shortcut_session.hpp"
@@ -201,10 +202,7 @@ void BenchMainWindow::refreshHeaderCover(const QString& entry) {
         painter.setPen(Qt::NoPen);
         const auto ground = palette().color(QPalette::Window);
         const auto ink = palette().color(QPalette::Text);
-        const auto tint = [](const int a, const int b) { return (a * 90 + b * 10) / 100; };
-        painter.setBrush(QColor::fromRgb(tint(ground.red(), ink.red()),
-                                         tint(ground.green(), ink.green()),
-                                         tint(ground.blue(), ink.blue())));
+        painter.setBrush(ui::mix(ground, ink, 0.10));
         painter.drawRoundedRect(QRectF{0, 0, header_cover_size, header_cover_size}, 3, 3);
         // A quiet note in the theme's own muted colour, not a file icon.
         auto note_font = font();
@@ -757,12 +755,7 @@ void BenchMainWindow::styleHeader() {
     const auto ground = palette().color(QPalette::Window);
     const auto ink = palette().color(QPalette::Text);
     const auto shade = [&ground, &ink](const double amount) {
-        const auto mix = [amount](const int a, const int b) {
-            return static_cast<int>(std::lround(a + (b - a) * amount));
-        };
-        return QColor::fromRgb(mix(ground.red(), ink.red()), mix(ground.green(), ink.green()),
-                               mix(ground.blue(), ink.blue()))
-            .name();
+        return ui::mix(ground, ink, amount).name();
     };
     // The one control that is always the next thing to do; with nothing to
     // play, a shade off the header rather than a dark hole.
@@ -805,12 +798,7 @@ void BenchMainWindow::styleStatusBar() {
     const auto ink = palette().color(QPalette::Text);
     const auto accent = palette().color(QPalette::Highlight);
     const auto mix = [](const QColor& from, const QColor& to, const int percent) {
-        const auto channel = [percent](const int a, const int b) {
-            return (a * (100 - percent) + b * percent) / 100;
-        };
-        return QColor::fromRgb(channel(from.red(), to.red()), channel(from.green(), to.green()),
-                               channel(from.blue(), to.blue()))
-            .name();
+        return ui::mix(from, to, percent / 100.0).name();
     };
     statusBar()->setSizeGripEnabled(false);
     statusBar()->setStyleSheet(

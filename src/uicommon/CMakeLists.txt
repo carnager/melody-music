@@ -8,6 +8,7 @@ qt_add_library(
     command_palette.hpp
     eliding_label.cpp
     eliding_label.hpp
+    colour_mix.hpp
     flat_header_style.hpp
     line_slider.cpp
     line_slider.hpp

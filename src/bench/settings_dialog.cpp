@@ -7,6 +7,7 @@
 #include "trackknife/audio/local_audition.hpp"
 #include "trackknife/audio/local_playback.hpp"
 #include "trackknife/discovery/mdns.hpp"
+#include "uicommon/colour_mix.hpp"
 #include "workspace/color_scheme.hpp"
 #include "workspace/interface_scale.hpp"
 #include "workspace/plugins.hpp"
@@ -62,10 +63,7 @@ class SettingsPageDelegate final : public QStyledItemDelegate {
         initStyleOption(&cell, index);
         const auto base = cell.palette.color(QPalette::Base);
         const auto accent = cell.palette.color(QPalette::Highlight);
-        const auto blend = [](int a, int b) { return (a * 7 + b) / 8; };
-        cell.palette.setColor(QPalette::Highlight, QColor(blend(base.red(), accent.red()),
-                                                          blend(base.green(), accent.green()),
-                                                          blend(base.blue(), accent.blue())));
+        cell.palette.setColor(QPalette::Highlight, ui::mix(base, accent, 0.125));
         cell.palette.setColor(QPalette::HighlightedText, cell.palette.color(QPalette::Text));
         const bool selected = option.state.testFlag(QStyle::State_Selected);
         painter->save();

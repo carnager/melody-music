@@ -34,7 +34,6 @@ class TrackknifeStyle final : public QProxyStyle {
     static constexpr int row_height = 28;
 
     // The colours, each mixed from a palette.
-    [[nodiscard]] static QColor mix(const QColor& a, const QColor& b, qreal t);
     [[nodiscard]] static QColor hairline(const QPalette& palette);
     [[nodiscard]] static QColor border(const QPalette& palette);
     [[nodiscard]] static QColor raised(const QPalette& palette);

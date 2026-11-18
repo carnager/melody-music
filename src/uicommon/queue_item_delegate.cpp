@@ -2,6 +2,7 @@
 
 #include "uicommon/queue_item_delegate.hpp"
 
+#include "uicommon/colour_mix.hpp"
 #include "uicommon/queue_table_view.hpp"
 #include "uicommon/track_row_roles.hpp"
 
@@ -106,15 +107,6 @@ void markPlaying(QStyleOptionViewItem& item, const QModelIndex& index) {
     return lines.isValid() ? std::clamp(lines.toInt(), 1, 3) : 1;
 }
 
-// A colour between two, `amount` of the way from `from` to `to`.
-[[nodiscard]] QColor blended(const QColor& from, const QColor& to, const double amount) {
-    const auto mix = [amount](const int a, const int b) {
-        return static_cast<int>(std::lround(a + (b - a) * amount));
-    };
-    return QColor::fromRgb(mix(from.red(), to.red()), mix(from.green(), to.green()),
-                           mix(from.blue(), to.blue()));
-}
-
 } // namespace
 
 void paintInitialsTile(QPainter* painter, const QRect& rect, const QString& name,
@@ -141,7 +133,7 @@ void paintInitialsTile(QPainter* painter, const QRect& rect, const QString& name
     }
     const auto fill =
         initials.isEmpty()
-            ? blended(palette.color(QPalette::Base), palette.color(QPalette::Text), 0.12)
+            ? ui::mix(palette.color(QPalette::Base), palette.color(QPalette::Text), 0.12)
             : QColor::fromHslF(static_cast<float>(hash % 360U) / 360.0F, 0.42F, 0.40F);
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing);
@@ -430,7 +422,7 @@ void QueueItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opt
         // plays still reads as playing inside a selection.
         if (selected) {
             item.state &= ~QStyle::State_Selected;
-            item.backgroundBrush = blended(item.palette.color(QPalette::Base),
+            item.backgroundBrush = ui::mix(item.palette.color(QPalette::Base),
                                            item.palette.color(QPalette::Highlight), 0.32);
         }
         // Focus is one outline around the current row, drawn by the view,
