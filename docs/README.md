@@ -21,8 +21,8 @@ their limits are.
 
 ## Current state
 
-Updated on 2026-11-18, through ADR-0354: database schema 58, protocol 1 at
-level 32 ([protocol levels](protocol-levels.md)).
+Updated on 2026-11-18, through ADR-0358: database schema 58, protocol 1 at
+level 36 ([protocol levels](protocol-levels.md)).
 
 **The unified engine is in place.** `melodyd` owns the library and playback
 and speaks protocol v1 over a socket or TCP. Melody, the Android app and
@@ -30,7 +30,7 @@ and speaks protocol v1 over a socket or TCP. Melody, the Android app and
 engine's own speakers, agents on other machines and phones, and optional UPnP
 renderers. File work -- tagging, ReplayGain, conversion, moves -- is the
 engine's too, on its own machine. This supersedes the two-authority model in
-older ADRs and in `architecture.md`.
+older ADRs; [architecture.md](architecture.md) describes the system as it is.
 [The migration plan](unified-engine.md) says how far along each phase is;
 [melody.md](melody.md) says how to run it.
 
