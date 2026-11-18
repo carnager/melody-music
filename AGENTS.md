@@ -71,8 +71,8 @@ engine). It was the tax ADR-0220 exists to end, and the ADR trail from 0210 to
   tags, audio, covers, folders, CUE sheets, playlists -- or opens a
   `LocalLibrary` or a `ListRepository` (ADR-0356); it asks the engine the
   files belong to. Converting is the one exception (ADR-0340).
-  `ui::ListPersistenceService` still holds a database path; do not model new
-  code on it.
+  `ui::ListPersistenceService` opens only Melody's own presets database
+  (`presets.sqlite`, ADR-0339), never an engine's.
 
 ## Non-negotiable behavior
 
