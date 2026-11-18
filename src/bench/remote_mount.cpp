@@ -2,28 +2,11 @@
 
 #include "bench/remote_mount.hpp"
 
-#include "bench/settings_keys.hpp"
-
-#include <QFile>
-#include <QSettings>
-
 #include <filesystem>
 #include <system_error>
 
 namespace trackknife::bench {
 namespace {
-
-[[nodiscard]] std::string trimmed_folder(std::string folder) {
-    while (folder.size() > 1U && folder.back() == '/') {
-        folder.pop_back();
-    }
-    return folder;
-}
-
-[[nodiscard]] std::string setting(const char* key) {
-    const auto text = QSettings{}.value(QLatin1String(key), QString{}).toString().trimmed();
-    return trimmed_folder(QFile::encodeName(text).toStdString());
-}
 
 // `path` with `from` at its start replaced by `to`; `path` itself when
 // either is empty (the same paths on both machines).
@@ -45,11 +28,6 @@ bool path_within(const std::string_view path, const std::string_view folder) {
         return false;
     }
     return path.size() == folder.size() || folder.back() == '/' || path[folder.size()] == '/';
-}
-
-RemoteMount RemoteMount::configured() {
-    return RemoteMount{.remote_folder = setting(SettingsKeys::library_remote_folder_key),
-                       .local_folder = setting(SettingsKeys::library_remote_mount_key)};
 }
 
 std::optional<std::string> RemoteMount::to_local(const std::string& remote_path) const {

@@ -9,6 +9,7 @@
 #include "bench/library_views_dialog.hpp"
 #include "bench/local_library_panel.hpp"
 #include "bench/settings_dialog.hpp"
+#include "remote_engine_settings.hpp"
 #include "trackknife/engine/catalogue_methods.hpp"
 #include "trackknife/engine/server.hpp"
 #include "workspace/library_browser.hpp"
@@ -144,8 +145,7 @@ void LibraryViewsPanelTest::thePanelShowsAView() {
     auto server = engine::Server::listen(socket, dispatcher);
     QVERIFY(server.has_value());
     (*server)->start();
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_socket_key),
-                         QString::fromStdString(socket.string()));
+    testing::configureRemoteEngine(QString::fromStdString(socket.string()));
 
     const std::filesystem::path unused{
         (directory.path() + QStringLiteral("/unused.sqlite3")).toStdString()};
@@ -346,8 +346,7 @@ void LibraryViewsPanelTest::theFooterFollowsALaterPalette() {
     const auto before = QGuiApplication::palette();
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_socket_key),
-                         directory.path() + QStringLiteral("/no-engine.sock"));
+    testing::configureRemoteEngine(directory.path() + QStringLiteral("/no-engine.sock"));
     const std::filesystem::path unused{
         (directory.path() + QStringLiteral("/unused.sqlite3")).toStdString()};
     CatalogueSource catalogues{unused, CatalogueSource::Role::remote};

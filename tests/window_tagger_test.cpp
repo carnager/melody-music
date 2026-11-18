@@ -1124,8 +1124,8 @@ void BenchMainWindowTest::Tagger::metadataServiceSettingsAndCompactPages() {
         ->button(QDialogButtonBox::Save)
         ->click();
     QTRY_VERIFY(lifetime.isNull());
-    QCOMPARE(QSettings{}.value(QLatin1String(SettingsDialog::library_engine_socket_key)).toString(),
-             elsewhere);
+    QVERIFY(!loadRemoteEngines().empty());
+    QCOMPARE(loadRemoteEngines().front().address, elsewhere);
     QCOMPARE(QSettings{}.value(QLatin1String(SettingsDialog::acoustid_client_key)).toString(),
              QStringLiteral("test-client-key"));
     action->trigger();

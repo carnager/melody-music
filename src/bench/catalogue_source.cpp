@@ -6,6 +6,7 @@
 #include "trackknife/protocol/version.hpp"
 
 #include "bench/engine_launcher.hpp"
+#include "bench/remote_engines.hpp"
 #include "bench/settings_keys.hpp"
 #include "trackknife/core/local_sources.hpp"
 #include "trackknife/engine/remote_catalogue.hpp"
@@ -264,10 +265,9 @@ CatalogueSource::CatalogueSource(std::filesystem::path database, const Role role
         }
     } else {
         // The first engine elsewhere, if one is configured (ADR-0227).
-        const auto configured =
-            settings.value(QLatin1String(SettingsKeys::library_engine_socket_key), QString{})
-                .toString();
-        if (!configureRemote(configured, SettingsKeys::remoteEnginePassword())) {
+        const auto engines = loadRemoteEngines();
+        const auto configured = engines.empty() ? RemoteEngineSetting{} : engines.front();
+        if (!configureRemote(configured.address, configured.effectivePassword())) {
             return;
         }
     }

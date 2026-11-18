@@ -28,12 +28,6 @@ QString libraryEngine() {
         (!chosen.isEmpty() && known(chosen))) {
         return chosen;
     }
-    // Not chosen yet, or an engine since removed: as Show this computer's
-    // library had it.
-    if (!engines.empty() &&
-        !settings.value(QLatin1String(SettingsKeys::library_show_local_key), true).toBool()) {
-        return engines.front().address;
-    }
     return QLatin1String(SettingsKeys::library_engine_local);
 }
 

@@ -8,6 +8,7 @@
 #include "bench/engine_launcher.hpp"
 #include "bench/remote_engines.hpp"
 #include "bench/settings_dialog.hpp"
+#include "remote_engine_settings.hpp"
 
 #include <QDir>
 #include <QFile>
@@ -384,20 +385,17 @@ void EngineLauncherTest::theEnginePlaysForTheRemoteWithoutAnAgent() {
     QTRY_VERIFY_WITH_TIMEOUT(protocol::Client::connect(remote_endpoint).has_value(), 10'000);
 
     QSettings settings;
-    settings.setValue(QLatin1String(SettingsDialog::library_engine_socket_key),
-                      QStringLiteral("127.0.0.1:%1").arg(port));
+    const auto remote_address = QStringLiteral("127.0.0.1:%1").arg(port);
     // One password everywhere, as melodyd has: this computer's reaches the
     // remote too, with nothing entered for it -- and one entered for the
     // remote alone wins when it differs.
     settings.setValue(QLatin1String(SettingsDialog::engine_password_key),
                       QStringLiteral("correct horse"));
-    settings.setValue(QLatin1String(SettingsDialog::library_engine_token_key),
-                      QStringLiteral("its own"));
     settings.sync();
-    QCOMPARE(SettingsDialog::remoteEnginePassword(), QStringLiteral("its own"));
-    settings.remove(QLatin1String(SettingsDialog::library_engine_token_key));
-    settings.sync();
-    QCOMPARE(SettingsDialog::remoteEnginePassword(), QStringLiteral("correct horse"));
+    testing::configureRemoteEngine(remote_address, QStringLiteral("its own"));
+    QCOMPARE(loadRemoteEngines().front().effectivePassword(), QStringLiteral("its own"));
+    testing::configureRemoteEngine(remote_address);
+    QCOMPARE(loadRemoteEngines().front().effectivePassword(), QStringLiteral("correct horse"));
     // Shared, with that password, the remote's is this engine's own: the
     // section needs none of its own.
     QVERIFY(change(sharingChanges(localEngineSharing(), {}), "password", "127.0.0.1")
@@ -406,9 +404,8 @@ void EngineLauncherTest::theEnginePlaysForTheRemoteWithoutAnAgent() {
     // This computer's left without one -- not on the network -- and the
     // remote's given as its own.
     settings.remove(QLatin1String(SettingsDialog::engine_password_key));
-    settings.setValue(QLatin1String(SettingsDialog::library_engine_token_key),
-                      QStringLiteral("correct horse"));
     settings.sync();
+    testing::configureRemoteEngine(remote_address, QStringLiteral("correct horse"));
 
     // The remote as an [engine] section named after its host, its address
     // used while the network does not find it; this engine, not shared, has

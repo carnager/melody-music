@@ -7,6 +7,7 @@
 // a detached one: whatever happens to the test, the engine goes with it.
 
 #include "bench/settings_dialog.hpp"
+#include "remote_engine_settings.hpp"
 #include "trackknife/protocol/client.hpp"
 
 #include <QDir>
@@ -57,16 +58,13 @@ class TestEngine final {
                 return false;
             }
             if (protocol::Client::connect(endpoint)) {
-                QSettings{}.setValue(
-                    QLatin1String(remote ? SettingsDialog::library_engine_socket_key
-                                         : SettingsDialog::library_local_engine_socket_key),
-                    socket_);
                 if (remote) {
-                    // ADR-0234: this engine is the one remote, as an older
-                    // release would have it -- the list is made from it anew,
-                    // and it has not said who it is yet.
-                    QSettings{}.remove(QStringLiteral("engines"));
-                    QSettings{}.remove(QLatin1String(SettingsDialog::library_engine_id_key));
+                    // ADR-0234: the one engine elsewhere, which has not said
+                    // who it is yet.
+                    configureRemoteEngine(socket_);
+                } else {
+                    QSettings{}.setValue(
+                        QLatin1String(SettingsDialog::library_local_engine_socket_key), socket_);
                 }
                 return true;
             }

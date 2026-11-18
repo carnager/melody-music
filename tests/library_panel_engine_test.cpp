@@ -11,6 +11,7 @@
 #include "bench/local_library_panel.hpp"
 #include "bench/search_dialog.hpp"
 #include "bench/settings_dialog.hpp"
+#include "remote_engine_settings.hpp"
 #include "trackknife/engine/catalogue_methods.hpp"
 #include "trackknife/engine/job_methods.hpp"
 #include "trackknife/engine/server.hpp"
@@ -71,10 +72,7 @@ void LibraryPanelEngineTest::initTestCase() {
             QFile::encodeName(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)));
 }
 
-void LibraryPanelEngineTest::init() {
-    QSettings{}.remove(QLatin1String(SettingsDialog::library_engine_socket_key));
-    QSettings{}.remove(QLatin1String(SettingsDialog::library_engine_token_key));
-}
+void LibraryPanelEngineTest::init() { saveRemoteEngines({}); }
 
 // ADR-0223: the same settings name a TCP engine, with its token. A wrong token
 // has to read as a refusal: "unreachable" would send someone to check the
@@ -93,9 +91,7 @@ void LibraryPanelEngineTest::aTcpEngineIsReachedWithItsToken() {
     (*server)->start();
     const auto address = QStringLiteral("127.0.0.1:%1").arg((*server)->port());
 
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_socket_key), address);
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_token_key),
-                         QStringLiteral("the-right-token"));
+    testing::configureRemoteEngine(address, QStringLiteral("the-right-token"));
     {
         CatalogueSource catalogues{database, CatalogueSource::Role::remote};
         // Not reached from the constructor, which runs on the window's thread
@@ -109,8 +105,7 @@ void LibraryPanelEngineTest::aTcpEngineIsReachedWithItsToken() {
         QVERIFY(opened->roots().has_value());
     }
 
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_token_key),
-                         QStringLiteral("a-wrong-token"));
+    testing::configureRemoteEngine(address, QStringLiteral("a-wrong-token"));
     {
         CatalogueSource catalogues{database, CatalogueSource::Role::remote};
         QVERIFY(!catalogues.open()->roots().has_value());
@@ -156,8 +151,7 @@ void LibraryPanelEngineTest::theEngineReadsCoversWhereTheFilesAre() {
     auto server = engine::Server::listen(socket, dispatcher);
     QVERIFY(server.has_value());
     (*server)->start();
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_socket_key),
-                         QString::fromStdString(socket.string()));
+    testing::configureRemoteEngine(QString::fromStdString(socket.string()));
     CatalogueSource catalogues{directory.path().toStdString() + "/unused.sqlite3",
                                CatalogueSource::Role::remote};
     const auto remote = catalogues.open();
@@ -219,8 +213,7 @@ void LibraryPanelEngineTest::aLargeSelectionTravelsInParts() {
     auto server = engine::Server::listen(socket, dispatcher);
     QVERIFY(server.has_value());
     (*server)->start();
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_socket_key),
-                         QString::fromStdString(socket.string()));
+    testing::configureRemoteEngine(QString::fromStdString(socket.string()));
     CatalogueSource catalogues{directory.path().toStdString() + "/unused.sqlite3",
                                CatalogueSource::Role::remote};
     const auto remote = catalogues.open();
@@ -382,8 +375,7 @@ void LibraryPanelEngineTest::theTreeFollowsAChangeInPlace() {
     auto server = engine::Server::listen(socket, dispatcher);
     QVERIFY(server.has_value());
     (*server)->start();
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_socket_key),
-                         QString::fromStdString(socket.string()));
+    testing::configureRemoteEngine(QString::fromStdString(socket.string()));
     CatalogueSource catalogues{directory.path().toStdString() + "/unused.sqlite3",
                                CatalogueSource::Role::remote};
     LocalLibraryPanel panel{catalogues};
@@ -426,8 +418,7 @@ void LibraryPanelEngineTest::anEmptyLibrarySaysWhy() {
     auto server = engine::Server::listen(socket, dispatcher);
     QVERIFY(server.has_value());
     (*server)->start();
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_socket_key),
-                         QString::fromStdString(socket.string()));
+    testing::configureRemoteEngine(QString::fromStdString(socket.string()));
     const auto top_line = [](LocalLibraryPanel& panel) {
         auto* tree = panel.findChild<QTreeView*>();
         return tree && tree->model()->rowCount() > 0 ? tree->model()->index(0, 0).data().toString()
@@ -471,8 +462,7 @@ void LibraryPanelEngineTest::aConfiguredEngineServesThePanel() {
     QVERIFY(server.has_value());
     (*server)->start();
 
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_socket_key),
-                         QString::fromStdString(socket.string()));
+    testing::configureRemoteEngine(QString::fromStdString(socket.string()));
 
     // The panel is given a database path it must not use: if it opens that
     // instead of asking the engine, the connection count below stays zero.
@@ -519,8 +509,7 @@ void LibraryPanelEngineTest::everyPathReachesTheEngineNotTheDatabase() {
     engine::register_job_methods(dispatcher, jobs, job_catalogue);
     (*server)->start();
 
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_socket_key),
-                         QString::fromStdString(socket.string()));
+    testing::configureRemoteEngine(QString::fromStdString(socket.string()));
 
     CatalogueSource catalogues{forbidden, CatalogueSource::Role::remote};
     LocalLibraryPanel panel{catalogues};
@@ -571,8 +560,7 @@ void LibraryPanelEngineTest::theFilesAScanCouldNotReadAreShown() {
     engine::register_catalogue_jobs(job_catalogue, catalogue);
     engine::register_job_methods(dispatcher, jobs, job_catalogue);
     (*server)->start();
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_socket_key),
-                         QString::fromStdString(socket.string()));
+    testing::configureRemoteEngine(QString::fromStdString(socket.string()));
 
     CatalogueSource catalogues{directory.path().toStdString() + "/unused.sqlite3",
                                CatalogueSource::Role::remote};
@@ -606,7 +594,7 @@ void LibraryPanelEngineTest::anUnreachableEngineIsSaidAndThenReached() {
         (directory.path() + QStringLiteral("/library.sqlite3")).toStdString()};
     const auto socket_text = directory.path() + QStringLiteral("/late-engine.sock");
 
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_socket_key), socket_text);
+    testing::configureRemoteEngine(socket_text);
 
     CatalogueSource catalogues{database, CatalogueSource::Role::remote};
     LocalLibraryPanel panel{catalogues};
@@ -651,7 +639,7 @@ void LibraryPanelEngineTest::anEngineThatComesUpLaterIsReachedWithoutRefresh() {
         (directory.path() + QStringLiteral("/library.sqlite3")).toStdString()};
     const auto socket_text = directory.path() + QStringLiteral("/later-engine.sock");
 
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_socket_key), socket_text);
+    testing::configureRemoteEngine(socket_text);
 
     CatalogueSource catalogues{database, CatalogueSource::Role::remote};
     LocalLibraryPanel panel{catalogues};
@@ -712,8 +700,7 @@ void LibraryPanelEngineTest::thePanelSaysWhichLibraryItIsShowing() {
 
     // Configured but not answering: the distinction that was invisible.
     {
-        QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_socket_key),
-                             directory.path() + QStringLiteral("/absent.sock"));
+        testing::configureRemoteEngine(directory.path() + QStringLiteral("/absent.sock"));
         CatalogueSource catalogues{database, CatalogueSource::Role::remote};
         LocalLibraryPanel panel{catalogues};
         panel.show();
@@ -735,8 +722,7 @@ void LibraryPanelEngineTest::thePanelSaysWhichLibraryItIsShowing() {
         QVERIFY(server.has_value());
         (*server)->start();
 
-        QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_socket_key),
-                             QString::fromStdString(socket.string()));
+        testing::configureRemoteEngine(QString::fromStdString(socket.string()));
         CatalogueSource catalogues{database, CatalogueSource::Role::remote};
         LocalLibraryPanel panel{catalogues};
         panel.show();
@@ -796,8 +782,7 @@ void LibraryPanelEngineTest::theSearchDialogAsksTheEngineToo() {
     QVERIFY(server.has_value());
     (*server)->start();
 
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_engine_socket_key),
-                         QString::fromStdString(socket.string()));
+    testing::configureRemoteEngine(QString::fromStdString(socket.string()));
 
     CatalogueSource catalogues{workspace, CatalogueSource::Role::remote};
     QVERIFY(catalogues.usingEngine());

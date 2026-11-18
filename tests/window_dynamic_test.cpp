@@ -175,7 +175,7 @@ void BenchMainWindowTest::Dynamic::dynamicPlaylistsReadTheLibraryChosen() {
                                       music + QStringLiteral("/art.flac")));
 
     // ADR-0286: the remote holds the library.
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_show_local_key), false);
+    testing::holdLibraryOnTheRemote();
     BenchMainWindow window;
     window.show();
     QTRY_VERIFY(window.lists_restored_);
@@ -220,7 +220,7 @@ void BenchMainWindowTest::Dynamic::dynamicPlaylistsReadTheLibraryChosen() {
     QCOMPARE(window.list_tabs_.back()->model->rows().front().raw_path, remote_path);
 
     dialog->close();
-    QSettings{}.remove(QLatin1String(SettingsDialog::library_show_local_key));
+    testing::holdLibraryHere();
 }
 
 // ADR-0350: the window does not pick -- not from the library, not from
