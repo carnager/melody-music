@@ -1,6 +1,6 @@
 # ADR-0020: Separate MPD control from local preparation
 
-- Status: accepted
+- Status: retired by ADR-0224 (Melody no longer speaks MPD); was accepted
 - Date: 2026-08-27
 - Owners: Trackknife project
 - Supersedes: the mixed-session playback portions of ADR-0009 and ADR-0010

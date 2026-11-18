@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted, 2026-09-18. Refines ADR-0112/ADR-0174; supersedes the "deferred
+Retired by ADR-0224 (Melody no longer speaks MPD). Was accepted, 2026-09-18. Refines ADR-0112/ADR-0174; supersedes the "deferred
 cross-authority convenience" stance of ADR-0058 for the three actions named
 here.
 
@@ -71,7 +71,7 @@ Supporting decisions:
 - Right-click → Edit tags on an MPD selection is now one action instead of
   three, with the materialized tab left visible as the record of where the
   edit happened.
-- The mapping itself stays lexical and read-only (`docs/mpd-client.md`);
+- The mapping itself stays lexical and read-only (`docs/history/mpd-client.md`);
   what changed is that three named actions now perform the explicit
   materialization on the user's behalf. ADR-0058's rule that MPD rows never
   enter local mutation plans implicitly remains true — rows are mutated

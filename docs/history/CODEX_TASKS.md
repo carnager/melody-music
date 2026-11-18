@@ -74,7 +74,7 @@ reports an already saved folder cover; retry recognizes identical bytes. Save
 folder covers before Rename/Move: this wave blocks combining those actions
 instead of silently bypassing folder publication. Container writers remain
 embedded-only. Full details and migration boundaries are in
-[`docs/adr/0184-policy-driven-front-covers.md`](docs/adr/0184-policy-driven-front-covers.md).
+[`docs/adr/0184-policy-driven-front-covers.md`](../adr/0184-policy-driven-front-covers.md).
 
 ---
 
@@ -135,7 +135,7 @@ index at startup.
   local and server tracks, independently of scrobbling enable. Loved-track
   dynamic playlists use the next explicit refresh and existing library matching.
 
-See [the guide](docs/lastfm.md) and [ADR-0197](docs/adr/0197-authority-owned-lastfm.md)
+See [the guide](../lastfm.md) and [ADR-0197](../adr/0197-authority-owned-lastfm.md)
 for authentication, private-file persistence, conservative playback accounting,
 retry semantics, and account-switch behavior. Fixture tests cover authorization,
 UTF-8/form encoding, Love/loved state, offline restore/retry, playback thresholds,
@@ -178,7 +178,7 @@ the active playback context, not an unrelated browsed playlist or inactive queue
   Single/Repeat, shuffle, edited return contexts, persistence, stale revisions,
   local gapless handoffs, and closing the source tab during requests.
 
-See [the guide](docs/up-next.md) and [ADR-0196](docs/adr/0196-up-next-request-queue.md)
+See [the guide](../up-next.md) and [ADR-0196](../adr/0196-up-next-request-queue.md)
 for implementation boundaries and the limited stock-MPD fallback. Validation:
 seven targeted Trackbench suites passed, including real local audio and workspace
 integration; Melody's `go test ./...` passed. Both development binaries built.

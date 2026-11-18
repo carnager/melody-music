@@ -1,6 +1,6 @@
 # ADR-0213: Album shuffle targets every Melody list
 
-Status: Accepted
+Status: Accepted for the two-authority model, which ADR-0220 replaced; what holds now is the engine's.
 
 ## Decision
 

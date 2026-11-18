@@ -1,6 +1,6 @@
 # ADR-0112 addendum: scoped MPD database updates from the library
 
-- Status: accepted
+- Status: retired by ADR-0224 (Melody no longer speaks MPD); was accepted
 - Date: 2026-09-03
 - Extends: ADR-0112 settings and music-root bridge, ADR-0058 explicit MPD
   authority

@@ -1,6 +1,6 @@
 # ADR-0129: MPD stored-playlist browse, open, and edit in the workspace
 
-- Status: accepted
+- Status: retired by ADR-0224 (Melody no longer speaks MPD); was accepted
 - Date: 2026-09-08
 - Owners: Trackknife project
 - Extends: ADR-0058 unified workspace, ADR-0071 retirement scope,

@@ -1,6 +1,6 @@
 # ADR-0122: Align MPD and local library search
 
-- Status: accepted
+- Status: retired by ADR-0224 (Melody no longer speaks MPD); was accepted
 - Date: 2026-09-06
 - Owners: Trackknife project
 

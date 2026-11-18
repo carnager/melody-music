@@ -109,17 +109,22 @@ behind the engine as its own phase.
 
 ## Documentation
 
-- `docs/README.md`'s ADR index stops at 0294 of 0353; generate it.
-- ADR-0220 still says Proposed while AGENTS.md calls it accepted.
-- Superseded ADRs are not marked: 5 say so, ~18 newer ones supersede ADRs
-  that still read Accepted. Two status formats are in use. Proposal: one
-  `Status:` line with `Superseded-by:`, retired ADRs to `docs/adr/retired/`
-  under their numbers, index generated -- no history deleted.
-- Stale: `CODEX_TASKS.md` (a Trackbench task list from September),
-  `MILESTONES.md`, `docs/architecture.md`, `docs/mpd-client.md`,
-  `m3-`/`m10-validation.md`; MPD and authority passages in
-  `unified-engine.md`, `ui-workspace.md`, `open-decisions.md`,
-  `compatibility.md`; AGENTS.md's reading order and its "Go daemon" line.
+- ~~`docs/README.md`'s ADR index stops at 0294 of 0353; generate it.~~ Done
+  2026-11-18: `scripts/adr_index.py` writes `docs/adr/README.md`, with each
+  ADR's status and the later ADRs that say they change it.
+- ~~ADR-0220 still says Proposed~~ Done: Accepted, and carried out.
+- Superseded ADRs: done 2026-11-18 by hand for whole retired areas -- the MPD
+  ADRs (retired by ADR-0224), and the two-authority ones (0197, 0210-0214,
+  replaced by ADR-0220); partial supersessions show in the index's
+  "Changed by" column instead of in each old ADR. The two status formats
+  stay; the index reads both.
+- Stale: ~~`CODEX_TASKS.md`, `docs/mpd-client.md`, `m3-`/`m10-validation.md`~~
+  moved to `docs/history/` 2026-11-18; ~~AGENTS.md's reading order and its
+  "Go daemon" line~~ done. `MILESTONES.md` stays: it holds the 1.0 criteria
+  the roadmap and feature matrix link to. Still open: `docs/architecture.md`
+  (banner says out of date; wants a rewrite around the engine), and MPD and
+  authority passages in `unified-engine.md`, `ui-workspace.md`,
+  `open-decisions.md`, `compatibility.md`.
 - Stale comments: `workspace/CMakeLists.txt:6` (two windows),
   `library_tree_model.hpp:77` (QML's tree adapter -- the one-column limit can
   go), `daemon/CMakeLists.txt:35`, `daemon/main.cpp:5-7`,

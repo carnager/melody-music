@@ -271,7 +271,7 @@ Completed evidence:
   outputs and the complete advertised stored-playlist lifecycle.
 - [x] A live daemon-restart defect found during the stock pass now has a fix
   and a socket-level autonomous-reconnect regression test. Details are in
-  `docs/m3-validation.md`.
+  `docs/history/m3-validation.md`.
 
 ### Exit criteria (met)
 
@@ -1699,7 +1699,7 @@ consecutive iterations; fuzz, static-analysis, benchmark, and long-run soak
 hooks remain release gates in CI and `docs/release-checklist.md`. Keyboard,
 mouse, accessible-name/state, and authority-bound workflow coverage lives in the
 offscreen UI suite, with hands-on stock MPD, Melody, and local real-file evidence
-linked from `docs/m10-validation.md`. Every published artifact must still run the
+linked from `docs/history/m10-validation.md`. Every published artifact must still run the
 release checklist against its exact checksum; completion does not claim Flatpak
 or certify an untested future package.
 

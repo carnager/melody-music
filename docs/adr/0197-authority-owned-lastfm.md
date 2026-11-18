@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted and implemented, bounded, 2026-09-20 (post-M10 work).
+Superseded by ADR-0220: one engine scrobbles, not each authority. Was accepted and implemented, bounded, 2026-09-20 (post-M10 work).
 
 ## Decision
 
