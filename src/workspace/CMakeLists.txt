@@ -54,6 +54,8 @@ qt_add_library(
     list_edit_job.hpp
     quick_pick_session.cpp
     quick_pick_session.hpp
+    cover_loader.cpp
+    cover_loader.hpp
     replaygain_job.cpp
     replaygain_job.hpp
     color_scheme.cpp

@@ -1,625 +1,201 @@
 # Architecture
 
-> **Out of date.** The MPD backend described throughout this document was
-> removed in [ADR-0224](adr/0224-retire-the-mpd-backend.md); catalogue and
-> playback now belong to the engine ([ADR-0220](adr/0220-unified-engine-and-remote-agents.md),
-> [unified engine](unified-engine.md)). This document needs rewriting around
-> the engine rather than patching.
-
-> **Superseded in part by ADR-0220.** This document describes the current,
-> shipping architecture: a single process with two authorities behind one UI.
-> The accepted direction splits it into an engine (`melodyd`) and a client, and
-> removes the authority split entirely. Read
-> [the unified engine plan](unified-engine.md) alongside this; where the two
-> disagree about direction, ADR-0220 wins. Where they disagree about what the
-> code does *today*, this document wins.
-
-## Status
-
-Qt 6 Widgets, C++23 with a Qt-free core, the Linux/build baseline, focused
-media/storage backends, utf8proc, `tkfmt-1`, the MPD-client-first direction,
-the unified MPD/local Trackbench workspace (ADR-0058), Trackbench's versioned composed panel
-layouts (ADR-0026), its semantic track-view layouts (ADR-0027), bounded
-cue-sheet logical-track planning (ADR-0028), and persistent source-rate buffer
-profiles (ADR-0029), and continuous PipeWire device monitoring with conservative
-output recovery (ADR-0030), exhaustive container-chapter projection
-(ADR-0031), explicit decoder selection plus tracker subsongs (ADR-0032), the
-typed local metadata read model (ADR-0033), the staged metadata selection grid
-(ADR-0034), bounded in-memory metadata drafts (ADR-0035), and the aggregate
-metadata fields workspace (ADR-0036), plus exact ordered metadata value editing
-(ADR-0037), the file-selection-driven Properties workspace (ADR-0038), its
-dynamic metadata field vocabulary (ADR-0039), and ranked field-name completion
-(ADR-0040), background complete Draft projection (ADR-0041), and revalidated
-metadata write-plan/conflict preview (ADR-0042), plus the preservation-verified
-prepared-copy FLAC text writer (ADR-0043), the journaled native-FLAC
-commit/recovery executor (ADR-0044), and the provenance-aware dependent-state
-cache transaction (ADR-0045), plus startup recovery presentation and bounded
-retained-backup undo (ADR-0046), and cancellable bounded metadata Apply jobs
-(ADR-0047), plus versioned previewed metadata transformation chains (ADR-0048),
-persisted exact-value chains (ADR-0049), typed first-character metadata
-capitalization (ADR-0050), and the persistent automatic tagging transformation
-panel (ADR-0051), plus the tabbed tagging workspace and expandable change
-preview (ADR-0052), and exact-value matching plus selection-order numbering
-(ADR-0053), plus the unified preparation plan and reusable output profiles
-(ADR-0054), and versioned output-profile persistence plus pure path planning
-(ADR-0055), plus fresh filesystem preflight and a durable file-publication state
-machine (ADR-0056), plus journaled same-filesystem file publication and recovery
-(ADR-0057), revision-qualified all-occurrence relocation (ADR-0059), linked
-same-filesystem undo (ADR-0060), and verified cross-filesystem publication
-(ADR-0061), plus revision-qualified active-playback relocation (ADR-0062), are
-joined by bounded file-publication Apply (ADR-0063) and typed keep-first
-metadata transformation (ADR-0064), plus pasted rule-script translation and
-conditional removal (ADR-0065), and explicit semantic/freeform metadata field
-identity (ADR-0066), plus the immutable final-metadata/path review, qualified
-Rename/Move UI, and unified file recovery/history (ADR-0067), and bounded
-versioned multi-target metadata capture patterns (ADR-0068), plus strict
-source-tag authority for path-only preparation (ADR-0069), canonical raw
-transformation editing with dirty-state protection (ADR-0070), and strict
-native typed-chain interchange (ADR-0072), plus journaled changed-content
-destination artifacts (ADR-0073), and composed metadata/path publication
-(ADR-0074), reused-target cache and batch-directory evidence (ADR-0075),
-bounded typed artwork inventory (ADR-0076), and lazy read-only Properties
-artwork presentation (ADR-0077), plus immutable preservation-verified native-
-FLAC artwork planning (ADR-0078), and compact journaled native-FLAC artwork
-publication/recovery (ADR-0079), and bounded Properties artwork review/Apply
-with preservation-exact native block rewriting (ADR-0080); decisions are
-accepted through ADR-0080.
-Backend selection is not a capability claim; protocol and file behavior still
-require fixtures and measurements.
+How Melody is built today (2026-11-18, through ADR-0358). The direction it
+follows is [ADR-0220](adr/0220-unified-engine-and-remote-agents.md); how the
+code got here is in [the unified engine plan](unified-engine.md) and the
+[ADR index](adr/README.md). The two-authority design this document used to
+describe -- an MPD side and a local side in one window -- is gone
+([ADR-0224](adr/0224-retire-the-mpd-backend.md)); its version of this
+document is in the repository history.
 
 ## System shape
 
-One repository builds a unified Trackbench workspace over shared internal
-libraries. The former standalone Melody MPD shell was retired in ADR-0071.
+One engine process, `melodyd`, owns a library and everything done to it: the
+catalogue, lists, ratings and history, playback, and every read and write of
+its files. Everything else is a client of one or more engines over protocol v1
+-- a Unix socket on the same machine, TCP with a password from elsewhere
+([ADR-0223](adr/0223-tcp-transport-and-authentication.md)).
 
 ```text
-Trackbench: MPD Queue context       Trackbench: Local Queue context
-  | typed commands, immutable view models, event subscriptions
-Application services
-  | MPD session | server library      | local playback | preparation | jobs
-Core domain (shared)
-  | source refs | metadata/MusicBrainz | list docs | tkfmt | jobs | plans
-Adapters (linked per application)
-  | MPD | SQLite | Melody agent        | filesystem/tags | FFmpeg | loudness
-  |                                    | PipeWire
-External/platform
-  | MPD or melodyd                     | local files | Linux desktop/audio
+ melody (window)   melody-cli   melody-pick   Android app   melody-watch
+        \               |            |            |             /
+         \--------------+---- protocol v1 --------+------------/
+                                     |
+                               melodyd (engine)
+             catalogue · lists · playback · file work · journals
+                  |                    |                    |
+           its music files      lists.sqlite        outputs: its own speakers,
+                                                     agents (melody-agent,
+                                                     phones), UPnP renderers
 ```
 
-The UI never owns sockets, decoders, tags, SQL transactions, or file writes.
-Adapters never reach into widgets. The core can later serve a CLI without a
-second interpretation of domain behavior. Trackbench links both adapters but
-routes them only through the active authority; local mutation services reject
-MPD selections by construction.
+- **melodyd** (`src/daemon`, `src/engine`): the engine. Its state is one
+  SQLite database, `lists.sqlite`, in its state directory
+  (`~/.local/share/melody/engine` by default). It plays on its own speakers
+  and on outputs elsewhere, and keeps playing when every client is closed.
+- **melody** (`src/bench`, `src/workspace`, `src/uicommon`): the desktop
+  window, Qt Widgets. It starts this computer's engine when none is running
+  ([ADR-0226](adr/0226-trackknife-runs-its-own-engine.md)) and holds a
+  connection to every engine configured
+  ([ADR-0234](adr/0234-engines-are-connections.md)).
+- **melody-cli** (`src/cli`) and **melody-pick** (`src/bench/pick_main.cpp`,
+  [ADR-0346](adr/0346-melody-pick.md)): command-line and key-binding
+  clients.
+- **melody-agent** (`src/agent`): an output on another machine
+  ([ADR-0228](adr/0228-output-agents-on-protocol-v1.md)); engines find
+  agents and each other on the network
+  ([ADR-0229](adr/0229-engines-find-each-other.md)).
+- **melody-watch** (`src/watch`): tells an engine which files changed on a
+  NAS it reads over a mount ([ADR-0232](adr/0232-melody-watch.md)).
+- **The Android app** (`android/`, Kotlin): a client, with Opus streams and
+  offline albums ([ADR-0230](adr/0230-opus-streams-and-download-tickets.md),
+  [ADR-0231](adr/0231-android-client.md)).
 
-## Primary data flow
+## The rules
+
+- **The UI asks; the core answers.** Nothing in `src/bench`, `src/workspace`
+  or `src/uicommon` opens the engine's database, reads tags, decodes audio,
+  walks folders or reads covers. The window reads no files
+  ([ADR-0356](adr/0356-the-window-reads-no-files.md)): it asks the engine the
+  files belong to. Converting is the one exception: the window converts in
+  its own process, because what it makes lands on its own computer
+  ([ADR-0340](adr/0340-melody-converts.md)).
+- **One implementation, not two.** There is no local-versus-remote branch: a
+  tab names the engine its list came from
+  ([ADR-0221](adr/0221-entry-and-track-identity.md),
+  [ADR-0233](adr/0233-lists-live-in-the-engine.md)), and every tab is filled,
+  given covers and worked on by that engine in the same way
+  ([ADR-0355](adr/0355-every-tab-fills-its-rows-from-its-engine.md)). This
+  computer's engine is one engine among others, reached the same way.
+- **Work happens where the files are.** Tagging, artwork, ReplayGain, moves
+  and undo are done by the engine holding the files, on its machine
+  ([ADR-0237](adr/0237-file-work-in-the-engine.md)). A client previews; the
+  engine revalidates, writes, journals and follows the change in its library
+  and lists.
+- **Everyone runs the latest.** A client uses an engine at its own protocol
+  level or newer and refuses an older one
+  ([ADR-0260](adr/0260-protocol-version-and-compatibility.md),
+  [protocol levels](protocol-levels.md)). The database has one schema and
+  one automatic upgrade step from the version before
+  ([ADR-0354](adr/0354-one-schema-no-migrations.md)); a user never runs a
+  command after an update.
+
+## The engine
+
+`src/engine` is the engine's library; `src/daemon` is its `main`, settings and
+configuration methods.
+
+- **Catalogue** (`catalogue.hpp`): the library index over the engine's music
+  folders -- scanning, queries, album and artist views, covers and lyrics, and
+  `read_tracks` for any file a list holds. `LocalCatalogue` is the engine's
+  own; `RemoteCatalogue` is the same interface over the protocol, which the
+  window uses for every engine, this computer's included.
+- **Workspace** (`workspace.hpp`): the lists -- each a set of entries in an
+  order -- their edits ([ADR-0256](adr/0256-lists-travel-as-edits.md)),
+  playlists as files in the playlist folder
+  ([ADR-0296](adr/0296-playlists-are-files.md)), favourites, dynamic
+  playlists.
+- **Player and outputs** (`player.hpp`, `outputs.hpp`): one playback state
+  machine, numbered states
+  ([ADR-0236](adr/0236-playback-states-are-numbered.md)), Up Next
+  ([ADR-0196](adr/0196-up-next-request-queue.md)), and outputs: the
+  engine's own speakers through PipeWire, agents, UPnP renderers, streams.
+- **File work** (`file_work_methods.hpp`, `job_methods.hpp`): reads
+  (`metadata.read`, `files.open`, `playlists.read`, `media.probe`), loudness
+  scans, and the journaled writes -- `metadata.apply`, `artwork.apply`,
+  `preparation.apply` (moves and renames), `operations.undo` -- plus the
+  whole ReplayGain round, `replaygain.apply`
+  ([ADR-0357](adr/0357-one-replaygain-round-in-the-engine.md)).
+- **Jobs** (`job_registry.hpp`): long work runs as a job a client submits,
+  watches (`job.progress`) and may cancel.
+- **Server** (`server.hpp`): protocol v1 -- newline-delimited JSON requests,
+  answers and events -- on a socket and on TCP, and the HTTP stream port.
+- **Events**: every change to a library or list is told to every client
+  connected, which follows it in place
+  ([ADR-0268](adr/0268-the-library-follows-its-files.md)).
+
+## The window
+
+`src/bench` is the window and its dialogs; `src/workspace` holds what they draw
+over, Qt-based but without widgets; `src/uicommon` holds shared presentation.
+
+- **Workspace** (`src/workspace/workspace.hpp`): the tabs and their rows, a
+  connection per engine (`EngineLink`: its catalogue, its playback, its file
+  work), Up Next, the desktop media session. A tab's rows come from its
+  engine (`catalogue.read_tracks`); files opened from outside become rows
+  through this computer's engine (`files.open`); covers come through one
+  `CoverLoader`.
+- **File tools**: the tag editor (`tagger_session`), artwork, ReplayGain,
+  rename and move, and conversion are sessions in `src/workspace` drawn by
+  dialogs in `src/bench`. Their reads and writes go through the engine's
+  `RemoteFileWork` (`src/engine/include/trackknife/engine/remote_file_work.hpp`).
+- **Library panel** (`library_browser`): the library of the engine chosen as
+  the library ([ADR-0286](adr/0286-one-library.md)), through its catalogue.
+- **Presets** -- naming layouts, conversion profiles, tagging scripts -- are
+  Melody's, in `presets.sqlite` on this computer
+  ([ADR-0339](adr/0339-presets-are-melodys.md)); an engine is handed the
+  ones it needs.
+
+## Shared libraries
+
+Each is Qt-free C++23 with its own tests, used by the engine and, where
+noted, by clients.
+
+| Module | What it holds |
+|---|---|
+| `core` | Errors and results, raw paths and source revisions, cancellation, Unicode, environment and state paths. |
+| `protocol` | Protocol v1 messages, the client, raw-path encoding, version levels. |
+| `discovery` | Finding engines and agents on the network. |
+| `formats` | FFmpeg probing and decoding, CUE sheets, chapters, tracker subsongs. |
+| `audio` | Playback: decoding ahead, gapless, ReplayGain gain, PipeWire output, the real-time ring. |
+| `output` | Outputs beyond the engine's own speakers: agents, UPnP, audition. |
+| `metadata` | Tag reading and writing through TagLib and native writers, documents, staged selections, write plans, artwork, sidecars, transformations. |
+| `loudness` | EBU R128 measurement, album grouping, the ReplayGain pipeline. |
+| `convert` | Encoder presets and the verified single-file conversion. |
+| `operations` | Plan, preview, journal, commit, recover and undo for every file mutation. |
+| `persistence` | SQLite: the library index, lists, history, journals; the one schema. |
+| `lists` | List ordering and duplicates, M3U8 reading and writing. |
+| `query` | The `tkq-1` search language and its evaluation. |
+| `titleformat` | The `tkfmt-1` formatting language ([title-formatting.md](title-formatting.md), [ADR-0008](adr/0008-trackknife-format-expression-language.md)). |
+| `musicbrainz` | MusicBrainz lookups and matching, AcoustID. |
+| `watch` | Filesystem watching, for the engine and melody-watch. |
+
+## Mutation
+
+Every change to a file goes the same way:
 
 ```text
-Trackbench MPD context:
-MPD server --command/idle--> MpdSession --> immutable server snapshots
-                                      \--> tab/list and view services --> UI
-
-Trackbench local context:
-Local source --> playback: FFmpeg --> gain/DSP --> PipeWire
-             \-> tags / MusicBrainz / ReplayGain / organize / convert plans
+draft -> plan -> preview -> (engine) revalidate -> journal -> write
+      -> verify -> follow in library and lists -> complete
+                                     \-> partial / needs reconciliation
 ```
 
-ADR-0120 places the existing asynchronous MPD search model and queue actions
-in the Sources panel beside the persistent browse tree, using the panel layout
-for geometry rather than an overlay over Track Lists. ADR-0122 adds the
-`MpdLibrarySearchModel` tree presentation over the bounded search projection,
-using the same tree view/delegate as local search. Complete-release expansion
-and selection resolution use serial asynchronous controller requests, retain
-persistent indexes, and reject results invalidated by a query change.
-
-MPD is the primary library and live-queue authority for its context. Trackbench
-persists authority-qualified profiles, workspace/list state, presets, jobs, and
-journals in SQLite. ADR-0115 adds an optional local-library index in that store;
-it is a rebuildable file-metadata cache and never mirrors the MPD database.
-
-`persistence::LocalLibrary` owns folder configuration, revision-based scanning,
-and bounded artist/album/track queries without Qt types. The Library panel
-uses two bounded workers so queries can run alongside scanning. Metadata and
-relocation transactions call its index-refresh helper before committing list
-and cache state. See [local-library.md](local-library.md).
-
-ADR-0126 adds bounded cleanup of confirmed missing index records after complete
-manual scans, guarded by filesystem-device evidence, source revisions, and root
-scan tokens. It also propagates MPD browse resets to retained search artwork,
-invalidating old request tokens while preserving search rows and query text.
-
-## Suggested modules
-
-### `model`
-
-Qt-free domain types: stable IDs, server/profile identity, MPD URI, raw local
-path, remote/local source capability, logical segment, arbitrary ordered
-metadata, MusicBrainz identities/credits, technical info, artwork, loudness,
-queue occurrence, list item, revisions, and errors.
-
-### `mpd`
-
-`libmpdclient` adapter, connection/authentication, capability discovery,
-command serialization, idle monitoring, reconnect generations, protocol-to-
-domain projection, queue diffing, browse/search, output extensions, and a fake
-server test harness. It contains no widgets and exposes no libmpdclient handles.
-
-### `workspace`
-
-Shared track/list document model. In the client it hosts the live MPD queue,
-stored playlists, scratch lists, and saved lists over remote references; in
-Trackbench it hosts local working lists over raw paths. Owns dirty state,
-persistence, cross-tab operations, duplicate occurrences, snapshot
-provenance, and supported action capabilities. The model is distinct from Qt
-tab widgets. ADR-0123 adds bounded removal/reorder history to the local list
-presentation model: detached occurrence snapshots and inverse permutations,
-with persistent-index remapping and verified commit refresh of retained rows.
-History replay uses normal dirty-list persistence and remains separate from
-file-operation journals and MPD mutations.
-
-ADR-0125 adds find in local lists and the MPD queue as one presentation controller
-with a bounded worker and detached text batches. Core Unicode mappings and literal
-substring matching operate on cached metadata/path snapshots; generation checks
-reject results invalidated by edits, server queue refreshes, selection changes, or
-authority switches. Find selects existing occurrences and owns no list, playback,
-or persisted state.
-
-### `lists`
-
-ADR-0127 introduces a Qt-free planner for stable natural ordering over `tkfmt-1`
-keys, reverse permutations, and exact logical-source duplicate removal. One UI
-worker consumes bounded detached snapshots; list or authority changes invalidate
-pending results. The model applies current plans through its existing history
-and persistent-index remapping, and the workspace saves the resulting order.
-
-ADR-0128 adds strict local M3U8 parsing/serialization and bounded file adapters.
-A single UI-owned worker prepares imported rows and exports detached list
-snapshots. Import publishes a complete named local list; export fsyncs a sibling
-temporary file and atomically hard-links it to a new destination without replacing
-existing files. Logical/remote references fail explicitly rather than losing
-source identity. No database migration or GUI dependency enters `lists`.
-
-### `titleformat`
-
-The immutable versioned `tkfmt-1` parser/compiler/evaluator, dependency
-extraction, diagnostics, and corpus. It is pure and is shared by views, sorts,
-groups, transformations, and relative destination generation.
-
-### `formats`
-
-FFmpeg probe/decode/encode adapters. A narrow libopenmpt identity adapter
-enumerates tracker subsongs that FFmpeg can select but does not enumerate;
-FFmpeg remains the PCM decode boundary.
-
-### `audio`
-
-Local playback state machine, source resolver, FFmpeg decoder lifecycle,
-gapless scheduling, PCM negotiation, ReplayGain/DSP stages, PipeWire buffer and
-device output, and underrun diagnostics. A dedicated Qt-free playback worker
-serializes source replacement, bounded decoder production, transport, seek,
-PipeWire transitions, drain, and cancellation while publishing immutable
-snapshots. The real-time callback performs no blocking I/O, allocation, SQL, or
-UI work. ADR-0119 adds typed decoder ReplayGain values and a coalesced worker policy
-that scales each source’s floating-point PCM before the ring, with exact Off
-bypass and known-peak clipping prevention. A Qt-free lazy shuffle traversal
-feeds the shell’s occurrence-anchored local Repeat/Random/Single/Consume
-progression; these controls and preferences remain independent of MPD.
-Named and exact duration profiles configure future ring allocations
-without resizing live RT state. A persistent registry/default-metadata monitor
-publishes device generations to the same worker; explicit-target loss pauses
-without fallback and reconnects in place when the target returns. Trackbench's
-Trackbench's Local Queue player and the M9 Melody endpoint each own a service
-instance; the latter is a server-controlled output and never borrows Local
-Queue authority (ADR-0174).
-
-### `preparation`
-
-Trackbench's local intake and capability resolution across metadata, artwork,
-loudness, organization, conversion, playback, and publication. It turns a
-local selection into typed operation inputs and readiness state without
-becoming a canonical local library.
-
-### `metadata`
-
-Rich multi-source documents, MusicBrainz projections, TagLib/format-specific
-adapters, the sparse staged-selection projection, field vocabulary and ranked
-search, the bounded copy-on-write patch set and worker result projection, and
-the physical-source-aware revalidated write-plan preview, plus the native-FLAC
-preservation-verified prepared-copy writer. Versioned ordered transformation
-chains, their exact add/copy/split/join and first-character capitalization
-semantics, pure final-cell preview, and the independent Qt-free `tkcapture-1`
-compiler/matcher remain in this module. One capture action may expose several
-semantic and exact-freeform preview targets while still staging atomically.
-The bounded cleanup importer also owns a verified canonical source projection
-for representable typed actions; persisted typed actions remain authoritative.
-The first artwork reader inventories native FLAC picture blocks and exact
-configured sibling PNG/JPEG files as bounded revision-qualified records with
-typed roles, exact native type, MIME, dimensions, SHA-256 content identity,
-provenance, and duplicate linkage. ADR-0078 adds the distinct immutable native-
-FLAC replace/remove plan and prepared-copy adapter. It rereads replacement
-PNG/JPEG input from captured path/revision/hash evidence and proves the final
-picture inventory, exact unrelated picture payloads, untouched text/unknown
-blocks, and compressed audio without retaining encoded blobs in a plan.
-ADR-0079 routes that plan through the shared unchanged-path metadata executor;
-migration 23 stores only operation kind, ordinal/count/hash evidence, and
-complete-inventory digests needed for recovery. Published artwork rereads feed
-the existing all-occurrence revision/document refresh without making SQLite an
-artwork cache. ADR-0121 advances same-workspace tag-source revisions only
-through verified artwork commits, preserving text baselines, sparse edits, and
-undo history through immutable revised-source snapshots. Local list publication
-uses data-change notifications to retain playback occurrence identity.
-ADR-0080 exposes exact embedded-row Replace/Remove through fresh
-immutable review and a two-worker cancellable Apply job. Its native prepared
-copy changes only the reviewed FLAC picture block and streams every unrelated
-metadata block and compressed audio byte unchanged.
-ADR-0081 extends the plan with native-FLAC append semantics and schema-24 Add
-evidence. Embedded Copy donors remain compact revision/ordinal/hash input
-evidence and are reread only while preparing each destination; they never
-become temp files or SQLite blobs. The separate bounded Export service is a
-non-mutating exclusive-output boundary over the same transient image reader
-and therefore owns neither a mutation journal nor retained Undo artifacts.
-ADR-0178 adds selection-expanded field allowlist/blocklist actions to the same
-pure preview path; schema 34 and native JSON retain their bounded field lists.
-Saved definitions cross the `persistence` boundary only as validated
-declarative data. Each adapter
-publishes independent
-read/write/artwork/preservation capabilities;
-decode or read support never implies write safety. Loudness is displayed beside
-tags but remains a typed record with algorithm/provenance.
-
-### `loudness`
-
-libebur128 accumulators, album reducers, sample/true peak, grouping, scan plans,
-and typed results. It consumes FFmpeg-decoded PCM independently of tag
-writability.
-
-ADR-0124 retains immutable stream/subsong/range inputs beside Properties
-metadata rows and carries them into logical-source scans. A Qt-free staged
-source flag prevents the physical metadata planner from publishing logical
-ReplayGain/R128 values as whole-file tags. ADRs 0139-0145 route those values to
-revision-gated CUE or sidecar carriers with journal and playback parity.
-
-### `convert`
-
-Versioned encoder presets with runtime FFmpeg capability probing and the
-qualified single-file conversion primitive: optional permanent ReplayGain,
-channel/rate/depth conversion through swresample, then FFmpeg encode into a
-hidden temporary verified by full decode before atomic no-replace publication.
-The bounded scan stays Qt-free; the UI layers destination planning and complete
-saved-job snapshots over it (ADR-0173).
-
-### `operations`
-
-Shared plan/preview/commit/journal framework for tags, artwork, files,
-conversion publication, verification, and loudness writes. Mutations acquire
-per-source locks and revalidate revisions. The first implementation serializes
-native-FLAC sources, journals exact raw paths and recovery identities through a
-persistence interface, atomically publishes a verified sibling, retains the old
-inode as a backup, requires an idempotent dependent-state commit, and rolls back
-or conservatively escalates interrupted states without depending on Qt. A
-separate backup lifecycle supports verified atomic-exchange undo, explicit
-release, startup maintenance, and restart recovery without conflating backup
-retention with publication state. A Qt-free two-worker Apply orchestrator now
-consumes only wholly ready plans, serializes progress delivery, stops new
-admission on cancellation, and preserves ordered per-source partial results.
-Trackbench composes final tag context and file paths into one immutable
-preparation review. Exact raw-path/revision pairing now dispatches metadata-only,
-path-only, combined metadata/path, and no-change sources through one bounded
-preparation Apply. Combined work prepares a verified destination artifact and
-supplies its reread document to one durable all-occurrence relocation and cache
-refresh. A path-only review carries no metadata plan or synthetic context and
-evaluates from the captured revision-qualified source tags. Executor-proven
-directory creation remains batch-owned if later work rolls back, while an
-unexplained path appearance still fails admission (ADR-0075).
-
-ADR-0184 adds a separate descriptor-relative folder-image publisher beside the
-embedded-artwork committer. Captured storage policy extends ready artwork plans,
-not draft intents. Schema 38 shares the metadata journal and backup lifecycle
-but routes folder recovery separately from media-document projection. A shared
-folder is one destination; conflicting incoming hashes block review. Folder and
-media files remain distinct journaled publications with explicit partial-failure
-reporting. The Fields thumbnail consumes the existing bounded artwork worker.
-
-### `jobs`
-
-Bounded resource-aware scheduler, dependencies, cancellation, progress,
-structured per-item results, retry, history, and UI events. Network sessions,
-audio realtime, CPU decode/analysis, encode, local I/O, and mutation have
-separate limits rather than one undifferentiated pool.
-
-### `persistence`
-
-SQLite migrations/repositories for profiles, workspace, list documents and
-snapshots, presets, jobs, statistics, caches, and operation journals. Writes are
-short and transactional; sockets, decode, and filesystem work never occur
-inside a database transaction. Verified metadata publication refreshes every
-matching local occurrence and a raw-path source cache in one idempotent
-transaction; provenance keeps logical-track overlays separate, and the source
-cache prevents a delayed ordinary workspace save from restoring stale fields.
-Combined publication relocates all occurrences and installs the verified target
-document and revision in that same transaction, while retaining logical
-CUE/chapter/subsong/annotation overlays. Schema-22 idempotency evidence records
-whether a relocation included this metadata refresh. A historical target cache
-with no persisted owning occurrence is superseded atomically when the pathname
-is reused; it is durable correctness data rather than permanent path ownership
-(ADR-0075).
-The operation journal also guards retained-backup state and unique reverse
-operation identities for crash-recoverable undo. Apply first persists a
-UI-captured workspace snapshot on this worker so a newly opened occurrence
-cannot race the ordinary save debounce.
-ADR-0175 adds a Qt-free online-backup boundary over that database: SQLite
-captures committed WAL state into an exclusive destination, which is reopened
-read-only for integrity and Melody-schema validation before success is
-reported. Restore remains a restart boundary so no live repository connection
-can observe a database being replaced underneath it.
-
-### `ui`
-
-Qt Widgets presentation split into a shared component library (virtualized
-track views, tab workspace, transport row, command palette, toasts, settings,
-shortcuts, and the versioned panel- and track-view-layout models/validators)
-plus one primary Trackbench shell: authority-bound MPD connection,
-server-browser/search, queue tabs, and outputs alongside the composed-panel
-renderer, folder navigation, local list tabs, tag grid, previews,
-preparation-operation history and metadata/file reconciliation evidence, and
-job center.
-Panel layout
-owns only placement and sizing of registered instances, never application
-state. ADR-0052 hosts each captured metadata Properties task as a temporary
-protected tab in the Track Lists surface while excluding it from durable list
-documents. ADR-0077 keeps the existing Properties file selector as the shared
-scope for sibling Fields and Artwork sections. Artwork inspection starts only
-while that section is active, runs through one cancellable worker, rejects more
-than 64 distinct sources visibly, and retains neither encoded pixels nor
-inventory state in SQLite. Track-view presentation separately owns semantic
-column placement and group geometry, never queue/list occurrence state. UI consumes C++
-`QAbstractItemModel` and controller objects; no
-`QQuickWidget` hybrid.
-
-## Identity and source records
-
-```text
-ProfileId       stable MPD connection identity
-RemoteTrackKey  ProfileId + exact MPD URI + optional segment identity
-QueueItemKey    ProfileId + MPD song ID + server queue generation
-LocalSourceId   stable internal UUID + observed filesystem identity
-ListId          stable Melody tab/list identity
-JobId           stable job identity
-Revision        server/list/source revision appropriate to the authority
-```
-
-An MPD URI and local raw path are different representations even when a profile
-root maps between them. A remote snapshot may outlive connectivity. A local
-revision uses filesystem identity/size/mtime plus hashes where needed for safe
-mutation.
-
-## Conceptual persistence
-
-```text
-mpd_profiles(id, name, endpoint, secret_ref, local_root, reconnect_policy)
-workspace_panels(id, type, config, schema_version)
-lists(id, kind, name, profile_id?, dirty, revision, config)
-list_items(list_id, ordinal, source_kind, source_ref, logical_ref?, segment?, snapshot)
-view_presets(id, name, version, definition)
-local_sources(id, raw_path, fs_identity, size, mtime, revision, availability)
-local_metadata(source_id, field, ordinal, value, provenance, revision)
-loudness(source_id/segment, grouping, gains/peaks, algorithm, revision)
-jobs(id, kind, state, summary, resumable_payload)
-operation_journal(id, plan, steps, state, recovery_payload)
-metadata_operation_backups(operation_id, state, undo_id?, timestamps, failure?)
-```
-
-The live MPD queue is not persisted as a second authoritative list. Its latest
-snapshot may be cached for fast/offline display, clearly marked stale. Scratch
-and named Melody lists are authoritative application data.
-
-## Events and consistency
-
-Typed events carry IDs/revisions or small immutable snapshots:
-
-```text
-MpdConnectionStateChanged / MpdCapabilitiesChanged
-MpdStatusChanged / MpdQueueChanged / MpdDatabaseChanged
-MpdStoredPlaylistsChanged / MpdOutputsChanged
-TrackListChanged / ActiveListChanged
-LocalSourceChanged / MetadataChanged / LoudnessChanged
-MpdPlaybackStateChanged / LocalAuditionStateChanged
-JobProgress / JobFinished / OperationNeedsReconciliation
-```
-
-Session generations reject stale network results. Coalesce server and job
-bursts so changes do not create unbounded UI redraws. Live-queue conflicts
-refresh server truth; local list edits remain transactional and undoable.
-
-## Operation lifecycle
-
-```text
-Draft -> Resolve inputs -> Plan -> Previewed -> Revalidate -> Journal
-      -> Execute -> Verify -> Commit state -> Complete
-                                \-> Partial / Needs reconciliation
-```
-
-Plans are immutable after preview. Capability resolution reports remote-only,
-local, mapped-local, writable, and decodable sources before offering actions.
-
-## Concurrency rules
-
-- The UI loop receives only small immutable messages.
-- Each active MPD session has bounded serialized command and idle workers.
-- Non-idempotent protocol mutations are not automatically replayed after an
-  ambiguous disconnect.
-- PipeWire real-time work has the highest isolation and shares no blocking lock
-  with UI, network, decoder, or operation workers.
-- CPU-heavy scans/conversions use bounded pools and account for FFmpeg's own
-  codec threads.
-- Only one mutation holds a physical source lock; pending writers do not starve.
-- Cancellation crosses every backend boundary and updates visible state quickly.
-
-## Backend decisions
-
-- **MPD:** dynamically linked `libmpdclient >= 2.22`, generic pair parsing for
-  unknown and advertised extension fields, no handles outside the adapter.
-- **Decode/encode:** FFmpeg libraries, never an `ffmpeg` subprocess for playback.
-- **Metadata:** TagLib plus format-specific adapters. The generic property
-  reader is active; native-FLAC text has preservation-proven prepared-copy and
-  headless journaled commit plus bounded Apply support (ADRs 0043–0047).
-  ADR-0048's versioned transformation chains stage through the same draft and
-  write-plan boundary; ADR-0049 persists validated definitions and adds exact
-  add/copy/split/join actions, while ADR-0050 adds typed first-character
-  capitalization. ADR-0051 composes checked saved definitions into a temporary
-  draft immediately before the same immutable write-plan boundary. ADR-0053
-  adds complete-value exact remove/replace and captured-file-order numbering
-  without folding grouping or capture grammar into schema 1. ADR-0064 adds a
-  bounded Unicode-scalar keep-first action without assigning it date parsing
-  semantics. ADR-0065 translates a bounded Picard-style paste subset into
-  ordinary typed actions and adds versioned conditional field removal without
-  adding mutation to `tkfmt-1`. ADR-0066 permits semantic aliasing only through
-  explicit adapter tables, exposes other properties as independently mutable
-  freeform native fields, and carries exact-native imported deletion through
-  preview, write, journal, and recovery. ADR-0070 adds a deterministic raw
-  cleanup-source projection, live translation, and explicit dirty-state
-  protection while keeping typed actions as the only persisted authority.
-  ADR-0072 losslessly imports and exports the complete current typed chain in a
-  strict versioned JSON envelope without transferring catalog identity or
-  automatic state.
-  ADR-0078 separately qualifies native-FLAC embedded-picture replace/remove at
-  the plan and verified prepared-copy boundary. ADR-0079 adds compact durable
-  complete-inventory evidence and reuses the locked unchanged-path publication,
-  rollback, recovery, undo, and all-occurrence refresh lifecycle. ADR-0080 adds
-  Properties selection, immutable review, bounded progress/cancellation,
-  fresh-retry behavior, and exact native block rewriting. Other format artwork
-  writers still require real preservation tests.
-- **Loudness:** libebur128 behind Melody-owned ReplayGain policy.
-- **Preparation:** ADR-0054 composes tag persistence, qualified ReplayGain
-  storage, and filesystem rename/move into one immutable per-source review and
-  recoverable Apply boundary. Versioned relative output layouts remain separate
-  from explicit raw-path destination roots and are reusable by conversion.
-  ADR-0055 persists those contracts in migration 13 and adds a bounded Qt-free
-  path planner over final metadata, captured source revisions, and an explicit
-  filesystem snapshot. It owns lexical mapping and collision diagnostics only;
-  ADR-0056 adds a no-symlink live preflight and classifies same-filesystem rename
-  versus cross-filesystem copy without mutation. Migration 14 durably separates
-  target preparation/publication, dependent-state commit, and source removal.
-  ADR-0057 qualifies locked descriptor-relative no-replace rename, exact
-  rollback, and idempotent startup recovery; ADR-0059 supplies concrete guarded
-  dependent path state, ADR-0060 adds linked same-filesystem undo, and ADR-0061
-  adds bounded metadata-preserving verified cross-filesystem copy, no-replace
-  publication, source removal, and recovery. ADR-0062 adds a serialized exact-
-  revision audio-binding barrier and compensates it if the durable list/cache
-  transaction fails. ADR-0063 adds ordered bounded file batches, fresh per-
-  source admission, monotonic progress, partial results, cancellation, and
-  shared-directory topology coordination. ADR-0067 exposes qualified path-only
-  Rename/Move through one final-metadata/path review, persists the captured
-  workspace before bounded Apply, refreshes visible/player references, and
-  connects both publication recovery state machines plus same-filesystem undo
-  to the preparation-operation history. ADR-0069 excludes manual drafts and
-  checked automatic chains from path evaluation whenever Save tags is off and
-  makes a metadata-bearing path-only plan structurally invalid. ADR-0074 adds
-  exact metadata/path pairing, bounded changed-artifact Apply, atomic
-  metadata-plus-relocation persistence, and published-artifact recovery.
-  Artwork mutation and cross-filesystem undo remain to qualify.
-- **State:** SQLite with explicit reversible development migrations, including
-  normalized ordered schema-1 metadata transformation definitions owned by the
-  serialized persistence worker, including their automatic tagging policy
-  flags, exact matching payloads, numeric arguments, and dialect-qualified
-  conditions and exact-native removal identity (ADRs 0049–0053 and 0064–0066),
-  plus separately versioned output-layout and raw destination profiles
-  (ADR-0055) and file-publication recovery evidence (ADR-0056).
-- **Local output:** direct PipeWire with a narrow fallback-capable interface.
-
-## Implementation sequence
-
-Steps 1–5 below were completed while establishing the separate authority
-backbones. ADR-0058 now places them in one primary Trackbench workspace without
-combining their queues or controllers:
-
-1. ~~MPD domain snapshots, session, browse/search, and reconnect tests.~~
-2. ~~Persistent queue/list tabs and the polished client workspace.~~
-3. ~~FFmpeg decode, bounded playback core, PipeWire output, local ingestion.~~
-4. ~~Shared-library build restructure and the `trackbench` executable.~~
-5. ~~Migrate local playback/ingestion into Trackbench and retain separate MPD
-   and local controllers.~~
-6. Finish the Trackbench tag grid and mutation framework, including artwork
-   management; then add MusicBrainz providers.
-7. Parallel ReplayGain, then converter/resampler and organized output.
-8. ~~Melody endpoint in Trackbench's MPD authority (ADR-0174).~~ Continue with
-   hardening and packaging (the compatibility shell was retired in ADR-0071).
-
-ADR-0115 authorizes the optional local library. A plugin SDK and elaborate
-theme system remain deferred until both authority experiences are excellent.
-
-Per ADR-0194, tag editors own their metadata and selection models directly. Each
-creates one file-list widget that the workspace hosts in its Files sidebar;
-there is no second mirror view. Leaving a tab returns its widget to the editor.
-
-## Shared dynamic playlists (ADR-0195)
-
-ADRs 0214–0215 add authority-owned album traversal and history query facts.
-Local album keys are captured in bounded UI batches and the Qt-free traversal
-is prepared on a worker; generation checks prevent stale list plans from being
-installed. Melody owns its own album cycles and pending Repeat occurrence IDs.
-No list order is mutated by playback modes. Explicit `HISTORY(...)` predicates
-consume a consistent local-library/history snapshot or translate to advertised
-Melody history filters. Whole-album aggregates precede predicate narrowing;
-history invalidations refresh open dynamic-rule previews in their own authority.
-
-ADR-0216 adds numeric `SORT HISTORY` keys and current-tab history evaluation.
-Local source observations, statistics, and album aggregates share one SQLite
-read transaction on the query worker. Melody owns bounded `melody_list_search`
-evaluation over captured list occurrences and library-wide history; the client
-does not intersect a truncated library response. Capability gates distinguish
-history filtering, ordering, and list scope. Dynamic result actions reuse
-source-qualified tools and transfer helpers. Definition-owned views copy outward
-only; playback and manual membership edits use stable ordinary-list snapshots.
-
-`DynamicPlaylistService` owns definition evaluation, provider requests, bounded
-matching, cancellation generations, limits, and shuffle. The editor uses the
-same service for both authorities. Adapters evaluate typed `CompiledTkq`
-queries on a local-library worker or the serialized MPD session. Results are
-homogeneous local or remote vectors; presentation uses the existing local and
-MPD track models and shared track-view engine. The service never mutates a
-queue. Opening a snapshot crosses into the existing authority-specific list
-creation path only after an explicit user action.
-
-ADR-0217's built-in search catalog and parameter-to-tkq generation live in the
-Qt-free query module. Search presents grouped actions and typed prompts, then
-uses the unchanged asynchronous search/saved-query pipeline. Remote menu
-availability reuses the execution translator and advertised scope capabilities;
-presets never own library facts or playback state.
-
-## Up Next (ADR-0196)
-
-The shared request panel renders authority-specific pending models. Local
-`audio::RequestQueue` owns occurrence IDs and one pending-edit undo; the local
-audio worker publishes occurrence tokens for gapless handoffs. Its original
-list traversal remains suspended until the FIFO drains. Persistence uses a
-versioned payload on the existing serialized UI-state repository. Melody owns
-remote requests and continuation independently of client lifetime; typed
-revision-qualified commands and snapshots cross the MPD session boundary.
-Stock MPD never runs an emulated client-owned progression scheduler.
-
-## Last.fm (ADR-0197)
-
-ADR-0207 also uses the pure accounting primitive for independent local listening
-history. Only qualified occurrences cross the existing serialized persistence
-worker; schema-40 source identities follow verified publications in the same
-transaction as lists and caches. Collection does not depend on Last.fm accounts
-and does not observe the Melody endpoint or MPD transport.
-
-Qt-free `core::ListenAccounting` consumes occurrence identity, position, playing
-state, and monotonic samples. The local audio worker publishes a playback
-instance on loads and gapless handoffs. Trackbench forwards only local-player
-samples, independently of the selected tab, to a dedicated LastFmService worker
-that owns HTTP and private file persistence. Account UI is shared with Melody
-through typed command/reply envelopes on the serialized MPD session. Melody's
-separate Go service samples only its primary output; provider network work never
-holds queue/audio locks. There is one bounded durable outbox per authority and
-no scrobbling in endpoint playback or stock-MPD clients.
-
-Per ADR-0198, server queue and named-list track menus use one selection and
-construction path. Shared actions resolve the source view instead of reading
-MPD Queue implicitly. Backend addressing retains the existing unnamed-context
-and named-playlist commands. Priority resolves selected positions/URIs to stable
-occurrence IDs only in the active playback context; inactive lists cannot
-accidentally mutate another list's priorities. Whole-list management remains on
-the list/tab surface.
+Plans are immutable once previewed. The engine refuses a plan whose files
+changed since it was made, writes each file whole beside the old one and
+swaps it in, keeps what it replaced for undo while a tagger is open
+([ADR-0263](adr/0263-undo-what-was-written.md)), and recovers an interrupted
+write when it next starts. Destructive work is never done without a complete
+preview, cancellation, and a journal.
+
+## Concurrency
+
+- The UI thread receives only small results; it never waits on I/O, the
+  network or a database.
+- Work runs on bounded pools; no thread per track. FFmpeg's own codec threads
+  count against them.
+- The audio real-time callback does no blocking I/O, allocation, SQL or UI
+  work, and shares no lock with anything that does.
+- Every long operation reports progress and can be cancelled across each
+  boundary it crosses, including the protocol (`job.cancel`).
+- One write at a time holds a file; a stale result -- of a list or query that
+  changed meanwhile -- is dropped, not shown.
+
+## Where to read more
+
+- [unified-engine.md](unified-engine.md): the phases of the move to one
+  engine and where each stands.
+- [melody.md](melody.md): running engines, agents, the phone and the CLI.
+- [protocol-levels.md](protocol-levels.md): what each protocol level added.
+- [local-library.md](local-library.md), [metadata-and-files.md](metadata-and-files.md),
+  [replaygain.md](replaygain.md), [up-next.md](up-next.md),
+  [ui-workspace.md](ui-workspace.md): the features in depth.

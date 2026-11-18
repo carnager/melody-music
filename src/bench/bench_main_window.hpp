@@ -124,8 +124,6 @@ class BenchMainWindow final : public QMainWindow, public WorkspaceView {
     using CrossTabMoveEdit = Workspace::CrossTabMoveEdit;
     using PendingRelocation = Workspace::PendingRelocation;
     using DiscoveryOutcome = Workspace::DiscoveryOutcome;
-    using ArtworkJob = Workspace::ArtworkJob;
-    using ArtworkOutcome = Workspace::ArtworkOutcome;
     using SeenEngine = Workspace::SeenEngine;
     using EngineLink = Workspace::EngineLink;
     using EngineInterruption = Workspace::EngineInterruption;
@@ -159,14 +157,7 @@ class BenchMainWindow final : public QMainWindow, public WorkspaceView {
     bool& discovery_replace_and_play_{workspace_.discovery_replace_and_play_};
     bool& discovery_running_{workspace_.discovery_running_};
     core::CancellationSource& work_cancellation_{workspace_.work_cancellation_};
-    QFutureWatcher<void>& artwork_watcher_{workspace_.artwork_watcher_};
-    std::shared_ptr<ArtworkOutcome>& artwork_outcome_{workspace_.artwork_outcome_};
-    std::deque<ArtworkJob>& artwork_queue_{workspace_.artwork_queue_};
-    QHash<QString, QImage>& artwork_cache_{workspace_.artwork_cache_};
-    QSet<QString>& artwork_pending_{workspace_.artwork_pending_};
-    QSet<QString>& artwork_invalidated_while_loading_{
-        workspace_.artwork_invalidated_while_loading_};
-    bool& artwork_running_{workspace_.artwork_running_};
+    CoverLoader& covers_{workspace_.covers_};
     std::optional<CrossTabMoveEdit>& cross_tab_move_edit_{workspace_.cross_tab_move_edit_};
     std::vector<EngineInterruption>& engine_interruptions_{workspace_.engine_interruptions_};
     std::vector<persistence::SavedDestinationProfile>& local_destinations_{

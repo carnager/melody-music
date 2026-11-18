@@ -24,7 +24,8 @@ void BenchMainWindow::importPlaylistDialog() {
 }
 void BenchMainWindow::importM3u8Path(std::string raw_path) {
     if (lists_restored_)
-        playlist_transfer_bar_->importFile(std::move(raw_path));
+        playlist_transfer_bar_->importFile(std::move(raw_path),
+                                           workspace_.fileWorkOf(EngineKey::local()));
 }
 void BenchMainWindow::exportPlaylistDialog() {
     auto* tab = currentListTab();

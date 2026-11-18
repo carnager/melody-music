@@ -382,6 +382,42 @@ core::Result<OpenedFiles> RemoteFileWork::open_paths(const std::vector<std::stri
     return opened;
 }
 
+core::Result<std::vector<lists::PlaylistEntry>>
+RemoteFileWork::read_playlist(const std::string& raw_path) {
+    auto connection = client();
+    if (!connection) {
+        return std::unexpected(std::move(connection.error()));
+    }
+    auto answer =
+        (*connection)->call("playlists.read", Json{{"path", protocol::encode_raw_path(raw_path)}});
+    if (!answer) {
+        return std::unexpected(std::move(answer.error()));
+    }
+    const auto entries = answer->find("entries");
+    if (entries == answer->end() || !entries->is_array()) {
+        return std::unexpected(unexpected_answer("playlists.read"));
+    }
+    std::vector<lists::PlaylistEntry> read;
+    read.reserve(entries->size());
+    for (const auto& value : *entries) {
+        auto path = value.is_object() && value.contains("path") && value.at("path").is_string()
+                        ? protocol::decode_raw_path(value.at("path").get<std::string>())
+                        : core::Result<std::string>{std::unexpected(core::Error{})};
+        if (!path) {
+            return std::unexpected(unexpected_answer("playlists.read"));
+        }
+        lists::PlaylistEntry entry;
+        entry.raw_path = std::move(*path);
+        entry.title = value.value("title", std::string{});
+        if (const auto duration = value.find("duration_ms");
+            duration != value.end() && duration->is_number_integer()) {
+            entry.duration_ms = duration->get<std::int64_t>();
+        }
+        read.push_back(std::move(entry));
+    }
+    return read;
+}
+
 core::Result<ReplayGainRound>
 RemoteFileWork::replaygain(const ReplayGainRequest& request, const ReplayGainReport& report,
                            const core::CancellationToken& cancellation) {

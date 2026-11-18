@@ -45,8 +45,8 @@ import reading every entry's tags. AGENTS.md: the UI asks, the core answers.
 - A CUE row has no revision of its audio file -- as an engine list's CUE
   item never had -- so it is not followed through a move of that file; nor
   does it carry the sheet's track number, songwriter or ISRC.
-- Parsing an M3U file chosen to import is still the window's; the playlist
-  folder (ADR-0296) is the engine's way of reading playlists.
+- Parsing an M3U file chosen to import was still the window's; it is this
+  computer's engine's since ADR-0358.
 - `FileWorkTools` still defaults to this process's file access where an
   engine has not said it does file work; with every engine doing it, that
   default is the next thing to go.

@@ -6,6 +6,7 @@
 #include "trackknife/core/result.hpp"
 #include "trackknife/engine/metadata_services.hpp"
 #include "trackknife/engine/replaygain_round.hpp"
+#include "trackknife/lists/m3u8.hpp"
 #include "trackknife/loudness/scan.hpp"
 #include "trackknife/metadata/local_reader.hpp"
 #include "trackknife/metadata/write_plan.hpp"
@@ -86,6 +87,9 @@ class RemoteFileWork final {
 
     // files.open: what these paths offer a list, walked and read there.
     [[nodiscard]] core::Result<OpenedFiles> open_paths(const std::vector<std::string>& raw_paths);
+    // ADR-0358: playlists.read: a playlist file's entries, read there.
+    [[nodiscard]] core::Result<std::vector<lists::PlaylistEntry>>
+    read_playlist(const std::string& raw_path);
     // media.probe: the file's technicals as the engine's decoder sees them.
     [[nodiscard]] core::Result<FileTechnicals> probe(const std::string& raw_path,
                                                      const core::CancellationToken& cancellation);

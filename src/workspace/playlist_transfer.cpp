@@ -107,16 +107,24 @@ bool PlaylistTransfer::begin(std::string raw_path) {
     progress_timer_.start();
     return true;
 }
-void PlaylistTransfer::importFile(std::string raw_path) {
+void PlaylistTransfer::importFile(std::string raw_path,
+                                  std::shared_ptr<engine::RemoteFileWork> work) {
     if (!begin(std::move(raw_path)))
         return;
+    if (!work) {
+        report(false, tr("Importing is done by this computer's engine, which is not reached"));
+        return;
+    }
     operation_ = tr("Importing playlist");
     setStatus(operation_);
     worker_busy_ = true;
-    watcher_.setFuture(QtConcurrent::run(
-        &pool_, [path = path_, token = cancellation_.token(), progress = progress_] {
+    watcher_.setFuture(
+        QtConcurrent::run(&pool_, [path = path_, work = std::move(work),
+                                   token = cancellation_.token(), progress = progress_] {
             Outcome result;
-            auto entries = lists::read_m3u8(path, token, progress.get());
+            // ADR-0358: read by this computer's engine; the window reads no
+            // files.
+            auto entries = work->read_playlist(path);
             if (!entries) {
                 result.error = entries.error();
                 return result;

@@ -85,8 +85,7 @@ void BenchMainWindowTest::UpNext::libraryDragsIntoUpNextWithCovers() {
     for (const auto& tab : window.list_tabs_) {
         tab->model->setArtwork(key, {});
     }
-    window.artwork_cache_.remove(key);
-    window.artwork_pending_.remove(key);
+    window.covers_.forget(key);
     window.up_next_local_model_->setArtwork(key, {});
     window.refreshUpNext();
     QTRY_VERIFY(window.up_next_local_model_->hasArtwork(key));

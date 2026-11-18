@@ -10,6 +10,14 @@ client keeps a path for what an older engine lacked.
 
 ## Protocol 1
 
+### Level 36 (2026-11-18)
+
+ADR-0358: an imported playlist is read by this computer's engine.
+
+- `playlists.read {path}` answers `{entries: [{path, title,
+  duration_ms?}]}`: an M3U8 file's entries, in order, repeats and missing
+  files kept; an error for a file that is not a valid playlist.
+
 ### Level 35 (2026-11-18)
 
 ADR-0357: one ReplayGain round, in the engine, for every client.

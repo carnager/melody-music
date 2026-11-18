@@ -335,7 +335,7 @@ void BenchMainWindowTest::FileWork::aCoverWrittenWithAMoveShowsInItsTab() {
     QTRY_VERIFY_WITH_TIMEOUT(list_model->rows().front().probed, 5'000);
     // Looked for, and none: the miss is cached.
     const auto key = list_model->groupKey(0);
-    QTRY_VERIFY_WITH_TIMEOUT(window.workspace_.artwork_cache_.contains(key), 10'000);
+    QTRY_VERIFY_WITH_TIMEOUT(window.workspace_.covers_.cached(key).has_value(), 10'000);
     QVERIFY(!list_model->hasArtwork(key));
 
     view->selectionModel()->select(list_model->index(0, 0),

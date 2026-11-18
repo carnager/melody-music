@@ -7,7 +7,8 @@ Before changing code, read:
 1. [ADR-0220](docs/adr/0220-unified-engine-and-remote-agents.md) and
    [`docs/unified-engine.md`](docs/unified-engine.md) — the accepted direction
    and its phases. **This supersedes the two-authority model described in older
-   ADRs, `MILESTONES.md`, and `docs/architecture.md`.**
+   ADRs and `MILESTONES.md`.** [`docs/architecture.md`](docs/architecture.md)
+   describes the system as it is now.
 2. [ADR-0221](docs/adr/0221-entry-and-track-identity.md) if the work touches
    lists, queues, playback position, ratings or listening history.
 3. `MILESTONES.md` for the 1.0 criteria; its milestones up to M11 are done.
@@ -45,19 +46,20 @@ coherent UI.
 ## One implementation, not two
 
 The two-authority model — authority-bound tabs, an active-tab authority switch,
-and every feature built once per authority — is being removed. It is the tax
-ADR-0220 exists to end, and the ADR trail from 0210 to 0214 records paying it
-repeatedly.
+and every feature built once per authority — has been removed (ADR-0224 retired
+the MPD client; ADRs 0355–0358 made every tab and file tool go through its
+engine). It was the tax ADR-0220 exists to end, and the ADR trail from 0210 to
+0214 records paying it repeatedly. Do not bring it back.
 
 - **Do not add authority-gated feature code.** No new `supportsCommand()`-style
   branching, no new `*Mpd*`-suffixed parallel to a local method, no new
   duplicated list/history/shuffle/resume path. A feature is implemented once.
-- **Local versus remote is a connection, not a branch.** In the end state
-  there is no local-versus-remote axis, only which engine a tab's list came
-  from, with the same operations on every one. The client may hold several
-  connections open at once — a desktop library and a NAS engine side by side —
-  so "the active authority" stops being something the workspace has. The MPD
-  Queue tab is that idea's current form and is removed, not generalised.
+- **Local versus remote is a connection, not a branch.** There is no
+  local-versus-remote axis, only which engine a tab's list came from, with the
+  same operations on every one. The client holds several connections open at
+  once — a desktop library and a NAS engine side by side — and this
+  computer's engine is reached like any other. Do not add an `isLocal()`
+  branch to a feature.
 - **Tabs are tabs.** A tab is a set of track references, an order, and a view
   layout, distinguished only by how the set was produced and whether it
   re-evaluates. Search results are not a special kind of tab. The tagger is the
@@ -65,14 +67,12 @@ repeatedly.
   `docs/unified-engine.md`, Phase 1).
 - **The UI asks; the core answers.** The UI tells the core what to do and the
   core owns the database, looks things up, and returns what was asked for.
-  Nothing in `src/bench` or `src/uicommon` should open a `LocalLibrary` or a
-  `ListRepository`, or hold a database path. `ui::ListPersistenceService` does
-  both today and is being moved to the other side of that line, not copied --
-  do not model new code on it.
-
-**During the transition**, existing authority code keeps working until its phase
-lands. Do not break the current application to anticipate a later phase; the
-rule above governs *new* code and the direction of refactors.
+  Nothing in `src/bench`, `src/workspace` or `src/uicommon` reads files --
+  tags, audio, covers, folders, CUE sheets, playlists -- or opens a
+  `LocalLibrary` or a `ListRepository` (ADR-0356); it asks the engine the
+  files belong to. Converting is the one exception (ADR-0340).
+  `ui::ListPersistenceService` still holds a database path; do not model new
+  code on it.
 
 ## Non-negotiable behavior
 

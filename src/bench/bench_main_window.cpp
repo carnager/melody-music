@@ -52,19 +52,10 @@ void BenchMainWindow::stopBackgroundWork() {
         localLibrary()->stop();
     }
     work_cancellation_.request_cancellation();
-    artwork_queue_.clear();
-    if (artwork_watcher_.isRunning()) {
-        artwork_watcher_.waitForFinished();
-    }
-#if defined(MELODY_THREAD_SANITIZER)
-    if (artwork_outcome_) {
-        __tsan_acquire(artwork_outcome_.get());
-    }
-#endif
+    covers_.stop();
     if (discovery_watcher_.isRunning()) {
         discovery_watcher_.waitForFinished();
     }
-    artwork_running_ = false;
     discovery_running_ = false;
     if (transport_timer_ != nullptr) {
         transport_timer_->stop();

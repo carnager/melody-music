@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "bench/playlist_transfer_bar.hpp"
+#include "test_engine.hpp"
 #include "trackknife/core/unicode.hpp"
 #include "trackknife/lists/m3u8.hpp"
 
@@ -27,6 +28,18 @@ QByteArray get(const std::string& name) {
         return {};
     return file.readAll();
 }
+// ADR-0358: this computer's engine, which reads a playlist imported.
+std::shared_ptr<engine::RemoteFileWork> engine_work(testing::TestEngine& engine,
+                                                    const QTemporaryDir& state) {
+    if (!engine.start(state.path().toStdString())) {
+        qFatal("the test engine did not start");
+    }
+    return std::make_shared<engine::RemoteFileWork>(
+        protocol::Endpoint{.socket = QFile::encodeName(engine.socket()).toStdString(),
+                           .host = {},
+                           .port = 0,
+                           .token = {}});
+}
 lists::PlaylistEntry entry(std::string raw_path) {
     lists::PlaylistEntry value;
     value.raw_path = std::move(raw_path);
@@ -43,6 +56,7 @@ class M3u8Test final : public QObject {
     void publicationNeverClobbersAndCancels();
     void asynchronousImportAndExport();
     void cancellationAndStaleCapture();
+    void anImportWithoutTheEngineIsSaid();
 };
 void M3u8Test::relativeBomExtinfAndMissingOccurrences() {
     const auto parsed = lists::parse_m3u8(
@@ -159,6 +173,9 @@ void M3u8Test::asynchronousImportAndExport() {
     put(path(dir, "audio.flac"), QByteArray::fromBase64(fixture.readAll()));
     put(path(dir, "input.m3u8"),
         "#EXTM3U\naudio.flac\n#EXTINF:1.250,Gone\nmissing.flac\nmissing.flac\n");
+    QTemporaryDir state;
+    testing::TestEngine engine;
+    const auto work = engine_work(engine, state);
     QMainWindow window;
     auto* bar = new PlaylistTransferBar(&window);
     window.addToolBar(bar);
@@ -171,7 +188,7 @@ void M3u8Test::asynchronousImportAndExport() {
                 name = imported_name;
             });
     QSignalSpy completed{bar, &PlaylistTransferBar::completed};
-    bar->importFile(path(dir, "input.m3u8"));
+    bar->importFile(path(dir, "input.m3u8"), work);
     QTRY_COMPARE(completed.size(), 1);
     QVERIFY(completed[0][0].toBool());
     QCOMPARE(model.rowCount(), 3);
@@ -201,6 +218,9 @@ void M3u8Test::asynchronousImportAndExport() {
 void M3u8Test::cancellationAndStaleCapture() {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
+    QTemporaryDir state;
+    testing::TestEngine engine;
+    const auto work = engine_work(engine, state);
     QMainWindow window;
     auto* bar = new PlaylistTransferBar(&window);
     window.addToolBar(bar);
@@ -221,7 +241,7 @@ void M3u8Test::cancellationAndStaleCapture() {
     QVERIFY(!std::filesystem::exists(output));
     put(path(dir, "import.m3u8"), "missing.flac\n");
     QSignalSpy imported{bar, &PlaylistTransferBar::imported};
-    bar->importFile(path(dir, "import.m3u8"));
+    bar->importFile(path(dir, "import.m3u8"), work);
     bar->cancel();
     QTRY_COMPARE(completed.size(), 3);
     QCOMPARE(imported.size(), 0);
@@ -231,9 +251,25 @@ void M3u8Test::cancellationAndStaleCapture() {
     QTRY_COMPARE(completed.size(), 4);
     QVERIFY(completed[3][0].toBool());
     QVERIFY(std::filesystem::exists(output));
-    bar->importFile(path(dir, "import.m3u8"));
+    bar->importFile(path(dir, "import.m3u8"), work);
     bar->stop();
     QCoreApplication::processEvents();
+    QCOMPARE(imported.size(), 0);
+}
+// ADR-0358: the file is read by this computer's engine, never here.
+void M3u8Test::anImportWithoutTheEngineIsSaid() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    put(path(dir, "input.m3u8"), "missing.flac\n");
+    QMainWindow window;
+    auto* bar = new PlaylistTransferBar(&window);
+    window.addToolBar(bar);
+    QSignalSpy imported{bar, &PlaylistTransferBar::imported};
+    QSignalSpy completed{bar, &PlaylistTransferBar::completed};
+    bar->importFile(path(dir, "input.m3u8"), nullptr);
+    QCOMPARE(completed.size(), 1);
+    QVERIFY(!completed[0][0].toBool());
+    QVERIFY(completed[0][1].toString().contains(QStringLiteral("engine")));
     QCOMPARE(imported.size(), 0);
 }
 } // namespace trackknife::bench
