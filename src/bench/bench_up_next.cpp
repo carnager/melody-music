@@ -85,16 +85,11 @@ void BenchMainWindow::buildUpNext() {
     up_next_view_->setItemDelegate(
         new UpNextDelegate(local_artist_column, local_length_column, up_next_view_));
     up_next_view_->horizontalHeader()->hide();
-    up_next_view_->verticalHeader()->hide();
     up_next_view_->horizontalHeader()->setSectionResizeMode(local_title_column,
                                                             QHeaderView::Stretch);
     up_next_view_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     up_next_view_->verticalHeader()->setDefaultSectionSize(UpNextDelegate::row_height);
     up_next_view_->setAlternatingRowColors(false);
-    up_next_view_->setShowGrid(false);
-    up_next_view_->setSelectionBehavior(QAbstractItemView::SelectRows);
-    up_next_view_->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    up_next_view_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     up_next_view_->setDragDropMode(QAbstractItemView::DragDrop);
     up_next_view_->setDragEnabled(true);
     up_next_view_->setAcceptDrops(true);

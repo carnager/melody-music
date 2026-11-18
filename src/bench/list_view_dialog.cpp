@@ -114,13 +114,6 @@ ListViewDialog::ListViewDialog(lists::ListView view, std::vector<LocalTrackRow> 
     preview_->setObjectName(QStringLiteral("bench-list-view-preview"));
     preview_->setModel(preview_model_);
     preview_->setAlternatingRowColors(true);
-    preview_->setShowGrid(false);
-    preview_->setSelectionBehavior(QAbstractItemView::SelectRows);
-    preview_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    preview_->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
-    preview_->setWordWrap(false);
-    preview_->setTextElideMode(Qt::ElideRight);
-    preview_->verticalHeader()->hide();
     preview_->setEmptyMessage(QStringLiteral("Nothing to preview"),
                               QStringLiteral("Open the editor on a list with tracks in it"));
     // Expression groups come once their rows are evaluated.
