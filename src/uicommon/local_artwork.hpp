@@ -25,9 +25,4 @@ inline constexpr std::int64_t maximum_artwork_pixels = 32'000'000;
 // from an engine. Null when they are not an image.
 [[nodiscard]] QImage artworkThumbnail(const std::vector<unsigned char>& bytes);
 
-// Worker-only local thumbnail reader for files on this machine. Loads
-// embedded art first, then conventional sibling images; never uses the network.
-[[nodiscard]] QImage loadLocalArtwork(const std::string& raw_path,
-                                      const core::CancellationToken& cancellation = {});
-
 } // namespace trackknife::ui

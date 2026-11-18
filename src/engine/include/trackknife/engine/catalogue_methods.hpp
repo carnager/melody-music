@@ -25,8 +25,7 @@ namespace trackknife::engine {
 // {hash, album, rating} through `events`, so each shows it without asking.
 //
 // `holds` says whether the engine holds a file to play -- the files it may
-// stream. `catalogue.artwork` gives their covers too, read from the file,
-// indexed or not.
+// stream. `catalogue.lyrics` gives theirs too, indexed or not.
 //
 // The catalogue must outlive the dispatcher.
 using HeldPath = std::function<bool(const std::string& raw_path)>;

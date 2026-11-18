@@ -161,8 +161,10 @@ void LibraryPanelEngineTest::theEngineReadsCoversWhereTheFilesAre() {
     QVERIFY(!cover->empty());
     QVERIFY(!ui::artworkThumbnail(*cover).isNull());
 
-    // The same file, not in the library: not read, cover or no cover.
-    QVERIFY(!remote->artwork(outside).has_value());
+    // ADR-0356: the same file, not in the library -- read too, as a list's
+    // rows are.
+    const auto outside_cover = remote->artwork(outside);
+    QVERIFY(outside_cover.has_value() && !outside_cover->empty());
     (*server)->stop();
 }
 

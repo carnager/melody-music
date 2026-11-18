@@ -288,7 +288,10 @@ void covers_of_held_files_need_no_library(const std::filesystem::path& directory
             "a held file's cover is given with no library");
     const auto refused = call(dispatcher, 2, "catalogue.artwork",
                               protocol::Json{{"path", protocol::encode_raw_path(other)}});
-    require(!refused.result.has_value(), "a file neither held nor indexed is not read");
+    // ADR-0356: any file's cover, as its tags are -- a list holds files
+    // from anywhere.
+    require(refused.result && refused.result->at("image").is_string(),
+            "a file neither held nor indexed has its cover read too");
 }
 
 // ADR-0276: a track's lyrics come from where its files are -- here an .lrc

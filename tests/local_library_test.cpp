@@ -12,6 +12,7 @@
 #include "trackknife/core/sha256.hpp"
 #include "trackknife/engine/dynamic_rules.hpp"
 #include "trackknife/engine/workspace.hpp"
+#include "trackknife/formats/artwork.hpp"
 #include "trackknife/metadata/local_reader.hpp"
 #include "trackknife/persistence/list_repository.hpp"
 #include "trackknife/persistence/local_library.hpp"
@@ -1949,15 +1950,15 @@ void LocalLibraryTest::albumCoversLoadAndRefresh() {
     QVERIFY(!panel.property("scanning").toBool());
     core::CancellationSource cancelled;
     cancelled.request_cancellation();
-    QVERIFY(ui::loadLocalArtwork(source, cancelled.token()).isNull());
+    QVERIFY(ui::artworkThumbnail(formats::load_track_artwork(source, cancelled.token())).isNull());
     // Corrupt and oversized fallback images leave the placeholder intact.
     {
         std::ofstream invalid{root / "cover.png", std::ios::binary | std::ios::trunc};
         invalid << "not an image";
     }
-    QVERIFY(ui::loadLocalArtwork(source).isNull());
+    QVERIFY(ui::artworkThumbnail(formats::load_track_artwork(source)).isNull());
     std::filesystem::resize_file(root / "cover.png", 17U * 1024U * 1024U);
-    QVERIFY(ui::loadLocalArtwork(source).isNull());
+    QVERIFY(ui::artworkThumbnail(formats::load_track_artwork(source)).isNull());
     panel.stop();
     QVERIFY(std::filesystem::remove(std::filesystem::path{source}));
 }

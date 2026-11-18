@@ -4,6 +4,7 @@
 // is the bug this exists for: the list refused anything over 16 megapixels,
 // and a 4320x4000 vinyl scan is 17.
 
+#include "trackknife/formats/artwork.hpp"
 #include "uicommon/local_artwork.hpp"
 
 #include <QImage>
@@ -32,7 +33,7 @@ namespace {
         return {};
     }
     const auto track = directory.filePath(QStringLiteral("01.flac")).toStdString();
-    return loadLocalArtwork(track);
+    return artworkThumbnail(formats::load_track_artwork(track));
 }
 
 } // namespace
