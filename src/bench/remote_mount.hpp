@@ -21,9 +21,6 @@ struct RemoteMount final {
     std::string remote_folder; // as the remote engine sees it
     std::string local_folder;  // the same folder on this computer
 
-    // Read from Settings.
-    [[nodiscard]] static RemoteMount configured();
-
     // A remote path as this computer sees it. Nothing when it is outside
     // the configured folder, or not there -- the mount missing, say.
     [[nodiscard]] std::optional<std::string> to_local(const std::string& remote_path) const;

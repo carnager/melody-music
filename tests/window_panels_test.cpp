@@ -93,18 +93,18 @@ void BenchMainWindowTest::Panels::sourcePanelOpensOnALibrary() {
     }
 
     // This computer's library hidden: the remote's opens in its place.
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_show_local_key), false);
     QTemporaryDir remote_state;
     QVERIFY(remote_state.isValid());
     testing::TestEngine remote;
     QVERIFY2(remote.start(remote_state.path().toStdString(), true), remote.log().constData());
+    testing::holdLibraryOnTheRemote();
     BenchMainWindow window;
     window.show();
     QTRY_VERIFY(window.lists_restored_);
     QTRY_COMPARE(
         window.local_source_tabs_->tabData(window.local_source_tabs_->currentIndex()).toString(),
         window.remoteEngine()->key.text());
-    QSettings{}.remove(QLatin1String(SettingsDialog::library_show_local_key));
+    testing::holdLibraryHere();
 }
 
 // ADR-0292: side panels open together share their room as tabs, and one

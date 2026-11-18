@@ -441,7 +441,7 @@ void BenchMainWindowTest::Search::quickAlbumSearchesTheLibraryChosen() {
     QVERIFY(QDir{}.mkpath(music));
     QVERIFY(materialize_audio_fixture(QStringLiteral("art-tone-flac.b64"),
                                       music + QStringLiteral("/art.flac")));
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_show_local_key), false);
+    testing::holdLibraryOnTheRemote();
     BenchMainWindow window;
     window.show();
     QTRY_VERIFY(window.lists_restored_);
@@ -482,7 +482,7 @@ void BenchMainWindowTest::Search::quickAlbumSearchesTheLibraryChosen() {
     QTest::keyClicks(popup->input(), QString::fromStdString(album).section(QLatin1Char(' '), 0, 0));
     QTRY_COMPARE(popup->results()->count(), 1);
     QTest::keyClick(popup->input(), Qt::Key_Escape);
-    QSettings{}.remove(QLatin1String(SettingsDialog::library_show_local_key));
+    testing::holdLibraryHere();
 }
 
 // ADR-0153: the standalone search dialog filters the current tab with

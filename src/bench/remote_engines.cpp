@@ -31,21 +31,6 @@ RemoteMount RemoteEngineSetting::mount() const {
 std::vector<RemoteEngineSetting> loadRemoteEngines() {
     QSettings settings;
     std::vector<RemoteEngineSetting> engines;
-    if (!settings.contains(QLatin1String(array_key) + QStringLiteral("/size"))) {
-        // An older release's one remote, taken over once.
-        const auto address = text(settings, SettingsKeys::library_engine_socket_key);
-        if (!address.isEmpty()) {
-            engines.push_back(
-                {.address = address,
-                 .password = text(settings, SettingsKeys::library_engine_token_key),
-                 .music_folder = text(settings, SettingsKeys::library_remote_folder_key),
-                 .reachable_at = text(settings, SettingsKeys::library_remote_mount_key),
-                 .id = text(settings, SettingsKeys::library_engine_id_key),
-                 .stream_kbps = -1});
-        }
-        saveRemoteEngines(engines);
-        return engines;
-    }
     const auto count = settings.beginReadArray(QLatin1String(array_key));
     engines.reserve(static_cast<std::size_t>(count));
     for (int index = 0; index < count; ++index) {
@@ -63,33 +48,6 @@ std::vector<RemoteEngineSetting> loadRemoteEngines() {
         }
     }
     settings.endArray();
-    // The old keys name the first engine, and what writes them -- a release
-    // before this one, the Settings page before it lists engines -- is the
-    // newer word on it. The same address keeps its id; another may be
-    // another engine, and its id is learned anew.
-    const auto address = text(settings, SettingsKeys::library_engine_socket_key);
-    if (!address.isEmpty()) {
-        RemoteEngineSetting first{
-            .address = address,
-            .password = text(settings, SettingsKeys::library_engine_token_key),
-            .music_folder = text(settings, SettingsKeys::library_remote_folder_key),
-            .reachable_at = text(settings, SettingsKeys::library_remote_mount_key),
-            .id = {},
-            .stream_kbps = -1};
-        if (engines.empty()) {
-            engines.push_back(first);
-        } else if (engines.front().address == address) {
-            // The old keys know nothing of streams or names: they stay.
-            first.id = engines.front().id;
-            first.stream_kbps = engines.front().stream_kbps;
-            first.name = engines.front().name;
-            engines.front() = first;
-        } else {
-            engines.front() = first;
-        }
-    } else if (!engines.empty()) {
-        engines.erase(engines.begin());
-    }
     return engines;
 }
 
@@ -109,13 +67,6 @@ void saveRemoteEngines(const std::vector<RemoteEngineSetting>& engines) {
         settings.setValue("name", engine.name);
     }
     settings.endArray();
-    // What an older release reads, kept to the first: the one it knows of.
-    const auto first = engines.empty() ? RemoteEngineSetting{} : engines.front();
-    settings.setValue(QLatin1String(SettingsKeys::library_engine_socket_key), first.address);
-    settings.setValue(QLatin1String(SettingsKeys::library_engine_token_key), first.password);
-    settings.setValue(QLatin1String(SettingsKeys::library_remote_folder_key), first.music_folder);
-    settings.setValue(QLatin1String(SettingsKeys::library_remote_mount_key), first.reachable_at);
-    settings.setValue(QLatin1String(SettingsKeys::library_engine_id_key), first.id);
 }
 
 void rememberEngineId(const QString& address, const QString& id) {

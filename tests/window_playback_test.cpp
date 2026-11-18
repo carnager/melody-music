@@ -98,7 +98,7 @@ void BenchMainWindowTest::Playback::quittingStopsTheEngineForGood() {
     engine_.stop();
     QSettings settings;
     settings.remove(QLatin1String(SettingsDialog::library_local_engine_socket_key));
-    settings.remove(QLatin1String(SettingsDialog::library_engine_socket_key));
+    saveRemoteEngines({});
     settings.sync();
     const auto program = qgetenv("MELODY_ENGINE");
     qputenv("MELODY_ENGINE", MELODY_ENGINE_BINARY);

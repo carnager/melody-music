@@ -24,7 +24,7 @@ class BenchMainWindowTest::RemoteEngines final : public window_test::Fixture {
     void settingsListEnginesFoundOnTheNetwork();
     void tabsAreGroupedByEngine();
     void theRemotesListsTakeItsIdOnceItSaysIt();
-    void remoteEnginesStartFromTheOneRemoteOfBefore();
+    void remoteEnginesAreKeptAsAList();
     void twoEnginesElsewhereSideBySide();
     void settingsListTheEnginesElsewhere();
     void anEnginesOwnPasswordIsSaidAndCanGo();
@@ -126,7 +126,6 @@ void BenchMainWindowTest::RemoteEngines::theRemotesListsTakeItsIdOnceItSaysIt() 
     QVERIFY(id_file.open(QIODevice::ReadOnly));
     const auto id = QString::fromUtf8(id_file.readAll()).trimmed();
     QVERIFY(!id.isEmpty());
-    QSettings{}.remove(QStringLiteral("library/engine-id"));
     std::string list_id;
     {
         BenchMainWindow window;
@@ -140,7 +139,7 @@ void BenchMainWindowTest::RemoteEngines::theRemotesListsTakeItsIdOnceItSaysIt() 
         QCOMPARE(window.remoteEngine()->key.text(), id);
         QCOMPARE(engineOfView(tab->view).text(), id);
         QCOMPARE(window.remoteLibrary()->engine().text(), id);
-        QCOMPARE(QSettings{}.value(QStringLiteral("library/engine-id")).toString(), id);
+        QCOMPARE(testing::rememberedRemoteId(), id);
         window.persistNow(true);
         window.close();
     }
@@ -164,7 +163,6 @@ void BenchMainWindowTest::RemoteEngines::theRemotesListsTakeItsIdOnceItSaysIt() 
     QCOMPARE(QString::fromStdString(tab->document.engine), id);
     QTRY_VERIFY(window.remotePlayback() != nullptr && window.remotePlayback()->active());
     QCOMPARE(window.remoteQueueTab(), tab);
-    QSettings{}.remove(QStringLiteral("library/engine-id"));
 }
 
 // The address now leads to another engine than the one whose id was kept --
@@ -176,7 +174,7 @@ void BenchMainWindowTest::RemoteEngines::anotherEngineAtTheSameAddressLeavesTheO
     testing::TestEngine remote;
     QVERIFY2(remote.start(remote_state.path().toStdString(), true), remote.log().constData());
     const auto before = QString::fromStdString(core::StableId::random().to_string());
-    QSettings{}.setValue(QStringLiteral("library/engine-id"), before);
+    rememberEngineId(remote.socket(), before);
     BenchMainWindow window;
     window.show();
     QTRY_VERIFY(window.lists_restored_);
@@ -193,33 +191,18 @@ void BenchMainWindowTest::RemoteEngines::anotherEngineAtTheSameAddressLeavesTheO
     QTRY_VERIFY(window.remotePlayback() != nullptr && window.remotePlayback()->active());
     QTRY_VERIFY(window.remoteEngine()->key.text() != before);
     QCOMPARE(QString::fromStdString(old_tab->document.engine), before);
-    QCOMPARE(QSettings{}.value(QStringLiteral("library/engine-id")).toString(),
-             window.remoteEngine()->key.text());
+    QCOMPARE(testing::rememberedRemoteId(), window.remoteEngine()->key.text());
     // The remote's own tab is its own, not the old engine's list.
     QVERIFY(window.remoteQueueTab() != old_tab);
-    QSettings{}.remove(QStringLiteral("library/engine-id"));
 }
 
-// ADR-0234: several engines elsewhere, kept as a list; the one remote an
-// older release kept becomes its first, once, and the old keys keep naming
-// the first for a release that reads only them.
-void BenchMainWindowTest::RemoteEngines::remoteEnginesStartFromTheOneRemoteOfBefore() {
-    QSettings settings;
-    settings.remove(QStringLiteral("engines"));
-    settings.setValue(QLatin1String(SettingsDialog::library_engine_socket_key),
-                      QStringLiteral("192.0.2.7:6603"));
-    settings.setValue(QLatin1String(SettingsDialog::library_engine_token_key), QString{});
-    settings.setValue(QLatin1String(SettingsDialog::library_remote_folder_key),
-                      QStringLiteral("/mnt/nas/Music"));
-    settings.setValue(QLatin1String(SettingsDialog::library_remote_mount_key), QString{});
-    settings.setValue(QLatin1String(SettingsDialog::library_engine_id_key), QStringLiteral("abc"));
-    settings.sync();
-
+// ADR-0234: several engines elsewhere, kept as a list in order, each with
+// its own password or this computer's, and the id each gave.
+void BenchMainWindowTest::RemoteEngines::remoteEnginesAreKeptAsAList() {
+    testing::configureRemoteEngine(QStringLiteral("192.0.2.7:6603"));
     auto engines = loadRemoteEngines();
     QCOMPARE(engines.size(), std::size_t{1});
     QCOMPARE(engines.front().address, QStringLiteral("192.0.2.7:6603"));
-    QCOMPARE(engines.front().music_folder, QStringLiteral("/mnt/nas/Music"));
-    QCOMPARE(engines.front().id, QStringLiteral("abc"));
 
     engines.push_back({.address = QStringLiteral("198.51.100.3:6603"),
                        .password = QStringLiteral("other"),
@@ -233,14 +216,8 @@ void BenchMainWindowTest::RemoteEngines::remoteEnginesStartFromTheOneRemoteOfBef
     rememberEngineId(QStringLiteral("198.51.100.3:6603"), QStringLiteral("def"));
     QCOMPARE(loadRemoteEngines().back().id, QStringLiteral("def"));
 
-    // With none left, the old keys say so too.
     saveRemoteEngines({});
     QVERIFY(loadRemoteEngines().empty());
-    QVERIFY(QSettings{}
-                .value(QLatin1String(SettingsDialog::library_engine_socket_key))
-                .toString()
-                .isEmpty());
-    QSettings{}.remove(QStringLiteral("engines"));
 }
 
 // ADR-0234: two engines elsewhere at once -- a desktop's library and a
@@ -645,14 +622,9 @@ void BenchMainWindowTest::RemoteEngines::theRemoteTabTakesTheNameItsEngineAnnoun
 // about two minutes of SYN retries, on the window's thread, at startup and
 // again every few seconds after. It is reached from a worker now.
 void BenchMainWindowTest::RemoteEngines::anUnreachableRemoteDoesNotHoldTheWindow() {
-    QSettings settings;
     // TEST-NET-1 (RFC 5737): routed nowhere, so a connect waits rather than
     // being refused.
-    settings.setValue(QLatin1String(SettingsDialog::library_engine_socket_key),
-                      QStringLiteral("192.0.2.1:6603"));
-    settings.setValue(QLatin1String(SettingsDialog::library_engine_token_key),
-                      QStringLiteral("a password"));
-    settings.sync();
+    testing::configureRemoteEngine(QStringLiteral("192.0.2.1:6603"), QStringLiteral("a password"));
 
     QElapsedTimer opening;
     opening.start();
@@ -676,8 +648,7 @@ void BenchMainWindowTest::RemoteEngines::anUnreachableRemoteDoesNotHoldTheWindow
         last = waiting.elapsed();
     }
     QVERIFY2(longest < 1'000, QByteArray::number(longest).constData());
-    settings.remove(QLatin1String(SettingsDialog::library_engine_socket_key));
-    settings.remove(QLatin1String(SettingsDialog::library_engine_token_key));
+    saveRemoteEngines({});
 }
 
 void BenchMainWindowTest::RemoteEngines::theWindowFollowsAnEngineStartedElsewhere() {
@@ -798,7 +769,7 @@ void BenchMainWindowTest::RemoteEngines::aRemoteEnginePlaysItsOwnTabs() {
         const auto library_tab = 0;
         QVERIFY(sources->isTabVisible(library_tab));
         sources->setCurrentIndex(library_tab);
-        QSettings{}.setValue(QLatin1String(SettingsDialog::library_show_local_key), false);
+        testing::holdLibraryOnTheRemote();
         window.applyLocalLibraryVisibility();
         QVERIFY(!sources->isTabVisible(library_tab));
         QCOMPARE(sources->tabData(sources->currentIndex()).toString(),
@@ -807,7 +778,7 @@ void BenchMainWindowTest::RemoteEngines::aRemoteEnginePlaysItsOwnTabs() {
         const auto remote_rect = sources->tabRect(sources->currentIndex());
         QVERIFY(remote_rect.isValid());
         QCOMPARE(sources->tabAt(remote_rect.center()), sources->currentIndex());
-        QSettings{}.remove(QLatin1String(SettingsDialog::library_show_local_key));
+        testing::holdLibraryHere();
         window.applyLocalLibraryVisibility();
         QVERIFY(sources->isTabVisible(library_tab));
     }
@@ -1040,7 +1011,7 @@ void BenchMainWindowTest::RemoteEngines::thisComputersFilesMoveIntoTheLibrary() 
         return std::string{encoded.constData(), static_cast<std::size_t>(encoded.size())};
     };
     // The remote holds the library.
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_show_local_key), false);
+    testing::holdLibraryOnTheRemote();
 
     BenchMainWindow window;
     window.show();
@@ -1129,7 +1100,7 @@ void BenchMainWindowTest::RemoteEngines::thisComputersFilesMoveIntoTheLibrary() 
         return found && found->entries.size() == 1U;
     };
     QTRY_VERIFY_WITH_TIMEOUT(in_library(), 10'000);
-    QSettings{}.remove(QLatin1String(SettingsDialog::library_show_local_key));
+    testing::holdLibraryHere();
 }
 
 void BenchMainWindowTest::RemoteEngines::remoteUpNextKeepsItsIdentityAcrossARestart() {
@@ -1233,7 +1204,7 @@ void BenchMainWindowTest::RemoteEngines::locateFindsARemoteTracksAlbumInTheRemot
                                       music + QStringLiteral("/art.flac")));
     // All music on the remote: this computer's library hidden, as it is
     // for someone who keeps none here.
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_show_local_key), false);
+    testing::holdLibraryOnTheRemote();
     BenchMainWindow window;
     window.show();
     QTRY_VERIFY(window.lists_restored_);
@@ -1306,7 +1277,7 @@ void BenchMainWindowTest::RemoteEngines::locateFindsARemoteTracksAlbumInTheRemot
             tree->currentIndex().data().toString().contains(album ? album_name : artist_name));
     }
     window.remotePlayback()->stop();
-    QSettings{}.remove(QLatin1String(SettingsDialog::library_show_local_key));
+    testing::holdLibraryHere();
 }
 
 void BenchMainWindowTest::RemoteEngines::replacingARemoteTabFromItsLibraryPlays() {
@@ -1421,8 +1392,13 @@ void BenchMainWindowTest::RemoteEngines::aRemoteTabGetsTagsAndCoversFromItsEngin
     // Mounted elsewhere here: the path is translated, not kept.
     const auto mounted = media.filePath(QStringLiteral("mounted-here"));
     QVERIFY(QFile::link(music, mounted));
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_remote_folder_key), music);
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_remote_mount_key), mounted);
+    const auto mounted_at = [](const QString& folder, const QString& here) {
+        auto engines = loadRemoteEngines();
+        engines.front().music_folder = folder;
+        engines.front().reachable_at = here;
+        saveRemoteEngines(engines);
+    };
+    mounted_at(music, mounted);
     QVERIFY(window.transferRows(tab->view, {0}, local_id, false, -1));
     QCOMPARE(local->model->rows().back().raw_path,
              QFile::encodeName(mounted + QStringLiteral("/art.flac")).toStdString());
@@ -1445,13 +1421,12 @@ void BenchMainWindowTest::RemoteEngines::aRemoteTabGetsTagsAndCoversFromItsEngin
     QCOMPARE(tab->model->rowCount(), remote_rows + 1);
     QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("not in")));
 
-    QSettings{}.remove(QLatin1String(SettingsDialog::library_remote_folder_key));
-    QSettings{}.remove(QLatin1String(SettingsDialog::library_remote_mount_key));
+    mounted_at({}, {});
 
     // ADR-0286: the search dialog searches the library on the engine holding
     // it -- here the remote -- as you type, with artists, albums and tracks
     // apart, and what it finds goes to a tab of it.
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_show_local_key), false);
+    testing::holdLibraryOnTheRemote();
     window.tabs_->setCurrentWidget(tab->view);
     window.openSearchDialog();
     auto* dialog = window.search_dialog_.data();
@@ -1499,7 +1474,7 @@ void BenchMainWindowTest::RemoteEngines::aRemoteTabGetsTagsAndCoversFromItsEngin
     QTRY_COMPARE(tab->model->rowCount(), before + 1);
     QCOMPARE(tab->model->rows().back().title, std::string{"Fixture Tone"});
     dialog->close();
-    QSettings{}.remove(QLatin1String(SettingsDialog::library_show_local_key));
+    testing::holdLibraryHere();
 
     // Files opened from this computer go into a local list, never the remote
     // tab that happens to be on screen.
@@ -1587,7 +1562,7 @@ void BenchMainWindowTest::RemoteEngines::thisComputersFilesDroppedOnARemoteTab()
     const auto here = media.filePath(QStringLiteral("downloads/two.wav"));
     write_wave(there, wave_sample_rate / 10U);
     write_wave(here, wave_sample_rate / 10U);
-    QSettings{}.setValue(QLatin1String(SettingsDialog::library_show_local_key), false);
+    testing::holdLibraryOnTheRemote();
     BenchMainWindow window;
     window.show();
     QTRY_VERIFY(window.lists_restored_);
@@ -1624,7 +1599,7 @@ void BenchMainWindowTest::RemoteEngines::thisComputersFilesDroppedOnARemoteTab()
     QTRY_COMPARE(local->model->rowCount(), 1);
     QCOMPARE(QString::fromStdString(local->model->rows().front().raw_path), here);
     QTRY_VERIFY(!window.discovery_running_);
-    QSettings{}.remove(QLatin1String(SettingsDialog::library_show_local_key));
+    testing::holdLibraryHere();
 }
 
 } // namespace trackknife::bench

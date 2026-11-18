@@ -42,9 +42,7 @@ struct RemoteEngineSetting final {
     friend bool operator==(const RemoteEngineSetting&, const RemoteEngineSetting&) = default;
 };
 
-// The engines configured, in order. The first time, the one remote an
-// older release kept (library/engine-socket and the rest) becomes the first
-// of them.
+// The engines configured, in order.
 [[nodiscard]] std::vector<RemoteEngineSetting> loadRemoteEngines();
 void saveRemoteEngines(const std::vector<RemoteEngineSetting>& engines);
 // Keeps the id an engine gave, found by its address.

@@ -11,14 +11,6 @@
 
 namespace trackknife::bench {
 
-QString SettingsKeys::remoteEnginePassword() {
-    const QSettings settings;
-    const auto own =
-        settings.value(QLatin1String(library_engine_token_key), QString{}).toString().trimmed();
-    return own.isEmpty() ? settings.value(QLatin1String(engine_password_key), QString{}).toString()
-                         : own;
-}
-
 std::string SettingsKeys::ratingBackupTag() {
     const QSettings settings;
     if (!settings.value(QLatin1String(rating_backup_key), false).toBool()) {

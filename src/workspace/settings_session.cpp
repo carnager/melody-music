@@ -90,7 +90,6 @@ SettingsSession::SettingsSession(QObject* parent) : QObject(parent) {
     read(QLatin1String(SettingsKeys::rating_backup_tag_key),
          QString::fromLatin1(metadata::default_rating_backup_tag));
     read(QLatin1String(SettingsKeys::engine_password_key), QString{});
-    read(QLatin1String(SettingsKeys::library_show_local_key), true);
     // ADR-0286: which engine holds the library, as Settings had it.
     values_.insert(QLatin1String(SettingsKeys::library_engine_key), bench::libraryEngine());
     read(QLatin1String(SettingsKeys::engine_upnp_key), false);

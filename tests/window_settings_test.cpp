@@ -150,7 +150,7 @@ void BenchMainWindowTest::Settings::sharingSettingsAreHandedToTheEngineOnce() {
     engine_.stop();
     QSettings settings;
     settings.remove(QLatin1String(SettingsDialog::library_local_engine_socket_key));
-    settings.remove(QLatin1String(SettingsDialog::library_engine_socket_key));
+    saveRemoteEngines({});
     settings.remove(QLatin1String(SettingsDialog::engine_settings_in_config_key));
     settings.setValue(QLatin1String(SettingsDialog::engine_music_root_key),
                       QStringLiteral("/srv/handed-over"));
