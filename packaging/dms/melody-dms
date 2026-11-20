@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# melody-pick in DankMaterialShell's own launcher: pick an album -- or a
+# track -- and queue it with the key it was picked with, as melody-pick does.
+#
+#   melody-dms                           # albums, from the engine melody-cli finds
+#   melody-dms tracks                    # tracks
+#   melody-dms tracks --engine gemenon   # any melody-cli options go to melody-cli
+#
+#   Enter                add after what is queued
+#   Shift+Enter          replace the queue and play
+#   Ctrl+Enter           play next
+#   Ctrl+Shift+Enter     add to Up Next
+#   Escape               leave
+#
+# Needs melody-cli and dms (`dms dmenu`).
+
+set -euo pipefail
+
+cli() { melody-cli "$@"; }
+say() { notify-send -a Melody "$1" "${2:-}" 2>/dev/null || printf '%s\n' "$1 ${2:-}" >&2; }
+
+kind=album
+icon=album
+case "${1:-}" in
+    albums | album) shift ;;
+    tracks | track) kind=track; icon=music_note; shift ;;
+    -h | --help)
+        sed -n '3,17p' "$0" | sed 's/^# \{0,1\}//'
+        exit 0
+        ;;
+esac
+
+# melody-cli --keys writes a line to show, a tab, and the key. Kept in a
+# file with the library's revision on its first line, as melody-rofi keeps
+# it: while the engine says the same revision the list is read from there.
+# Beside it, the lines alone, which the launcher shows; the row it hands
+# back is a number, and that line's key is the one queued. An engine too
+# old to have a revision is listed every time.
+cache="${XDG_CACHE_HOME:-${HOME}/.cache}/melody-dms/$(printf '%s\n' "${kind}" "$@" |
+    md5sum | cut -c1-16)"
+mkdir -p "${cache%/*}"
+revision="$(cli "$@" revision 2>/dev/null)" || revision=
+list="${cache}"
+shown="${cache}.shown"
+if [ -z "${revision}" ] || [ ! -f "${cache}" ] || [ ! -f "${shown}" ] ||
+    [ "$(head -n 1 "${cache}")" != "${revision}" ]; then
+    list="$(mktemp "${cache}.XXXXXX")"
+    shown="$(mktemp "${cache}.XXXXXX")"
+    trap 'rm -f "${list}" "${shown}"' EXIT
+    { printf '%s\n' "${revision}" && cli "$@" --keys "${kind}s"; } > "${list}" ||
+        { say "Melody" "Could not list the ${kind}s"; exit 1; }
+    tail -n +2 "${list}" | cut -f1 > "${shown}"
+    if [ -n "${revision}" ]; then
+        mv "${list}" "${cache}"
+        mv "${shown}" "${cache}.shown"
+        list="${cache}"
+        shown="${cache}.shown"
+        trap - EXIT
+    fi
+fi
+
+# Enter accepts (0); the others are the launcher's own keys for this
+# picker, Return and the keypad's Enter alike, and exit 10 and up.
+status=0
+row="$(dms dmenu --input "${shown}" --format i --no-custom --disable-history \
+    -p "${kind^}s" --icon "${icon}" --placeholder "Search ${kind}s" \
+    --mesg "Enter adds · Shift+Enter plays · Ctrl+Enter plays next · Ctrl+Shift+Enter adds to Up Next" \
+    --keybind 1=shift+return --keybind 2=shift+enter \
+    --keybind 3=ctrl+return --keybind 4=ctrl+enter \
+    --keybind 5=ctrl+shift+return --keybind 6=ctrl+shift+enter)" || status=$?
+
+case "${status}" in
+    0) verb=add ;;
+    10 | 11) verb=play ;;
+    12 | 13) verb=insert ;;
+    14 | 15) verb=upnext ;;
+    1) exit 0 ;;
+    2) say "Melody" "DankMaterialShell is not running"; exit 1 ;;
+    *) exit "${status}" ;;
+esac
+[[ "${row}" =~ ^[0-9]+$ ]] || exit 0
+
+# The row's line, after the revision.
+key="$(sed -n "$((row + 2))p" "${list}")"
+key="${key##*$'\t'}"
+[ -n "${key}" ] || exit 0
+
+if ! error="$(cli "$@" "${verb}" "${kind}" --key "${key}" 2>&1 >/dev/null)"; then
+    say "Melody" "${error#melody-cli: }"
+    exit 1
+fi

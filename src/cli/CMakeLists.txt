@@ -45,4 +45,7 @@ install(FILES ${PROJECT_SOURCE_DIR}/packaging/completions/_melody-cli
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     install(DIRECTORY ${PROJECT_SOURCE_DIR}/packaging/dms/melody
             DESTINATION /etc/xdg/quickshell/dms-plugins COMPONENT cli)
+    # melody-pick in the shell's own launcher, through `dms dmenu`.
+    install(PROGRAMS ${PROJECT_SOURCE_DIR}/packaging/dms/melody-dms
+            DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT cli)
 endif()
