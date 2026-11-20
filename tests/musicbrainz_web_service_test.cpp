@@ -510,6 +510,26 @@ void discogsSearchAndVersionsAreListed() {
         CHECK(versions->releases[1].media.size() == 1U &&
               versions->releases[1].media[0].format == "Vinyl");
     }
+
+    // Only CDs and digital releases are listed, at most as many as asked;
+    // a release of no known format is kept.
+    if (versions) {
+        auto kept = *versions;
+        Release unknown = kept.releases.front();
+        unknown.id = "23";
+        unknown.media.clear();
+        Release compact = kept.releases.front();
+        compact.id = "24";
+        compact.media[0].format = "CD";
+        kept.releases.push_back(unknown);
+        kept.releases.push_back(compact);
+        keep_cd_and_digital(kept, 10U);
+        CHECK(kept.releases.size() == 3U);
+        CHECK(kept.releases.size() == 3U && kept.releases[0].id == "21" &&
+              kept.releases[1].id == "23" && kept.releases[2].id == "24");
+        keep_cd_and_digital(kept, 1U);
+        CHECK(kept.releases.size() == 1U && kept.releases[0].id == "21");
+    }
 }
 
 [[nodiscard]] std::string discogs_release(const std::string& formats, const std::string& tracks) {

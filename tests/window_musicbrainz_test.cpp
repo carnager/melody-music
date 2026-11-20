@@ -846,9 +846,12 @@ void BenchMainWindowTest::MusicBrainz::identifyAsksDiscogsAfterMusicBrainz() {
         "media": [{"format": "CD", "track-count": 5}]}]
     })json";
     static constexpr auto discogs_search = R"json({
-      "pagination": {"items": 1},
-      "results": [{"id": 31, "type": "release", "title": "Band - Gamma", "year": "2024",
+      "pagination": {"items": 2},
+      "results": [{"id": 32, "type": "release", "title": "Band - Gamma", "year": "2024",
         "country": "Germany", "format": ["Vinyl", "LP", "Album"], "label": ["Self"],
+        "catno": "S1V", "master_id": 0},
+        {"id": 31, "type": "release", "title": "Band - Gamma", "year": "2024",
+        "country": "Germany", "format": ["File", "FLAC", "Album"], "label": ["Self"],
         "catno": "S1", "master_id": 0}]
     })json";
     static constexpr auto discogs_release = R"json({
@@ -922,14 +925,15 @@ void BenchMainWindowTest::MusicBrainz::identifyAsksDiscogsAfterMusicBrainz() {
         return results->topLevelItem(row)->data(0, Qt::UserRole + 1).toString();
     };
 
-    // Searched by the files' tags: MusicBrainz, then Discogs, its release
-    // listed after.
+    // Searched by the files' tags: MusicBrainz, then Discogs, its digital
+    // release listed after -- not its record.
     QTRY_VERIFY(search->isEnabled() && results->topLevelItemCount() == 2);
     QCOMPARE(asked.mid(0, 2),
              (QStringList{QStringLiteral("musicbrainz search"), QStringLiteral("discogs search")}));
     QVERIFY(!found(0).contains(QStringLiteral("Discogs")));
     QVERIFY(found(1).contains(QStringLiteral("Discogs")));
     QVERIFY(results->topLevelItem(1)->text(0).contains(QStringLiteral("Gamma")));
+    QVERIFY(!found(1).contains(QStringLiteral("S1V")));
 
     // Its link typed: looked up on Discogs, with no master to list.
     album->setText(QStringLiteral("https://www.discogs.com/release/31-Band-Gamma"));

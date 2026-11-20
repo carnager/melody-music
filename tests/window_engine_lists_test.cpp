@@ -107,7 +107,7 @@ void BenchMainWindowTest::EngineLists::theWindowsListsAreOnItsEngine() {
         }
         for (const auto& list : all->value("lists", protocol::Json::array())) {
             if (list.value("id", std::string{}) == id) {
-                return list;
+                return std::optional<protocol::Json>{std::in_place, list};
             }
         }
         return std::nullopt;

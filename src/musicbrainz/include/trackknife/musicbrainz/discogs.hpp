@@ -17,8 +17,10 @@ namespace trackknife::musicbrainz {
 
 // Discogs allows sixty requests a minute with a token; paced a little slower.
 inline constexpr int discogs_minimum_request_interval_ms = 1'100;
-// How many of Discogs' releases a search lists, after MusicBrainz's.
+// How many of Discogs' releases a search lists, after MusicBrainz's -- of
+// a page asked for, the rest being other formats.
 inline constexpr std::size_t discogs_search_limit = 10U;
+inline constexpr std::size_t discogs_search_page = 50U;
 // How many of a master's versions are listed: one page.
 inline constexpr std::size_t discogs_master_versions_limit = 100U;
 
@@ -54,6 +56,13 @@ parse_discogs_master_versions(std::string_view body, const WebServiceLimits& lim
 // A release's images as a cover listing: its primary image the front.
 [[nodiscard]] core::Result<CoverArtListing>
 parse_discogs_images(std::string_view body, const WebServiceLimits& limits = {});
+
+// ADR-0360: what Identify lists of Discogs' releases -- CDs and digital
+// releases, whose files are tagged, not records or tapes. A release whose
+// format is not known is kept. keep_cd_and_digital keeps at most `at_most`
+// of them, in order.
+[[nodiscard]] bool is_cd_or_digital(const Release& release);
+void keep_cd_and_digital(ReleaseSearchResult& result, std::size_t at_most);
 
 // An artist's name as Discogs gives it, as it is tagged: without the
 // " (N)" telling artists of one name apart; "Various" is "Various Artists".

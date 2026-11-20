@@ -487,6 +487,24 @@ void listed_format(const QJsonValue& format, const QJsonValue& quantity, Release
 
 } // namespace
 
+bool is_cd_or_digital(const Release& release) {
+    if (release.media.empty()) {
+        return true;
+    }
+    return std::ranges::any_of(release.media, [](const ReleaseMedium& medium) {
+        return medium.format == "CD" || medium.format == "CDr" || medium.format == "SACD" ||
+               medium.format == "Digital Media";
+    });
+}
+
+void keep_cd_and_digital(ReleaseSearchResult& result, const std::size_t at_most) {
+    std::erase_if(result.releases,
+                  [](const Release& release) { return !is_cd_or_digital(release); });
+    if (result.releases.size() > at_most) {
+        result.releases.resize(at_most);
+    }
+}
+
 std::string discogs_artist_name(const std::string_view name) {
     static const QRegularExpression suffix{QStringLiteral(R"(\s+\(\d+\)$)")};
     auto text = QString::fromUtf8(name.data(), static_cast<qsizetype>(name.size())).trimmed();
