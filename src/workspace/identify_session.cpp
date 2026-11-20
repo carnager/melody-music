@@ -829,29 +829,29 @@ void IdentifySession::finishSearch(core::Result<QByteArray> body) {
     emit changed();
 }
 
-void IdentifySession::searchDiscogs() {
+void IdentifySession::searchDiscogs(const bool by_title) {
     const auto url = musicbrainz::build_discogs_search_url(musicbrainz::ReleaseSearchQuery{
-        .artist = searched_artist_.toStdString(),
+        .artist = by_title ? std::string{} : searched_artist_.toStdString(),
         .release = searched_release_.toStdString(),
         .track_count = std::nullopt,
         .limit = musicbrainz::discogs_search_page,
     });
     if (!url) {
-        finishDiscogsSearch(std::unexpected(url.error()));
+        finishDiscogsSearch(std::unexpected(url.error()), by_title);
         return;
     }
     busy_ = true;
     status_ = QStringLiteral("Searching Discogs…");
     emit changed();
     const QPointer self{this};
-    service_.fetch(QString::fromStdString(*url), [self](core::Result<QByteArray> body) {
+    service_.fetch(QString::fromStdString(*url), [self, by_title](core::Result<QByteArray> body) {
         if (!self.isNull()) {
-            self->finishDiscogsSearch(std::move(body));
+            self->finishDiscogsSearch(std::move(body), by_title);
         }
     });
 }
 
-void IdentifySession::finishDiscogsSearch(core::Result<QByteArray> body) {
+void IdentifySession::finishDiscogsSearch(core::Result<QByteArray> body, const bool by_title) {
     busy_ = false;
     auto parsed =
         body ? musicbrainz::parse_discogs_search(
@@ -862,8 +862,15 @@ void IdentifySession::finishDiscogsSearch(core::Result<QByteArray> body) {
         // The artist searched for, where Discogs has them, rather than
         // others whose names hold the word; CDs and digital releases only:
         // what files are tagged from.
-        musicbrainz::keep_artist(*parsed, searched_artist_.toStdString());
+        musicbrainz::keep_artist(*parsed, searched_artist_.toStdString(), by_title);
         musicbrainz::keep_cd_and_digital(*parsed, musicbrainz::discogs_search_limit);
+        // Nothing by artist and album: asked again by the album alone, the
+        // artist's kept -- Discogs may know them by another name.
+        if (parsed->releases.empty() && !by_title && !searched_artist_.isEmpty() &&
+            !searched_release_.isEmpty()) {
+            searchDiscogs(true);
+            return;
+        }
         // In Discogs' own order, after MusicBrainz's: its search says no
         // track counts to rank by.
         for (auto& release : parsed->releases) {
