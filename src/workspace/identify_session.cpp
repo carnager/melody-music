@@ -834,7 +834,7 @@ void IdentifySession::searchDiscogs() {
         .artist = searched_artist_.toStdString(),
         .release = searched_release_.toStdString(),
         .track_count = std::nullopt,
-        .limit = musicbrainz::discogs_search_limit,
+        .limit = musicbrainz::discogs_search_page,
     });
     if (!url) {
         finishDiscogsSearch(std::unexpected(url.error()));
@@ -856,9 +856,11 @@ void IdentifySession::finishDiscogsSearch(core::Result<QByteArray> body) {
     auto parsed =
         body ? musicbrainz::parse_discogs_search(
                    std::string_view{body->constData(), static_cast<std::size_t>(body->size())},
-                   musicbrainz::WebServiceLimits{.releases = musicbrainz::discogs_search_limit})
+                   musicbrainz::WebServiceLimits{.releases = musicbrainz::discogs_search_page})
              : core::Result<musicbrainz::ReleaseSearchResult>{std::unexpected(body.error())};
     if (parsed) {
+        // CDs and digital releases only: what files are tagged from.
+        musicbrainz::keep_cd_and_digital(*parsed, musicbrainz::discogs_search_limit);
         // In Discogs' own order, after MusicBrainz's: its search says no
         // track counts to rank by.
         for (auto& release : parsed->releases) {
@@ -1034,6 +1036,10 @@ void IdentifySession::finishGroup(const musicbrainz::ReleaseSource source,
         const musicbrainz::WebServiceLimits limits{.releases = limit};
         listed = discogs ? musicbrainz::parse_discogs_master_versions(answer, limits)
                          : musicbrainz::parse_release_search(answer, limits);
+        // A master's CD and digital versions only.
+        if (listed && discogs) {
+            musicbrainz::keep_cd_and_digital(*listed, limit);
+        }
     }
     const auto first = named == Named::tagged
                            ? QStringLiteral("The release the files are tagged with")

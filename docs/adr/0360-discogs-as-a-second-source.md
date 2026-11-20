@@ -30,6 +30,12 @@ it finds is shown, chosen and previewed like MusicBrainz's.
   Discogs token set, a text search asks MusicBrainz and Discogs, and
   Discogs' releases are listed after MusicBrainz's -- at most ten, each
   row saying it is from Discogs. Without a token nothing changes.
+- **CDs and digital releases only.** Files are tagged from those, and
+  Discogs lists every pressing of a record and tape besides: a search and
+  a master's versions list only releases on CD (CDr, SACD) or as files --
+  a page of fifty asked for, the first ten of those kept. A release of no
+  known format is kept; one named by its link or tagged is looked up
+  whatever it is on.
   MusicBrainz stays first: its releases carry recording, work and artist
   ids, it can be reached by fingerprint, and Melody's other features
   (Listening together, the About panel) speak its ids.
