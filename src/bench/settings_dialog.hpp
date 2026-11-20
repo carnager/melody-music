@@ -165,6 +165,7 @@ class SettingsDialog final : public QDialog, public SettingsKeys {
     QLineEdit* engine_music_root_{nullptr};
     QLabel* engine_agent_command_{nullptr};
     QLineEdit* acoustid_key_{nullptr};
+    QLineEdit* discogs_token_{nullptr};
     QCheckBox* ratings_in_tags_{nullptr};
     QCheckBox* rating_backup_{nullptr};
     QLineEdit* rating_backup_tag_{nullptr};

@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
-# ADR-0237: what an engine without Qt needs -- building an AcoustID request.
+# ADR-0237: what an engine without Qt needs -- building an AcoustID request,
+# and (ADR-0360) telling Discogs' interface and images.
 add_library(trackknife_musicbrainz_core STATIC src/acoustid_request.cpp src/bandcamp.cpp
+                                              src/discogs_request.cpp
                                               include/trackknife/musicbrainz/acoustid.hpp
-                                              include/trackknife/musicbrainz/bandcamp.hpp)
+                                              include/trackknife/musicbrainz/bandcamp.hpp
+                                              include/trackknife/musicbrainz/discogs.hpp)
 add_library(Trackknife::MusicBrainzCore ALIAS trackknife_musicbrainz_core)
 target_include_directories(
     trackknife_musicbrainz_core
@@ -27,6 +30,7 @@ qt_add_library(
     src/matching.cpp
     src/proposal_bridge.cpp
     src/acoustid.cpp
+    src/discogs.cpp
     src/web_service.cpp
     include/trackknife/musicbrainz/album_groups.hpp
     include/trackknife/musicbrainz/matching.hpp

@@ -122,11 +122,13 @@ class IdentifyAlbumPage final : public QWidget {
         release_ = new QLineEdit(session_->initialRelease(), this);
         release_->setObjectName(QStringLiteral("bench-musicbrainz-identify-release"));
         release_->setPlaceholderText(
-            QStringLiteral("An album title, or a MusicBrainz release's or album's link"));
+            QStringLiteral("An album title, or a release's or album's link"));
         release_->setToolTip(QStringLiteral(
             "A release's link or id — musicbrainz.org/release/… — looks up that release "
             "instead of searching, with its album's other versions; an album's link — "
-            "musicbrainz.org/release-group/… — lists every version of it"));
+            "musicbrainz.org/release-group/… — lists every version of it. With a Discogs "
+            "token, Discogs' links do the same: discogs.com/release/… or [r…], "
+            "discogs.com/master/…"));
         form->addRow(QStringLiteral("Album:"), release_);
         auto* form_row = new QHBoxLayout;
         form_row->addLayout(form, 1);
@@ -153,7 +155,7 @@ class IdentifyAlbumPage final : public QWidget {
         splitter->setChildrenCollapsible(false);
         results_ = new QTreeWidget(splitter);
         results_->setObjectName(QStringLiteral("bench-musicbrainz-identify-results"));
-        results_->setAccessibleName(QStringLiteral("MusicBrainz release versions"));
+        results_->setAccessibleName(QStringLiteral("Release versions"));
         // Two lines each: artist and album, as the albums are named, then
         // what tells this version from the others.
         twoLines(results_);
@@ -289,7 +291,7 @@ class MusicBrainzIdentifyDialog final : public QDialog {
     MusicBrainzIdentifyDialog(MultiIdentifySession* session, QWidget* parent)
         : QDialog(parent), session_(session) {
         setObjectName(QStringLiteral("bench-musicbrainz-identify"));
-        setWindowTitle(QStringLiteral("Identify with MusicBrainz"));
+        setWindowTitle(QStringLiteral("Identify"));
         setWindowModality(Qt::WindowModal);
         setAttribute(Qt::WA_DeleteOnClose);
         setMinimumSize(720, 480);
@@ -345,8 +347,9 @@ class MusicBrainzIdentifyDialog final : public QDialog {
         fetch_covers_ = new QCheckBox(QStringLiteral("Fetch covers"), this);
         fetch_covers_->setObjectName(QStringLiteral("bench-musicbrainz-identify-fetch-covers"));
         fetch_covers_->setToolTip(QStringLiteral(
-            "Stage each album's front cover from the Cover Art Archive with its tags, as Fetch "
-            "cover… does -- where Cover settings keep covers"));
+            "Stage each album's front cover from the Cover Art Archive -- or, for a Discogs "
+            "release, Discogs -- with its tags, as Fetch cover… does -- where Cover settings "
+            "keep covers"));
         fetch_covers_->setChecked(
             QSettings{}.value(QLatin1String{fetch_covers_key}, true).toBool());
         session_->setFetchCovers(fetch_covers_->isChecked());

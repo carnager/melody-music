@@ -21,7 +21,8 @@ struct ReleaseProposalOptions {
 
 // Converts one aligned release into ADR-0086 proposals: per-track title,
 // artist, and numbering; release-level album, album artist, date, and
-// totals; and the MusicBrainz identifiers, all carrying the alignment's
+// totals; and the release's identifiers -- MusicBrainz's, or a Discogs
+// release's own (ADR-0360) -- all carrying the alignment's
 // confidence and a rationale naming the exact release version. item_indexes
 // maps each local descriptor position to its selection item. The result
 // stages as an ordinary colored, undoable draft — nothing here writes.

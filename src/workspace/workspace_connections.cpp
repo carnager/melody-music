@@ -635,6 +635,14 @@ void Workspace::watchFileWork(EngineLink& link) {
                 if (!key.isEmpty()) {
                     static_cast<void>(work->set_acoustid_key(key.toStdString()));
                 }
+                // ADR-0360: and the Discogs token, the same way.
+                const auto token = QSettings{}
+                                       .value(QLatin1String(SettingsKeys::discogs_token_key))
+                                       .toString()
+                                       .trimmed();
+                if (!token.isEmpty()) {
+                    static_cast<void>(work->set_discogs_token(token.toStdString()));
+                }
                 // Once chosen in Settings, whether ratings go into the files
                 // is the same on every engine this window reaches.
                 const QSettings chosen;

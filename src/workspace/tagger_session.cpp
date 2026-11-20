@@ -16,6 +16,7 @@
 #include "trackknife/metadata/local_reader.hpp"
 #include "trackknife/musicbrainz/album_groups.hpp"
 #include "trackknife/musicbrainz/bandcamp.hpp"
+#include "trackknife/musicbrainz/discogs.hpp"
 #include "uicommon/debug_log.hpp"
 
 #include <QElapsedTimer>
@@ -24,6 +25,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QSettings>
 #include <QTemporaryDir>
@@ -54,9 +56,16 @@ album_group_input(const std::string& raw_path, const metadata::MetadataDocument&
         }
         return std::string{};
     };
+    // ADR-0360: else the Discogs release, as [rN] -- how Identify is told it.
+    auto release_id = first({"musicbrainz_albumid", "musicbrainzalbumid"});
+    if (release_id.empty()) {
+        if (const auto discogs = first({"discogs_release_id"}); !discogs.empty()) {
+            release_id = "[r" + discogs + "]";
+        }
+    }
     return musicbrainz::AlbumGroupInput{
         .raw_path = raw_path,
-        .release_id = first({"musicbrainz_albumid", "musicbrainzalbumid"}),
+        .release_id = std::move(release_id),
         .album_artist = first({"albumartist"}),
         .artist = first({"artist"}),
         .album = first({"album"}),
@@ -374,6 +383,28 @@ std::optional<ArtworkCoverArtService> TaggerSession::coverArtService() {
         .fetch_listing =
             [self](const QString& release_id,
                    std::function<void(core::Result<musicbrainz::CoverArtListing>)> completion) {
+                // ADR-0360: a Discogs release's images, its primary the front.
+                if (const auto discogs =
+                        musicbrainz::discogs_release_id_in(release_id.toStdString())) {
+                    const auto url = musicbrainz::build_discogs_release_url(*discogs);
+                    if (self.isNull() || !url) {
+                        completion(
+                            std::unexpected(url ? core::Error{.code = core::ErrorCode::cancelled,
+                                                              .message = "the tag editor closed",
+                                                              .context = {}}
+                                                : url.error()));
+                        return;
+                    }
+                    self->services_.musicbrainz.fetch(
+                        QString::fromStdString(*url), [completion](core::Result<QByteArray> body) {
+                            completion(body ? musicbrainz::parse_discogs_images(std::string_view{
+                                                  body->constData(),
+                                                  static_cast<std::size_t>(body->size())})
+                                            : core::Result<musicbrainz::CoverArtListing>{
+                                                  std::unexpected(std::move(body.error()))});
+                        });
+                    return;
+                }
                 const auto listing_url =
                     musicbrainz::build_cover_art_listing_url(release_id.toStdString());
                 if (self.isNull() || !listing_url) {
@@ -1149,18 +1180,31 @@ void TaggerSession::updateArtworkScope(const std::span<const std::size_t> select
 
     // Cover fetching needs one unambiguous release: every selected file must
     // carry the same MUSICBRAINZ_ALBUMID, draft or embedded — so an Identify
-    // result enables it before Apply has run.
+    // result enables it before Apply has run. ADR-0360: or, carrying none,
+    // the same DISCOGS_RELEASE_ID, as [rN].
     std::optional<QString> release_id;
     auto release_consistent = !selected_items.empty();
     const auto release_column = grid_model_->fieldColumn(QStringLiteral("MUSICBRAINZ_ALBUMID"));
-    if (release_consistent && release_column) {
+    const auto discogs_column = grid_model_->fieldColumn(QStringLiteral("DISCOGS_RELEASE_ID"));
+    const auto cell = [this](const std::optional<int> column, const int row) {
+        if (!column) {
+            return QString{};
+        }
+        const auto values =
+            grid_model_->index(row, *column).data(metadata_cell_values_role).toStringList();
+        return values.isEmpty() ? QString{} : values.front().trimmed();
+    };
+    if (release_consistent && (release_column || discogs_column)) {
         for (const auto item_index : selected_items) {
             const auto row = static_cast<int>(
                 std::min(item_index, static_cast<std::size_t>(std::numeric_limits<int>::max())));
-            const auto values = grid_model_->index(row, *release_column)
-                                    .data(metadata_cell_values_role)
-                                    .toStringList();
-            const auto value = values.isEmpty() ? QString{} : values.front().trimmed();
+            auto value = cell(release_column, row);
+            if (value.isEmpty()) {
+                const auto discogs = cell(discogs_column, row);
+                if (!discogs.isEmpty()) {
+                    value = QStringLiteral("[r%1]").arg(discogs);
+                }
+            }
             if (value.isEmpty() || (release_id && *release_id != value)) {
                 release_consistent = false;
                 break;
@@ -1168,8 +1212,9 @@ void TaggerSession::updateArtworkScope(const std::span<const std::size_t> select
             release_id = value;
         }
     }
-    artwork_->setCoverArtRelease(release_consistent && release_column ? std::move(release_id)
-                                                                      : std::nullopt);
+    artwork_->setCoverArtRelease(release_consistent && (release_column || discogs_column)
+                                     ? std::move(release_id)
+                                     : std::nullopt);
 }
 
 core::Result<QString> TaggerSession::storeCoverArtImage(const QString& release_id,
@@ -1195,8 +1240,12 @@ core::Result<QString> TaggerSession::storeCoverArtImage(const QString& release_i
         }
         cover_art_directory_ = std::move(directory);
     }
+    // A name of the release's id, kept to what any file system takes: a
+    // Discogs release is [rN].
+    auto name = release_id;
+    name.replace(QRegularExpression{QStringLiteral("[^A-Za-z0-9._-]")}, QStringLiteral("_"));
     const auto path = cover_art_directory_->filePath(
-        release_id + (png ? QStringLiteral("-front.png") : QStringLiteral("-front.jpg")));
+        name + (png ? QStringLiteral("-front.png") : QStringLiteral("-front.jpg")));
     QFile file{path};
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
         file.write(bytes) != bytes.size()) {

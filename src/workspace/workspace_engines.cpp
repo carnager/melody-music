@@ -214,12 +214,17 @@ void Workspace::settingsSaved(const LocalEngineSharing& before) {
     ColorSchemes::instance().applyChosen();
     // ADR-0237: the AcoustID key is the engines'; a changed one is handed to
     // each engine that does file work (an emptied one makes them forget it).
-    // Stage 2: so is whether ratings also go into the files.
+    // Stage 2: so is whether ratings also go into the files. ADR-0360: and
+    // the Discogs token.
     const QSettings chosen;
     const auto key = chosen.value(QLatin1String(SettingsKeys::acoustid_client_key))
                          .toString()
                          .trimmed()
                          .toStdString();
+    const auto discogs = chosen.value(QLatin1String(SettingsKeys::discogs_token_key))
+                             .toString()
+                             .trimmed()
+                             .toStdString();
     const auto rating_tags =
         chosen.value(QLatin1String(SettingsKeys::ratings_in_tags_key), false).toBool();
     const auto rating_scale =
@@ -231,8 +236,9 @@ void Workspace::settingsSaved(const LocalEngineSharing& before) {
         if (engine->does_file_work && engine->file_work) {
             static_cast<void>(
                 QtConcurrent::run([workspace = QPointer{this}, work = engine->file_work, key,
-                                   rating_tags, rating_scale, rating_backup] {
+                                   discogs, rating_tags, rating_scale, rating_backup] {
                     static_cast<void>(work->set_acoustid_key(key));
+                    static_cast<void>(work->set_discogs_token(discogs));
                     static_cast<void>(work->set_rating_tags(rating_tags));
                     static_cast<void>(work->set_rating_scale(rating_scale));
                     static_cast<void>(work->set_rating_backup_tag(rating_backup));

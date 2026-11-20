@@ -229,6 +229,7 @@ constexpr std::string_view web_service_root = "https://musicbrainz.org/ws/2";
 [[nodiscard]] core::Result<Release> parse_release_object(const QJsonObject& release,
                                                          const WebServiceLimits& limits) {
     Release parsed{
+        .source = ReleaseSource::musicbrainz,
         .id = bounded_text(release.value(QStringLiteral("id")), limits),
         .title = bounded_text(release.value(QStringLiteral("title")), limits),
         .status = bounded_text(release.value(QStringLiteral("status")), limits),

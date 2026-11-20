@@ -18,6 +18,8 @@ struct SettingsKeys {
     [[nodiscard]] static metadata::ArtworkStoragePolicy artworkPolicy();
 
     static constexpr auto acoustid_client_key = "musicbrainz/acoustid-client-key";
+    // ADR-0360: Identify also asks Discogs where a token is set.
+    static constexpr auto discogs_token_key = "musicbrainz/discogs-token";
     // ADR-0237 stage 2: engines also write track ratings into the files.
     static constexpr auto ratings_in_tags_key = "library/ratings-in-tags";
     // The scale other players' plain RATING tags are read on: off, 5, 10, 100.

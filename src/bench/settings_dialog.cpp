@@ -911,6 +911,41 @@ SettingsDialog::SettingsDialog(QWidget* parent, OutputProfileStore profile_store
     acoustid_link->setTextInteractionFlags(Qt::TextBrowserInteraction);
     acoustid_link->setWordWrap(true);
     metadata_layout->addWidget(acoustid_link);
+    // ADR-0360: Discogs, asked after MusicBrainz where a token is set.
+    auto* discogs_form = new QFormLayout;
+    discogs_token_ = new QLineEdit(metadata_services);
+    discogs_token_->setObjectName(QStringLiteral("bench-settings-discogs-token"));
+    discogs_token_->setEchoMode(QLineEdit::Password);
+    discogs_token_->setPlaceholderText(QStringLiteral("Personal access token"));
+    bind(discogs_token_, discogs_token_key);
+    auto* discogs_row = new QHBoxLayout;
+    discogs_row->addWidget(discogs_token_, 1);
+    auto* discogs_reveal = new QCheckBox(QStringLiteral("Show"), metadata_services);
+    discogs_reveal->setObjectName(QStringLiteral("bench-settings-discogs-show"));
+    discogs_reveal->setAccessibleName(QStringLiteral("Show Discogs token"));
+    connect(discogs_reveal, &QCheckBox::toggled, this, [this](bool show) {
+        discogs_token_->setEchoMode(show ? QLineEdit::Normal : QLineEdit::Password);
+    });
+    discogs_row->addWidget(discogs_reveal);
+    discogs_form->addRow(QStringLiteral("Discogs token:"), discogs_row);
+    metadata_layout->addLayout(discogs_form);
+    auto* discogs_note = new QLabel(
+        QStringLiteral("With a token, Identify also searches Discogs, for releases MusicBrainz "
+                       "does not have yet; they are listed after MusicBrainz's. Data provided "
+                       "by Discogs. Clear the token to stop."),
+        metadata_services);
+    discogs_note->setWordWrap(true);
+    discogs_note->setForegroundRole(QPalette::PlaceholderText);
+    metadata_layout->addWidget(discogs_note);
+    auto* discogs_link = new QLabel(
+        QStringLiteral("<a href=\"https://www.discogs.com/settings/developers\">Generate a "
+                       "personal access token on Discogs</a>"),
+        metadata_services);
+    discogs_link->setObjectName(QStringLiteral("bench-settings-discogs-link"));
+    discogs_link->setOpenExternalLinks(true);
+    discogs_link->setTextInteractionFlags(Qt::TextBrowserInteraction);
+    discogs_link->setWordWrap(true);
+    metadata_layout->addWidget(discogs_link);
     metadata_layout->addStretch(1);
     add_page(QStringLiteral("Metadata services"), metadata_services);
 

@@ -3,6 +3,7 @@
 #include "workspace/identify_session.hpp"
 
 #include "trackknife/musicbrainz/acoustid.hpp"
+#include "trackknife/musicbrainz/discogs.hpp"
 #include "trackknife/musicbrainz/web_service.hpp"
 
 #include <QCollator>
@@ -718,7 +719,11 @@ void IdentifySession::loadScanCandidate(const std::size_t rank) {
 
 void IdentifySession::start() {
     if (const auto id = musicbrainz::release_id_in(tagged_release_.toStdString())) {
-        lookUp(*id, true);
+        lookUp(musicbrainz::ReleaseSource::musicbrainz, *id, true);
+    } else if (const auto discogs =
+                   musicbrainz::discogs_release_id_in(tagged_release_.toStdString());
+               discogs && service_.discogs) {
+        lookUp(musicbrainz::ReleaseSource::discogs, *discogs, true);
     }
 }
 
@@ -729,12 +734,30 @@ void IdentifySession::search(const QString& artist, const QString& release) {
     // A link or id pasted in either field: that release -- or that
     // album's versions -- not a search.
     for (const auto* named : {&release, &artist}) {
-        if (const auto id = musicbrainz::release_id_in(named->toStdString())) {
-            lookUp(*id, false);
+        const auto text = named->toStdString();
+        if (const auto id = musicbrainz::release_id_in(text)) {
+            lookUp(musicbrainz::ReleaseSource::musicbrainz, *id, false);
             return;
         }
-        if (const auto group = musicbrainz::release_group_id_in(named->toStdString())) {
-            lookUpGroup(*group, Named::group);
+        if (const auto group = musicbrainz::release_group_id_in(text)) {
+            lookUpGroup(musicbrainz::ReleaseSource::musicbrainz, *group, Named::group);
+            return;
+        }
+        // ADR-0360: Discogs' too, where there is a token to ask it with.
+        const auto discogs_release = musicbrainz::discogs_release_id_in(text);
+        const auto discogs_master = musicbrainz::discogs_master_id_in(text);
+        if ((discogs_release || discogs_master) && !service_.discogs) {
+            status_ = QStringLiteral("Set a Discogs token in Settings → Metadata services to "
+                                     "look up Discogs releases");
+            emit changed();
+            return;
+        }
+        if (discogs_release) {
+            lookUp(musicbrainz::ReleaseSource::discogs, *discogs_release, false);
+            return;
+        }
+        if (discogs_master) {
+            lookUpGroup(musicbrainz::ReleaseSource::discogs, *discogs_master, Named::group);
             return;
         }
     }
@@ -749,6 +772,10 @@ void IdentifySession::search(const QString& artist, const QString& release) {
         emit changed();
         return;
     }
+    searched_artist_ = artist.trimmed();
+    searched_release_ = release.trimmed();
+    musicbrainz_failure_.clear();
+    discogs_failure_.clear();
     status_ = QStringLiteral("Searching MusicBrainz…");
     dropMatch();
     rows_.clear();
@@ -765,56 +792,132 @@ void IdentifySession::search(const QString& artist, const QString& release) {
 }
 
 void IdentifySession::finishSearch(core::Result<QByteArray> body) {
-    busy_ = false;
-    if (!body) {
-        status_ = QStringLiteral("Search failed · %1").arg(text(body.error().message));
-        emit changed();
-        return;
-    }
-    auto parsed = musicbrainz::parse_release_search(
-        std::string_view{body->constData(), static_cast<std::size_t>(body->size())});
-    if (!parsed) {
-        status_ = QStringLiteral("Search failed · %1").arg(text(parsed.error().message));
-        emit changed();
-        return;
-    }
-    const auto ranked = musicbrainz::rank_release_candidates(local_tracks_, *parsed);
-    candidates_ = std::move(parsed->releases);
-    for (const auto& entry : ranked) {
-        const auto& release = candidates_[entry.release_index];
-        row_candidates_.push_back(entry.release_index);
-        rows_.push_back(Candidate{
-            .match = release.track_count == local_tracks_.size()
-                         ? QStringLiteral("Same track count")
-                         : QStringLiteral("Different track count"),
-            .match_tool_tip = QStringLiteral("Search relevance: %1/100 · ranking score: %2")
-                                  .arg(release.search_score)
-                                  .arg(entry.score),
-            .album = text(release.title),
-            .album_tool_tip = text(release.id),
-            .artist = credit_text(release.artist_credits),
-            .tracks = QString::number(release.track_count),
-            .media = media_text(release),
-            .version = version_text(release),
-        });
-    }
-    if (candidates_.empty()) {
-        status_ = QStringLiteral("No releases found — adjust the search text");
+    auto parsed =
+        body ? musicbrainz::parse_release_search(
+                   std::string_view{body->constData(), static_cast<std::size_t>(body->size())})
+             : core::Result<musicbrainz::ReleaseSearchResult>{std::unexpected(body.error())};
+    if (parsed) {
+        const auto ranked = musicbrainz::rank_release_candidates(local_tracks_, *parsed);
+        candidates_ = std::move(parsed->releases);
+        for (const auto& entry : ranked) {
+            const auto& release = candidates_[entry.release_index];
+            row_candidates_.push_back(entry.release_index);
+            rows_.push_back(Candidate{
+                .match = release.track_count == local_tracks_.size()
+                             ? QStringLiteral("Same track count")
+                             : QStringLiteral("Different track count"),
+                .match_tool_tip = QStringLiteral("Search relevance: %1/100 · ranking score: %2")
+                                      .arg(release.search_score)
+                                      .arg(entry.score),
+                .album = text(release.title),
+                .album_tool_tip = text(release.id),
+                .artist = credit_text(release.artist_credits),
+                .tracks = QString::number(release.track_count),
+                .media = media_text(release),
+                .version = version_text(release),
+            });
+        }
     } else {
-        status_ = QStringLiteral("%1 release %2 · every version of an album is its own row")
-                      .arg(candidates_.size())
-                      .arg(candidates_.size() == 1U ? QStringLiteral("version")
-                                                    : QStringLiteral("versions"));
-        suggested_ = 0;
+        musicbrainz_failure_ = text(parsed.error().message);
     }
+    if (service_.discogs) {
+        searchDiscogs();
+        return;
+    }
+    busy_ = false;
+    sayFound();
     emit changed();
 }
 
-void IdentifySession::lookUp(const std::string& release_id, const bool tagged) {
+void IdentifySession::searchDiscogs() {
+    const auto url = musicbrainz::build_discogs_search_url(musicbrainz::ReleaseSearchQuery{
+        .artist = searched_artist_.toStdString(),
+        .release = searched_release_.toStdString(),
+        .track_count = std::nullopt,
+        .limit = musicbrainz::discogs_search_limit,
+    });
+    if (!url) {
+        finishDiscogsSearch(std::unexpected(url.error()));
+        return;
+    }
+    busy_ = true;
+    status_ = QStringLiteral("Searching Discogs…");
+    emit changed();
+    const QPointer self{this};
+    service_.fetch(QString::fromStdString(*url), [self](core::Result<QByteArray> body) {
+        if (!self.isNull()) {
+            self->finishDiscogsSearch(std::move(body));
+        }
+    });
+}
+
+void IdentifySession::finishDiscogsSearch(core::Result<QByteArray> body) {
+    busy_ = false;
+    auto parsed =
+        body ? musicbrainz::parse_discogs_search(
+                   std::string_view{body->constData(), static_cast<std::size_t>(body->size())},
+                   musicbrainz::WebServiceLimits{.releases = musicbrainz::discogs_search_limit})
+             : core::Result<musicbrainz::ReleaseSearchResult>{std::unexpected(body.error())};
+    if (parsed) {
+        // In Discogs' own order, after MusicBrainz's: its search says no
+        // track counts to rank by.
+        for (auto& release : parsed->releases) {
+            row_candidates_.push_back(candidates_.size());
+            rows_.push_back(Candidate{
+                .match = QStringLiteral("Discogs"),
+                .match_tool_tip = QStringLiteral("Found on Discogs, in Discogs' order · its "
+                                                 "tracks are known once it is previewed"),
+                .album = text(release.title),
+                .album_tool_tip = QStringLiteral("Discogs release %1").arg(text(release.id)),
+                .artist = credit_text(release.artist_credits),
+                .tracks = QStringLiteral("—"),
+                .media = media_text(release),
+                .version = version_text(release),
+            });
+            candidates_.push_back(std::move(release));
+        }
+    } else {
+        discogs_failure_ = text(parsed.error().message);
+    }
+    sayFound();
+    emit changed();
+}
+
+void IdentifySession::sayFound() {
+    const auto discogs = static_cast<std::size_t>(
+        std::ranges::count_if(candidates_, [](const musicbrainz::Release& release) {
+            return release.source == musicbrainz::ReleaseSource::discogs;
+        }));
+    QStringList failures;
+    if (!musicbrainz_failure_.isEmpty()) {
+        failures.push_back(QStringLiteral("MusicBrainz: %1").arg(musicbrainz_failure_));
+    }
+    if (!discogs_failure_.isEmpty()) {
+        failures.push_back(QStringLiteral("Discogs: %1").arg(discogs_failure_));
+    }
+    const auto failed = failures.join(QStringLiteral(" · "));
+    if (candidates_.empty()) {
+        status_ = failed.isEmpty() ? QStringLiteral("No releases found — adjust the search text")
+                                   : QStringLiteral("Search failed · %1").arg(failed);
+        return;
+    }
+    status_ =
+        QStringLiteral("%1 release %2%3 · every version of an album is its own row%4")
+            .arg(candidates_.size())
+            .arg(candidates_.size() == 1U ? QStringLiteral("version") : QStringLiteral("versions"))
+            .arg(discogs == 0U ? QString{} : QStringLiteral(" · %1 from Discogs").arg(discogs))
+            .arg(failed.isEmpty() ? QString{} : QStringLiteral(" · ") + failed);
+    suggested_ = 0;
+}
+
+void IdentifySession::lookUp(const musicbrainz::ReleaseSource source, const std::string& release_id,
+                             const bool tagged) {
     if (busy_ || !service_.fetch) {
         return;
     }
-    const auto url = musicbrainz::build_release_lookup_url(release_id);
+    const auto url = source == musicbrainz::ReleaseSource::discogs
+                         ? musicbrainz::build_discogs_release_url(release_id)
+                         : musicbrainz::build_release_lookup_url(release_id);
     if (!url) {
         return;
     }
@@ -826,17 +929,25 @@ void IdentifySession::lookUp(const std::string& release_id, const bool tagged) {
     suggested_ = -1;
     setBusy(true);
     const QPointer self{this};
-    service_.fetch(QString::fromStdString(*url), [self, tagged](core::Result<QByteArray> body) {
-        if (!self.isNull()) {
-            self->finishReleaseLookup(std::move(body), tagged);
-        }
-    });
+    service_.fetch(QString::fromStdString(*url),
+                   [self, source, tagged](core::Result<QByteArray> body) {
+                       if (!self.isNull()) {
+                           self->finishReleaseLookup(source, std::move(body), tagged);
+                       }
+                   });
 }
 
-void IdentifySession::finishReleaseLookup(core::Result<QByteArray> body, const bool tagged) {
-    auto release = body ? musicbrainz::parse_release_lookup(std::string_view{
-                              body->constData(), static_cast<std::size_t>(body->size())})
-                        : core::Result<musicbrainz::Release>{std::unexpected(body.error())};
+void IdentifySession::finishReleaseLookup(const musicbrainz::ReleaseSource source,
+                                          core::Result<QByteArray> body, const bool tagged) {
+    const auto discogs = source == musicbrainz::ReleaseSource::discogs;
+    auto release = core::Result<musicbrainz::Release>{std::unexpected(core::Error{})};
+    if (!body) {
+        release = std::unexpected(std::move(body.error()));
+    } else {
+        const std::string_view answer{body->constData(), static_cast<std::size_t>(body->size())};
+        release = discogs ? musicbrainz::parse_discogs_release(answer)
+                          : musicbrainz::parse_release_lookup(answer);
+    }
     if (!release) {
         status_ = tagged ? QStringLiteral("The release the files are tagged with could not be "
                                           "looked up · %1 — search for it instead")
@@ -848,12 +959,14 @@ void IdentifySession::finishReleaseLookup(core::Result<QByteArray> body, const b
     }
     row_candidates_.push_back(0U);
     rows_.push_back(Candidate{
-        .match = tagged ? QStringLiteral("Tagged release") : QStringLiteral("Release named"),
+        .match = (tagged ? QStringLiteral("Tagged release") : QStringLiteral("Release named")) +
+                 (discogs ? QStringLiteral(" · Discogs") : QString{}),
         .match_tool_tip = release->track_count == local_tracks_.size()
                               ? QStringLiteral("Same track count")
                               : QStringLiteral("Different track count"),
         .album = text(release->title),
-        .album_tool_tip = text(release->id),
+        .album_tool_tip = discogs ? QStringLiteral("Discogs release %1").arg(text(release->id))
+                                  : text(release->id),
         .artist = credit_text(release->artist_credits),
         .tracks = QString::number(release->track_count),
         .media = media_text(*release),
@@ -862,14 +975,26 @@ void IdentifySession::finishReleaseLookup(core::Result<QByteArray> body, const b
     const auto group = release->release_group_id;
     candidates_.push_back(std::move(*release));
     suggested_ = 0;
+    // A Discogs release of no master has no other versions.
+    if (group.empty()) {
+        status_ = tagged ? QStringLiteral("The release the files are tagged with — search to "
+                                          "look for another")
+                         : QStringLiteral("The release named");
+        setBusy(false);
+        return;
+    }
     // The album's other versions beneath it, to change to.
-    lookUpGroup(group, tagged ? Named::tagged : Named::release);
+    lookUpGroup(source, group, tagged ? Named::tagged : Named::release);
 }
 
-void IdentifySession::lookUpGroup(const std::string& group_id, const Named named) {
-    const auto url = musicbrainz::build_release_group_releases_url(group_id);
+void IdentifySession::lookUpGroup(const musicbrainz::ReleaseSource source,
+                                  const std::string& group_id, const Named named) {
+    const auto url = source == musicbrainz::ReleaseSource::discogs
+                         ? musicbrainz::build_discogs_master_versions_url(group_id)
+                         : musicbrainz::build_release_group_releases_url(group_id);
     if (!url) {
-        finishGroup(std::unexpected(core::Error{.code = core::ErrorCode::invalid_argument,
+        finishGroup(source,
+                    std::unexpected(core::Error{.code = core::ErrorCode::invalid_argument,
                                                 .message = "the release names no album",
                                                 .context = {}}),
                     named);
@@ -888,20 +1013,28 @@ void IdentifySession::lookUpGroup(const std::string& group_id, const Named named
         emit changed();
     }
     const QPointer self{this};
-    service_.fetch(QString::fromStdString(*url), [self, named](core::Result<QByteArray> body) {
-        if (!self.isNull()) {
-            self->finishGroup(std::move(body), named);
-        }
-    });
+    service_.fetch(QString::fromStdString(*url),
+                   [self, source, named](core::Result<QByteArray> body) {
+                       if (!self.isNull()) {
+                           self->finishGroup(source, std::move(body), named);
+                       }
+                   });
 }
 
-void IdentifySession::finishGroup(core::Result<QByteArray> body, const Named named) {
-    auto listed =
-        body ? musicbrainz::parse_release_search(
-                   std::string_view{body->constData(), static_cast<std::size_t>(body->size())},
-                   musicbrainz::WebServiceLimits{.releases =
-                                                     musicbrainz::release_group_releases_limit})
-             : core::Result<musicbrainz::ReleaseSearchResult>{std::unexpected(body.error())};
+void IdentifySession::finishGroup(const musicbrainz::ReleaseSource source,
+                                  core::Result<QByteArray> body, const Named named) {
+    const auto discogs = source == musicbrainz::ReleaseSource::discogs;
+    const auto limit = discogs ? musicbrainz::discogs_master_versions_limit
+                               : musicbrainz::release_group_releases_limit;
+    auto listed = core::Result<musicbrainz::ReleaseSearchResult>{std::unexpected(core::Error{})};
+    if (!body) {
+        listed = std::unexpected(std::move(body.error()));
+    } else {
+        const std::string_view answer{body->constData(), static_cast<std::size_t>(body->size())};
+        const musicbrainz::WebServiceLimits limits{.releases = limit};
+        listed = discogs ? musicbrainz::parse_discogs_master_versions(answer, limits)
+                         : musicbrainz::parse_release_search(answer, limits);
+    }
     const auto first = named == Named::tagged
                            ? QStringLiteral("The release the files are tagged with")
                            : QStringLiteral("The release named");
@@ -931,35 +1064,44 @@ void IdentifySession::finishGroup(core::Result<QByteArray> body, const Named nam
     });
     const auto others = releases.size();
     for (auto& release : releases) {
+        // A Discogs master lists its versions without their artists: the
+        // release named's.
+        if (release.artist_credits.empty() && !candidates_.empty()) {
+            release.artist_credits = candidates_.front().artist_credits;
+        }
         row_candidates_.push_back(candidates_.size());
         rows_.push_back(Candidate{
-            .match = release.track_count == local_tracks_.size()
-                         ? QStringLiteral("Same album · same track count")
-                         : QStringLiteral("Same album"),
+            .match = (release.track_count == local_tracks_.size()
+                          ? QStringLiteral("Same album · same track count")
+                          : QStringLiteral("Same album")) +
+                     (discogs ? QStringLiteral(" · Discogs") : QString{}),
             .match_tool_tip = QStringLiteral("Another version of the album"),
             .album = text(release.title),
-            .album_tool_tip = text(release.id),
+            .album_tool_tip = discogs ? QStringLiteral("Discogs release %1").arg(text(release.id))
+                                      : text(release.id),
             .artist = credit_text(release.artist_credits),
-            .tracks = QString::number(release.track_count),
+            .tracks = release.track_count == 0U ? QStringLiteral("—")
+                                                : QString::number(release.track_count),
             .media = media_text(release),
             .version = version_text(release),
         });
         candidates_.push_back(std::move(release));
     }
     // Where there are more than one page lists.
-    const auto more = listed->total_count > musicbrainz::release_group_releases_limit
-                          ? QStringLiteral(" · the first %1 of %2")
-                                .arg(musicbrainz::release_group_releases_limit)
-                                .arg(listed->total_count)
-                          : QString{};
+    const auto more =
+        listed->total_count > limit
+            ? QStringLiteral(" · the first %1 of %2").arg(limit).arg(listed->total_count)
+            : QString{};
     if (named == Named::group) {
         suggested_ = candidates_.empty() ? -1 : 0;
-        status_ = candidates_.empty() ? QStringLiteral("The album has no versions on MusicBrainz")
-                                      : QStringLiteral("%1 %2 of the album%3")
-                                            .arg(others)
-                                            .arg(others == 1U ? QStringLiteral("version")
-                                                              : QStringLiteral("versions"))
-                                            .arg(more);
+        status_ =
+            candidates_.empty()
+                ? QStringLiteral("The album has no versions on %1")
+                      .arg(discogs ? QStringLiteral("Discogs") : QStringLiteral("MusicBrainz"))
+                : QStringLiteral("%1 %2 of the album%3")
+                      .arg(others)
+                      .arg(others == 1U ? QStringLiteral("version") : QStringLiteral("versions"))
+                      .arg(more);
     } else {
         status_ =
             QStringLiteral("%1, and %2 other %3 of its album%4%5")
@@ -992,7 +1134,10 @@ void IdentifySession::use(const int row) {
         opened(candidates_[index]);
         return;
     }
-    const auto url = musicbrainz::build_release_lookup_url(candidates_[index].id);
+    const auto source = candidates_[index].source;
+    const auto url = source == musicbrainz::ReleaseSource::discogs
+                         ? musicbrainz::build_discogs_release_url(candidates_[index].id)
+                         : musicbrainz::build_release_lookup_url(candidates_[index].id);
     if (!url) {
         status_ = QStringLiteral("This candidate has no usable release id");
         emit changed();
@@ -1001,18 +1146,24 @@ void IdentifySession::use(const int row) {
     status_ = QStringLiteral("Loading the release's track list…");
     setBusy(true);
     const QPointer self{this};
-    service_.fetch(QString::fromStdString(*url), [self](core::Result<QByteArray> body) {
+    service_.fetch(QString::fromStdString(*url), [self, source](core::Result<QByteArray> body) {
         if (!self.isNull()) {
-            self->finishLookup(std::move(body));
+            self->finishLookup(source, std::move(body));
         }
     });
 }
 
-void IdentifySession::finishLookup(core::Result<QByteArray> body) {
+void IdentifySession::finishLookup(const musicbrainz::ReleaseSource source,
+                                   core::Result<QByteArray> body) {
     busy_ = false;
-    opened(body ? musicbrainz::parse_release_lookup(
-                      std::string_view{body->constData(), static_cast<std::size_t>(body->size())})
-                : core::Result<musicbrainz::Release>{std::unexpected(body.error())});
+    if (!body) {
+        opened(std::unexpected(std::move(body.error())));
+        return;
+    }
+    const std::string_view answer{body->constData(), static_cast<std::size_t>(body->size())};
+    opened(source == musicbrainz::ReleaseSource::discogs
+               ? musicbrainz::parse_discogs_release(answer)
+               : musicbrainz::parse_release_lookup(answer));
 }
 
 void IdentifySession::opened(core::Result<musicbrainz::Release> release) {

@@ -3,6 +3,7 @@
 #include "test_checks.hpp"
 #include "trackknife/musicbrainz/acoustid.hpp"
 #include "trackknife/musicbrainz/bandcamp.hpp"
+#include "trackknife/musicbrainz/discogs.hpp"
 #include "trackknife/musicbrainz/web_service.hpp"
 
 #include <iostream>
@@ -421,6 +422,228 @@ void bandcampPagesAndCoversAreRecognised() {
     CHECK(!build_release_group_links_url("not an id"));
 }
 
+// ADR-0360: Discogs' links, search, masters and releases, as the one model.
+void discogsUrlsAndLinksAreStrict() {
+    CHECK(is_discogs_api("https://api.discogs.com/releases/1"));
+    CHECK(!is_discogs_api("https://api.discogs.com.evil.example/releases/1"));
+    CHECK(!is_discogs_api("http://api.discogs.com/releases/1"));
+    CHECK(is_discogs_image("https://i.discogs.com/x/1.jpg"));
+    CHECK(!is_discogs_image("https://i.discogs.com.evil.example/1.jpg"));
+
+    const auto search = build_discogs_search_url(ReleaseSearchQuery{
+        .artist = "AC/DC", .release = "Back in Black", .track_count = {}, .limit = 10U});
+    CHECK(search.value_or("") == "https://api.discogs.com/database/search?type=release"
+                                 "&artist=AC%2FDC&release_title=Back%20in%20Black&per_page=10");
+    CHECK(!build_discogs_search_url(ReleaseSearchQuery{}));
+    CHECK(build_discogs_release_url("249504").value_or("") ==
+          "https://api.discogs.com/releases/249504");
+    CHECK(!build_discogs_release_url("../users"));
+    CHECK(!build_discogs_release_url("0"));
+    CHECK(build_discogs_master_versions_url("96559").value_or("") ==
+          "https://api.discogs.com/masters/96559/versions?per_page=100");
+
+    CHECK(discogs_release_id_in("https://www.discogs.com/release/249504-Rick-Astley-Never") ==
+          std::optional<std::string>{"249504"});
+    CHECK(discogs_release_id_in("discogs.com/de/release/249504") ==
+          std::optional<std::string>{"249504"});
+    CHECK(discogs_release_id_in(" [r249504] ") == std::optional<std::string>{"249504"});
+    CHECK(discogs_release_id_in("https://www.discogs.com/release/249504?ev=rr") ==
+          std::optional<std::string>{"249504"});
+    CHECK(!discogs_release_id_in("https://www.discogs.com/master/96559"));
+    CHECK(!discogs_release_id_in("https://www.discogs.com.evil.example/release/1"));
+    CHECK(!discogs_release_id_in("249504"));
+    CHECK(discogs_master_id_in("https://www.discogs.com/master/96559-Rick-Astley") ==
+          std::optional<std::string>{"96559"});
+    CHECK(discogs_master_id_in("[m96559]") == std::optional<std::string>{"96559"});
+    CHECK(!discogs_master_id_in("[r96559]"));
+
+    CHECK(discogs_artist_name("Alpha (2)") == "Alpha");
+    CHECK(discogs_artist_name("Various") == "Various Artists");
+    CHECK(discogs_artist_name("Blink-182") == "Blink-182");
+}
+
+void discogsSearchAndVersionsAreListed() {
+    const auto found = parse_discogs_search(R"json({
+        "pagination": {"items": 31},
+        "results": [
+          {"id": 11, "type": "release", "title": "Alpha (2) - Beta", "year": "2004",
+           "country": "UK", "format": ["Vinyl", "LP", "Album"], "format_quantity": 2,
+           "label": ["Warp Records", "Warp"], "catno": "WARP 1", "master_id": 7},
+          {"id": 12, "type": "release", "title": "No artist split", "year": "",
+           "format": ["CD"], "label": [], "catno": "none", "master_id": 0},
+          {"id": "x", "type": "release", "title": "Alpha - Broken"}
+        ]})json");
+    CHECK(found.has_value());
+    CHECK(found && found->total_count == 31U && found->releases.size() == 2U);
+    if (found && found->releases.size() == 2U) {
+        const auto& first = found->releases[0];
+        CHECK(first.source == ReleaseSource::discogs);
+        CHECK(first.id == "11" && first.title == "Beta" && first.date == "2004");
+        CHECK(first.artist_credits.size() == 1U && first.artist_credits[0].name == "Alpha");
+        CHECK(first.label == "Warp Records" && first.catalog_number == "WARP 1");
+        CHECK(first.release_group_id == "7" && first.country == "UK");
+        CHECK(first.media.size() == 2U && first.media[0].format == "Vinyl");
+        CHECK(first.track_count == 0U);
+        const auto& second = found->releases[1];
+        CHECK(second.title == "No artist split" && second.artist_credits.empty());
+        CHECK(second.catalog_number.empty() && second.release_group_id.empty());
+    }
+    CHECK(!parse_discogs_search("not json"));
+
+    const auto versions = parse_discogs_master_versions(R"json({
+        "pagination": {"items": 2},
+        "versions": [
+          {"id": 21, "title": "Beta", "format": "File, FLAC, Album", "label": "Self (3)",
+           "country": "Germany", "released": "2004-03-00", "catno": "none"},
+          {"id": 22, "title": "Beta", "format": "12\", 33 ⅓ RPM, Album",
+           "major_formats": ["Vinyl"], "label": "Warp",
+           "country": "UK", "released": "2004-00-00", "catno": "WARPCD1"}
+        ]})json");
+    CHECK(versions && versions->releases.size() == 2U);
+    if (versions && versions->releases.size() == 2U) {
+        CHECK(versions->releases[0].media.size() == 1U &&
+              versions->releases[0].media[0].format == "Digital Media");
+        CHECK(versions->releases[0].date == "2004-03");
+        CHECK(versions->releases[0].label == "Self");
+        CHECK(versions->releases[0].catalog_number.empty());
+        CHECK(versions->releases[1].date == "2004");
+        CHECK(versions->releases[1].media.size() == 1U &&
+              versions->releases[1].media[0].format == "Vinyl");
+    }
+}
+
+[[nodiscard]] std::string discogs_release(const std::string& formats, const std::string& tracks) {
+    return R"json({"id": 31, "title": "Gamma", "released": "1999-05-01", "country": "US",
+        "master_id": 9,
+        "artists": [{"name": "Alpha (2)", "anv": "", "join": "&", "id": 101},
+                    {"name": "Delta", "anv": "D.", "join": "", "id": 102}],
+        "labels": [{"name": "Label (4)", "catno": "LBL 1", "id": 5}],
+        "identifiers": [{"type": "Matrix / Runout", "value": "X"},
+                        {"type": "Barcode", "value": "5 021603 154212"}],
+        "formats": )json" +
+           formats + R"json(, "tracklist": )json" + tracks + "}";
+}
+
+void discogsReleasesSplitIntoDiscs() {
+    // Numbered, with a heading, an index track and a track of its own artist.
+    const auto plain = parse_discogs_release(
+        discogs_release(R"([{"name": "CD", "qty": "1", "descriptions": ["Album", "Compilation"]}])",
+                        R"json([
+          {"type_": "heading", "position": "", "title": "Part One"},
+          {"type_": "track", "position": "1", "title": "One", "duration": "4:05"},
+          {"type_": "index", "position": "", "title": "Suite",
+           "sub_tracks": [{"type_": "track", "position": "2.a", "title": "I", "duration": "1:00"},
+                          {"type_": "track", "position": "2.b", "title": "II", "duration": "2:00"}]},
+          {"type_": "track", "position": "3", "title": "Three", "duration": "",
+           "artists": [{"name": "Echo (5)", "anv": "", "join": "", "id": 103}]}
+        ])json"));
+    CHECK(plain.has_value());
+    if (plain) {
+        CHECK(plain->source == ReleaseSource::discogs && plain->id == "31");
+        CHECK(plain->title == "Gamma" && plain->date == "1999-05-01" && plain->country == "US");
+        CHECK(plain->artist_credits.size() == 2U);
+        if (plain->artist_credits.size() == 2U) {
+            CHECK(plain->artist_credits[0].name == "Alpha");
+            CHECK(plain->artist_credits[0].join_phrase == " & ");
+            CHECK(plain->artist_credits[0].artist_id == "101");
+            CHECK(plain->artist_credits[1].name == "D.");
+            CHECK(plain->artist_credits[1].join_phrase.empty());
+        }
+        CHECK(plain->label == "Label" && plain->catalog_number == "LBL 1");
+        CHECK(plain->barcode == "5021603154212");
+        CHECK(plain->release_group_id == "9");
+        CHECK(plain->release_group_primary_type == "Album");
+        CHECK(plain->release_group_secondary_types == std::vector<std::string>{"Compilation"});
+        CHECK(plain->media.size() == 1U && plain->track_count == 3U);
+        if (plain->media.size() == 1U && plain->media[0].tracks.size() == 3U) {
+            const auto& tracks = plain->media[0].tracks;
+            CHECK(plain->media[0].format == "CD" && plain->media[0].position == 1U);
+            CHECK(tracks[0].title == "One" && tracks[0].length_ms == 245'000);
+            CHECK(tracks[0].position == 1U && tracks[0].number == "1");
+            CHECK(tracks[1].title == "Suite" && tracks[1].length_ms == 180'000);
+            CHECK(tracks[1].position == 2U);
+            CHECK(tracks[2].length_ms == std::nullopt && tracks[2].position == 3U);
+            CHECK(tracks[2].artist_credits.size() == 1U &&
+                  tracks[2].artist_credits[0].name == "Echo");
+        }
+    }
+
+    // Discs named in the positions.
+    const auto discs = parse_discogs_release(
+        discogs_release(R"([{"name": "CD", "qty": "2"}, {"name": "DVD", "qty": "1"}])",
+                        R"json([
+          {"position": "1-1", "title": "A"}, {"position": "1-2", "title": "B"},
+          {"position": "CD2-1", "title": "C"}, {"position": "2.2", "title": "D"},
+          {"position": "3-1", "title": "E"}
+        ])json"));
+    CHECK(discs && discs->media.size() == 3U);
+    if (discs && discs->media.size() == 3U) {
+        CHECK(discs->media[0].tracks.size() == 2U && discs->media[1].tracks.size() == 2U);
+        CHECK(discs->media[1].position == 2U && discs->media[1].tracks[1].title == "D");
+        CHECK(discs->media[1].tracks[1].position == 2U);
+        CHECK(discs->media[1].format == "CD" && discs->media[2].format == "DVD");
+    }
+
+    // Sides of one record are one disc, numbered on, the side kept.
+    const auto record = parse_discogs_release(
+        discogs_release(R"([{"name": "Vinyl", "qty": "1", "descriptions": ["LP"]}])",
+                        R"json([
+          {"position": "A1", "title": "A"}, {"position": "A2", "title": "B"},
+          {"position": "B1", "title": "C"}, {"position": "B2", "title": "D"}
+        ])json"));
+    CHECK(record && record->media.size() == 1U);
+    if (record && record->media.size() == 1U && record->media[0].tracks.size() == 4U) {
+        CHECK(record->media[0].tracks[2].number == "B1");
+        CHECK(record->media[0].tracks[2].position == 3U);
+        CHECK(record->media[0].format == "Vinyl");
+    }
+
+    // Two records: a pair of sides each.
+    const auto double_record =
+        parse_discogs_release(discogs_release(R"([{"name": "Vinyl", "qty": "2"}])", R"json([
+          {"position": "A", "title": "A"}, {"position": "B", "title": "B"},
+          {"position": "C", "title": "C"}, {"position": "D1", "title": "D"},
+          {"position": "D2", "title": "E"}
+        ])json"));
+    CHECK(double_record && double_record->media.size() == 2U);
+    if (double_record && double_record->media.size() == 2U) {
+        CHECK(double_record->media[0].tracks.size() == 2U);
+        CHECK(double_record->media[1].tracks.size() == 3U);
+        CHECK(double_record->media[1].tracks[0].position == 1U);
+        CHECK(double_record->media[1].tracks[0].number == "C");
+    }
+
+    // Positions that say nothing are one disc, in order.
+    const auto loose =
+        parse_discogs_release(discogs_release(R"([{"name": "File", "qty": "1"}])", R"json([
+          {"position": "", "title": "A"}, {"position": "Video", "title": "B"}
+        ])json"));
+    CHECK(loose && loose->media.size() == 1U && loose->media[0].format == "Digital Media");
+    if (loose && loose->media.size() == 1U && loose->media[0].tracks.size() == 2U) {
+        CHECK(loose->media[0].tracks[0].number == "1");
+        CHECK(loose->media[0].tracks[1].position == 2U);
+    }
+
+    // A year alone, and no identity.
+    const auto year = parse_discogs_release(R"json({"id": 4, "title": "T", "released": "2001-00-00",
+        "tracklist": []})json");
+    CHECK(year && year->date == "2001" && year->media.empty());
+    CHECK(!parse_discogs_release(R"json({"title": "T"})json"));
+    CHECK(!parse_discogs_release(R"json({"id": 4})json"));
+
+    const auto images = parse_discogs_images(R"json({"images": [
+        {"type": "secondary", "uri": "https://i.discogs.com/b.jpg", "uri150": "https://i.discogs.com/b150.jpg"},
+        {"type": "primary", "uri": "https://i.discogs.com/a.jpg", "uri150": "https://i.discogs.com/a150.jpg"},
+        {"type": "primary", "uri": "https://evil.example/c.jpg"}]})json");
+    CHECK(images && images->images.size() == 2U);
+    if (images && images->images.size() == 2U) {
+        CHECK(!images->images[0].front && images->images[1].front);
+        CHECK(images->images[1].source == "Discogs");
+        CHECK(images->images[1].thumbnail_url == "https://i.discogs.com/a150.jpg");
+        CHECK(select_front_cover(*images) == std::optional<std::size_t>{1U});
+    }
+}
+
 } // namespace
 
 int main() {
@@ -435,6 +658,9 @@ int main() {
     coverArtParsingUpgradesAndSelectsTheFront();
     acoustidBodyAndParsingAreBounded();
     bandcampPagesAndCoversAreRecognised();
+    discogsUrlsAndLinksAreStrict();
+    discogsSearchAndVersionsAreListed();
+    discogsReleasesSplitIntoDiscs();
     if (failures != 0) {
         std::cerr << failures << " check(s) failed\n";
         return 1;
