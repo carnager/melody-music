@@ -33,7 +33,10 @@ it finds is shown, chosen and previewed like MusicBrainz's.
 - **CDs and digital releases only.** Files are tagged from those, and
   Discogs lists every pressing of a record and tape besides: a search and
   a master's versions list only releases on CD (CDr, SACD) or as files --
-  a page of fifty asked for, the first ten of those kept. A release of no
+  a page of fifty asked for, the first ten of those kept. Discogs matches
+  an artist's name loosely ("Prong" finds "3 Prong Outlet"): where any
+  release is by the artist searched for -- the name alike, case, accents,
+  punctuation and a leading "The" aside -- only those are kept. A release of no
   known format is kept; one named by its link or tagged is looked up
   whatever it is on.
   MusicBrainz stays first: its releases carry recording, work and artist

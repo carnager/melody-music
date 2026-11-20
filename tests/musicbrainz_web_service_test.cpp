@@ -530,6 +530,28 @@ void discogsSearchAndVersionsAreListed() {
         keep_cd_and_digital(kept, 1U);
         CHECK(kept.releases.size() == 1U && kept.releases[0].id == "21");
     }
+
+    // The artist searched for, not others whose names hold the word -- as
+    // long as Discogs has any of theirs.
+    const auto by = [](const char* id, const char* artist) {
+        Release release{};
+        release.source = ReleaseSource::discogs;
+        release.id = id;
+        release.artist_credits.push_back(
+            ArtistCredit{.name = artist, .join_phrase = {}, .artist_id = {}, .sort_name = {}});
+        return release;
+    };
+    ReleaseSearchResult loose{.total_count = 4U,
+                              .releases = {by("1", "3 Prong Outlet"), by("2", "The Prong"),
+                                           by("3", "Bob Prong"), by("4", "PRÖNG!")}};
+    keep_artist(loose, "Prong");
+    CHECK(loose.releases.size() == 2U && loose.releases[0].id == "2" &&
+          loose.releases[1].id == "4");
+    ReleaseSearchResult none{.total_count = 1U, .releases = {by("1", "3 Prong Outlet")}};
+    keep_artist(none, "Prong");
+    CHECK(none.releases.size() == 1U);
+    keep_artist(none, "");
+    CHECK(none.releases.size() == 1U);
 }
 
 [[nodiscard]] std::string discogs_release(const std::string& formats, const std::string& tracks) {
