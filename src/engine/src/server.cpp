@@ -789,9 +789,12 @@ void Server::serve(Connection& connection_ref) {
                     // earlier handshake -- so a client configured with a
                     // password is told it is in, not that the method is
                     // unknown.
-                    protocol::Response admitted{.id = request->id,
-                                                .result = protocol::Json{{"authenticated", true}},
-                                                .error = std::nullopt};
+                    protocol::Response admitted{
+                        .id = request->id,
+                        .result =
+                            std::optional<protocol::Json>{std::in_place,
+                                                          protocol::Json{{"authenticated", true}}},
+                        .error = std::nullopt};
                     connection->write_line(encode_answer(admitted));
                     continue;
                 }
@@ -802,9 +805,11 @@ void Server::serve(Connection& connection_ref) {
                     // read here: the agent waits for this answer before it
                     // says anything else.
                     finish_reading();
-                    protocol::Response accepted{.id = request->id,
-                                                .result = protocol::Json::object(),
-                                                .error = std::nullopt};
+                    protocol::Response accepted{
+                        .id = request->id,
+                        .result =
+                            std::optional<protocol::Json>{std::in_place, protocol::Json::object()},
+                        .error = std::nullopt};
                     accepted.result->emplace("accepted", true);
                     connection->write_line(encode_answer(accepted));
                     connection->hand_off();

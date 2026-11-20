@@ -85,7 +85,11 @@ Response Dispatcher::dispatch(const Request& request) const {
     if (!outcome) {
         return {.id = request.id, .result = {}, .error = to_protocol_error(outcome.error())};
     }
-    return {.id = request.id, .result = std::move(*outcome), .error = {}};
+    // In place: a Json converts to anything, an optional of itself too, and
+    // nlohmann-json 3.12.0-3 makes that ambiguous.
+    return {.id = request.id,
+            .result = std::optional<Json>{std::in_place, std::move(*outcome)},
+            .error = {}};
 }
 
 } // namespace trackknife::protocol
