@@ -91,7 +91,11 @@ Result<NoReplacePublishMethod> publish_no_replace_at(const int source_dir_fd,
 
 std::filesystem::path temporary_sibling(const std::filesystem::path& target,
                                         const std::string_view label) {
-    constexpr std::size_t longest_name = 255U;
+    // Short of the 255 bytes a file name may have: over SMB, macOS cannot
+    // rename to or from a name of 254 or 255 bytes ("File name too long"),
+    // though it makes one -- a temporary named to the limit is never
+    // published.
+    constexpr std::size_t longest_name = 240U;
     const auto suffix = "." + std::string{label} + "-" + StableId::random().to_string();
     auto name = target.filename().native();
     const auto room = longest_name - 1U - std::min(suffix.size(), longest_name - 1U);

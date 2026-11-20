@@ -33,8 +33,9 @@ enum class NoReplacePublishMethod : std::uint8_t {
 // A hidden sibling of `target` to write before renaming it into place:
 // ".NAME.LABEL-RANDOM" in the same folder. NAME is the target's, shortened
 // -- never inside a UTF-8 character -- only as far as needed for the whole
-// to stay within the 255 bytes a file name may have: a target's own name
-// can be that long, and a sibling named after all of it could not be made.
+// to stay within 240 bytes: a target's own name can be as long as the 255
+// bytes a file name may have, a sibling named after all of it could not be
+// made, and over SMB one of 254 or 255 bytes cannot be renamed.
 [[nodiscard]] std::filesystem::path temporary_sibling(const std::filesystem::path& target,
                                                       std::string_view label);
 
