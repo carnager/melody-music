@@ -12,7 +12,8 @@ license=(GPL-3.0-only)
 depends=(gcc-libs glibc libutf8proc sqlite)
 makedepends=(cmake git ninja nlohmann-json)
 optdepends=('python: melody-musiclist, the album page'
-            'openssh: melody-musiclist uploading it')
+            'openssh: melody-musiclist uploading it'
+            'dms-shell: melody-dms, the picker in its launcher, and the bar widget')
 # melody-musiclist comes with it now, built on melody-cli rather than MPD.
 provides=(melody-cli melody-musiclist)
 conflicts=(melody-cli melody-musiclist melody-musiclist-git)

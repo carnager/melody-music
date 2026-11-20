@@ -44,5 +44,9 @@ window open.
 - macOS gets a keyboard picker; bind `melody-pick --engine gemenon` (or
   `--server`) to a key with the system's or a launcher's shortcuts.
 - `melody-rofi` stays for those who prefer rofi.
+- On DankMaterialShell, `melody-dms` (2026-11-20) shows the same choice in
+  the shell's launcher through `dms dmenu`, its custom accept keys standing
+  for Shift+, Ctrl+ and Ctrl+Shift+Enter: a script on `melody-cli`, as
+  `melody-rofi` is, installed with it beside the bar widget.
 - On macOS this computer's engine usually runs while Melody does, so without
   options the picker searches it; name the engine that holds the library.

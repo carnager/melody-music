@@ -226,6 +226,19 @@ engine options (`--engine gemenon`, `--server HOST:PORT`, `--local`). Enter
 adds, Shift+Enter replaces and plays, Ctrl+Enter plays next,
 Ctrl+Shift+Enter adds to Up Next, Escape leaves. Bind it to a key.
 
+On DankMaterialShell, `melody-dms` (it comes with `melody-cli`) is the same
+picker in the shell's own launcher, through `dms dmenu`: `melody-dms` for
+albums, `melody-dms tracks` for tracks, `melody-cli`'s options after them,
+and the same keys. The list is kept between runs until the library
+changes, as `melody-rofi` keeps it. On niri:
+
+```kdl
+binds {
+    Mod+M { spawn "melody-dms" "--engine" "gemenon"; }
+    Mod+Shift+M { spawn "melody-dms" "tracks" "--engine" "gemenon"; }
+}
+```
+
 ## melody-musiclist
 
 Every album of an engine's library with its rating, as one sortable HTML

@@ -19,3 +19,9 @@ Then enable it under **Settings → Plugins** and add it to the bar. Left as
 it is, it follows whichever engine is playing, on this computer or on the
 network, and its buttons act on that one. **Engine** in its settings pins it
 to one: a name on the network or `HOST:PORT`.
+
+For picking an album or a track to play, `melody-dms` (installed with
+`melody-cli` too) opens the shell's launcher on the library: Enter adds,
+Shift+Enter plays, Ctrl+Enter plays next, Ctrl+Shift+Enter adds to Up Next.
+Bind `melody-dms` or `melody-dms tracks` to a key, with `--engine NAME` for
+a particular engine.
