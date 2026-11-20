@@ -876,7 +876,15 @@ void BenchMainWindowTest::MusicBrainz::identifyAsksDiscogsAfterMusicBrainz() {
                 }
                 if (url.startsWith(
                         QStringLiteral("https://api.discogs.com/database/search?type=release"))) {
-                    asked << QStringLiteral("discogs search");
+                    // Discogs knows no "The Band": nothing by that artist.
+                    if (url.contains(QStringLiteral("artist=The%20Band"))) {
+                        asked << QStringLiteral("discogs search by The Band");
+                        completion(QByteArray{R"({"pagination": {"items": 0}, "results": []})"});
+                        return;
+                    }
+                    asked << (url.contains(QStringLiteral("&artist="))
+                                  ? QStringLiteral("discogs search")
+                                  : QStringLiteral("discogs search by title"));
                     completion(QByteArray{discogs_search});
                     return;
                 }
@@ -938,6 +946,20 @@ void BenchMainWindowTest::MusicBrainz::identifyAsksDiscogsAfterMusicBrainz() {
     QVERIFY(!found(1).contains(QStringLiteral("S1V")));
     // Its track count is not known until it is previewed: none said.
     QVERIFY(!found(1).contains(QStringLiteral("tracks")));
+
+    // An artist Discogs knows by another name: asked again by the album
+    // alone, that artist's releases kept, not another's of the title.
+    auto* artist =
+        dialog->findChild<QLineEdit*>(QStringLiteral("bench-musicbrainz-identify-artist"));
+    QVERIFY(artist != nullptr);
+    artist->setText(QStringLiteral("The Band"));
+    album->setText(QStringLiteral("Gamma"));
+    QTest::mouseClick(search, Qt::LeftButton);
+    QTRY_VERIFY(asked.contains(QStringLiteral("discogs search by title")));
+    QTRY_VERIFY(search->isEnabled() && results->topLevelItemCount() == 2);
+    QVERIFY(asked.contains(QStringLiteral("discogs search by The Band")));
+    QVERIFY(found(1).contains(QStringLiteral("Discogs")));
+    QVERIFY(results->topLevelItem(1)->text(0).startsWith(QStringLiteral("Band — ")));
 
     // Its link typed: looked up on Discogs, with no master to list.
     album->setText(QStringLiteral("https://www.discogs.com/release/31-Band-Gamma"));

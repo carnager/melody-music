@@ -36,7 +36,10 @@ it finds is shown, chosen and previewed like MusicBrainz's.
   a page of fifty asked for, the first ten of those kept. Discogs matches
   an artist's name loosely ("Prong" finds "3 Prong Outlet"): where any
   release is by the artist searched for -- the name alike, case, accents,
-  punctuation and a leading "The" aside -- only those are kept. A release of no
+  punctuation and a leading "The" aside -- only those are kept. And it
+  matches it too strictly: where an artist and an album find nothing
+  ("The Neon Droid" where Discogs has "Neon Droid"), Discogs is asked
+  again by the album alone, and only that artist's releases kept. A release of no
   known format is kept; one named by its link or tagged is looked up
   whatever it is on.
   MusicBrainz stays first: its releases carry recording, work and artist

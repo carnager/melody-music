@@ -223,8 +223,11 @@ class IdentifySession final : public QObject {
     void loadScanCandidate(std::size_t rank);
     void finishSearch(core::Result<QByteArray> body);
     // ADR-0360: Discogs asked after MusicBrainz, its releases listed after.
-    void searchDiscogs();
-    void finishDiscogsSearch(core::Result<QByteArray> body);
+    // `by_title`: by the album's title alone, the artist's kept -- asked
+    // again so where Discogs knows the artist by another name ("The Neon
+    // Droid" for "Neon Droid") and found nothing.
+    void searchDiscogs(bool by_title = false);
+    void finishDiscogsSearch(core::Result<QByteArray> body, bool by_title);
     // What the search said once every source has answered.
     void sayFound();
     void finishLookup(musicbrainz::ReleaseSource source, core::Result<QByteArray> body);

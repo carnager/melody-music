@@ -66,8 +66,8 @@ void keep_cd_and_digital(ReleaseSearchResult& result, std::size_t at_most);
 // Discogs' search matches an artist's name loosely ("Prong" finds "3 Prong
 // Outlet"): where any release is by the artist searched for -- its name
 // alike, case, accents, punctuation and a leading "The" aside -- only those
-// are kept. Where none is, all are.
-void keep_artist(ReleaseSearchResult& result, std::string_view artist);
+// are kept. Where none is, all are -- or, `strictly`, none.
+void keep_artist(ReleaseSearchResult& result, std::string_view artist, bool strictly = false);
 
 // An artist's name as Discogs gives it, as it is tagged: without the
 // " (N)" telling artists of one name apart; "Various" is "Various Artists".

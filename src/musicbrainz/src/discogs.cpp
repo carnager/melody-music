@@ -531,7 +531,7 @@ namespace {
 
 } // namespace
 
-void keep_artist(ReleaseSearchResult& result, const std::string_view artist) {
+void keep_artist(ReleaseSearchResult& result, const std::string_view artist, const bool strictly) {
     const auto wanted = compared_name(artist);
     if (wanted.isEmpty()) {
         return;
@@ -543,7 +543,7 @@ void keep_artist(ReleaseSearchResult& result, const std::string_view artist) {
         }
         return compared_name(credited) == wanted;
     };
-    if (std::ranges::any_of(result.releases, by)) {
+    if (strictly || std::ranges::any_of(result.releases, by)) {
         std::erase_if(result.releases, [&by](const Release& release) { return !by(release); });
     }
 }

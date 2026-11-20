@@ -552,6 +552,9 @@ void discogsSearchAndVersionsAreListed() {
     CHECK(none.releases.size() == 1U);
     keep_artist(none, "");
     CHECK(none.releases.size() == 1U);
+    // Strictly: none, where none is theirs.
+    keep_artist(none, "Prong", true);
+    CHECK(none.releases.empty());
 }
 
 [[nodiscard]] std::string discogs_release(const std::string& formats, const std::string& tracks) {
