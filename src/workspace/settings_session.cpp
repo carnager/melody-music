@@ -116,6 +116,7 @@ SettingsSession::SettingsSession(QObject* parent) : QObject(parent) {
     read(QLatin1String(SettingsKeys::artwork_max_folder_edge_key),
          SettingsKeys::artwork_default_max_edge);
     read(QLatin1String(SettingsKeys::acoustid_client_key), QString{});
+    read(QLatin1String(SettingsKeys::discogs_token_key), QString{});
 
     // ADR-0234: engines on other machines, each connected at once beside
     // this computer's. One to fill in when there are none.
@@ -432,9 +433,9 @@ std::optional<SettingsSession::Page> SettingsSession::save() {
         }
         settings.setValue(entry.key(), entry.value());
     }
-    for (const auto* key :
-         {SettingsKeys::acoustid_client_key, SettingsKeys::engine_listen_key,
-          SettingsKeys::engine_music_root_key, SettingsKeys::artwork_folder_image_name_key}) {
+    for (const auto* key : {SettingsKeys::acoustid_client_key, SettingsKeys::discogs_token_key,
+                            SettingsKeys::engine_listen_key, SettingsKeys::engine_music_root_key,
+                            SettingsKeys::artwork_folder_image_name_key}) {
         settings.setValue(QLatin1String(key), trimmed(QLatin1String(key)));
     }
     // ADR-0234: the engines elsewhere, those with an address.

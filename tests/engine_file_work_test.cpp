@@ -1825,6 +1825,9 @@ void a_client_does_file_work_through_the_engine(const std::filesystem::path& dir
     require(!remote.fetch("https://example.org/", {}), "a URL elsewhere is refused");
     require(remote.set_acoustid_key("handed-over").has_value() && services.has_acoustid_key(),
             "the AcoustID key is handed to the engine");
+    // ADR-0360: and the Discogs token, on its own.
+    require(remote.set_discogs_token("handed-over").has_value() && services.has_discogs_token(),
+            "the Discogs token is handed to the engine");
     // Artwork: what a file holds, an image handed over, a plan built from the
     // engine's reading and written by it.
     {
@@ -1997,11 +2000,16 @@ void the_engine_makes_the_taggers_lookups(const std::filesystem::path& parent) {
     require(engine::MetadataServices::fetchable("https://band.bandcamp.com/album/beta") &&
                 engine::MetadataServices::fetchable("https://f4.bcbits.com/img/a42_10.jpg"),
             "and Bandcamp's album pages and covers (ADR-0326)");
+    require(engine::MetadataServices::fetchable("https://api.discogs.com/releases/1") &&
+                engine::MetadataServices::fetchable("https://i.discogs.com/abc/rs:fit/1.jpg"),
+            "and Discogs' interface and images (ADR-0360)");
     for (const auto* url :
          {"http://musicbrainz.org/ws/2/release/x", "https://example.org/", "file:///etc/passwd",
           "https://musicbrainz.org.evil.example/ws/2/", "https://coverartarchive.org.evil.example/",
           "https://band.bandcamp.com/merch", "https://bandcamp.com/search?q=x",
-          "https://band.bandcamp.com.evil.example/album/beta"}) {
+          "https://band.bandcamp.com.evil.example/album/beta", "https://www.discogs.com/release/1",
+          "http://api.discogs.com/releases/1", "https://api.discogs.com.evil.example/releases/1",
+          "https://i.discogs.com.evil.example/1.jpg"}) {
         require(!engine::MetadataServices::fetchable(url), url);
         require(!services.fetch(url, {}), "and fetch() refuses it too");
     }
@@ -2071,6 +2079,35 @@ void the_engine_makes_the_taggers_lookups(const std::filesystem::path& parent) {
             "readable by its owner only");
     require(services.set_acoustid_key("").has_value() && !services.has_acoustid_key(),
             "and forgotten when emptied");
+
+    // ADR-0360: so is the Discogs token; Discogs is not asked without one.
+    require(!services.has_discogs_token(), "no Discogs token to begin with");
+    const auto tokenless = services.fetch("https://api.discogs.com/releases/1", {});
+    require(!tokenless && tokenless.error().code == core::ErrorCode::unsupported &&
+                tokenless.error().message.find("Discogs token") != std::string::npos,
+            "Discogs without a token says what to set");
+    require(services.set_discogs_token("personal").has_value() && services.has_discogs_token(),
+            "a token is kept");
+    struct stat token_kept{};
+    require(::stat((directory / "discogs.token").c_str(), &token_kept) == 0 &&
+                (token_kept.st_mode & 0077) == 0,
+            "readable by its owner only");
+    require(!services.has_acoustid_key(), "apart from the AcoustID key");
+    {
+        // With one, a cached answer is served as MusicBrainz's are.
+        const std::string release = "https://api.discogs.com/releases/2";
+        auto cache = trackknife::persistence::SqliteMusicBrainzResponseCache::open(database);
+        require(cache.has_value() && cache
+                                         ->store(release, R"({"id":2})",
+                                                 static_cast<std::int64_t>(std::time(nullptr)),
+                                                 14LL * 24 * 60 * 60, 100U)
+                                         .has_value(),
+                "a Discogs answer cached");
+        const auto discogs_served = services.fetch(release, {});
+        require(discogs_served && *discogs_served == R"({"id":2})", "is served with a token");
+    }
+    require(services.set_discogs_token("").has_value() && !services.has_discogs_token(),
+            "and the token forgotten when emptied");
 
     // Its own files, fingerprinted here -- where fpcalc is installed.
     // Twelve seconds of changing tones: the fixtures are too short for

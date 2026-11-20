@@ -98,7 +98,13 @@ struct ReleaseMedium {
     friend bool operator==(const ReleaseMedium&, const ReleaseMedium&) = default;
 };
 
+// ADR-0360: where a release was found. A Discogs release fills the same
+// model -- its id the Discogs release's number, release_group_id its
+// master's -- so matching and pairing need not know.
+enum class ReleaseSource : std::uint8_t { musicbrainz, discogs };
+
 struct Release {
+    ReleaseSource source{ReleaseSource::musicbrainz};
     std::string id;
     std::string title;
     std::string status;

@@ -156,6 +156,11 @@ class TrackMatchSession final : public QObject {
 // searched for -- typed where the search is, or the one the files are
 // tagged with, looked up by start() -- with its album's other versions
 // beneath it; a release group's link lists them all.
+//
+// ADR-0360: where the service has a Discogs token, a search asks Discogs
+// after MusicBrainz and lists its releases after MusicBrainz's; a Discogs
+// release's link or [rN] -- typed, or tagged -- is looked up there, its
+// master's versions beneath it, and a master's link lists them.
 class IdentifySession final : public QObject {
     Q_OBJECT
 
@@ -217,17 +222,23 @@ class IdentifySession final : public QObject {
     void finishScan();
     void loadScanCandidate(std::size_t rank);
     void finishSearch(core::Result<QByteArray> body);
-    void finishLookup(core::Result<QByteArray> body);
+    // ADR-0360: Discogs asked after MusicBrainz, its releases listed after.
+    void searchDiscogs();
+    void finishDiscogsSearch(core::Result<QByteArray> body);
+    // What the search said once every source has answered.
+    void sayFound();
+    void finishLookup(musicbrainz::ReleaseSource source, core::Result<QByteArray> body);
     // The release a row is, with its tracks: its matching opened.
     void opened(core::Result<musicbrainz::Release> release);
     // What named the release or album looked up.
     enum class Named : std::uint8_t { tagged, release, group };
-    void lookUp(const std::string& release_id, bool tagged);
-    void finishReleaseLookup(core::Result<QByteArray> body, bool tagged);
-    // A release group's releases: every version of the album, after the
-    // release named where one was.
-    void lookUpGroup(const std::string& group_id, Named named);
-    void finishGroup(core::Result<QByteArray> body, Named named);
+    void lookUp(musicbrainz::ReleaseSource source, const std::string& release_id, bool tagged);
+    void finishReleaseLookup(musicbrainz::ReleaseSource source, core::Result<QByteArray> body,
+                             bool tagged);
+    // A release group's releases -- or a Discogs master's versions: every
+    // version of the album, after the release named where one was.
+    void lookUpGroup(musicbrainz::ReleaseSource source, const std::string& group_id, Named named);
+    void finishGroup(musicbrainz::ReleaseSource source, core::Result<QByteArray> body, Named named);
 
     MusicBrainzLookupService service_;
     std::vector<musicbrainz::LocalTrackDescriptor> local_tracks_;
@@ -236,6 +247,12 @@ class IdentifySession final : public QObject {
     QString initial_artist_;
     QString initial_release_;
     QString tagged_release_;
+    // The search made, for Discogs after MusicBrainz, and what MusicBrainz
+    // said where it failed.
+    QString searched_artist_;
+    QString searched_release_;
+    QString musicbrainz_failure_;
+    QString discogs_failure_;
     std::vector<musicbrainz::Release> candidates_;
     // Parallel to rows_: the candidate each row is.
     std::vector<std::size_t> row_candidates_;

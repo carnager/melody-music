@@ -7,6 +7,7 @@ they supersede, replace, retire or amend it.
 
 | ADR | Decision | Status | Changed by |
 | --- | --- | --- | --- |
+| 0360 | [Discogs as a second source for Identify](0360-discogs-as-a-second-source.md) | Accepted, 2026-11-20 |  |
 | 0359 | [This computer's engine, like any other](0359-this-computers-engine-like-any-other.md) | Accepted, 2026-11-18 |  |
 | 0358 | [The engine reads an imported playlist](0358-the-engine-reads-an-imported-playlist.md) | Accepted, 2026-11-18 |  |
 | 0357 | [One ReplayGain round, in the engine](0357-one-replaygain-round-in-the-engine.md) | Accepted, 2026-11-18 |  |

@@ -4,12 +4,14 @@
 
 #include "bench/artwork_fitting.hpp"
 #include "bench/post_back.hpp"
+#include "bench/settings_keys.hpp"
 
 #include "bench/artwork_fitting.hpp"
 
 #include <QFile>
 #include <QMetaObject>
 #include <QPointer>
+#include <QSettings>
 #include <QtConcurrent/QtConcurrentRun>
 
 #include <map>
@@ -183,6 +185,11 @@ MusicBrainzLookupService engineLookupService(std::shared_ptr<engine::RemoteFileW
                     },
                     std::move(completion));
             },
+        .discogs = !QSettings{}
+                        .value(QLatin1String(SettingsKeys::discogs_token_key))
+                        .toString()
+                        .trimmed()
+                        .isEmpty(),
     };
 }
 

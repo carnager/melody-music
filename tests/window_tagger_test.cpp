@@ -1082,6 +1082,10 @@ void BenchMainWindowTest::Tagger::metadataServiceSettingsAndCompactPages() {
 
     QCOMPARE(key->echoMode(), QLineEdit::Password);
     key->setText(QStringLiteral("  test-client-key  "));
+    // ADR-0360: and a Discogs token, masked the same way.
+    auto* token = dialog->findChild<QLineEdit*>(QStringLiteral("bench-settings-discogs-token"));
+    QVERIFY(token != nullptr && token->echoMode() == QLineEdit::Password);
+    token->setText(QStringLiteral(" discogs-token "));
     reveal->setChecked(true);
     QCOMPARE(key->echoMode(), QLineEdit::Normal);
     reveal->setChecked(false);
@@ -1128,6 +1132,8 @@ void BenchMainWindowTest::Tagger::metadataServiceSettingsAndCompactPages() {
     QCOMPARE(loadRemoteEngines().front().address, elsewhere);
     QCOMPARE(QSettings{}.value(QLatin1String(SettingsDialog::acoustid_client_key)).toString(),
              QStringLiteral("test-client-key"));
+    QCOMPARE(QSettings{}.value(QLatin1String(SettingsDialog::discogs_token_key)).toString(),
+             QStringLiteral("discogs-token"));
     action->trigger();
     dialog = window.findChild<SettingsDialog*>();
     key = dialog->findChild<QLineEdit*>(QStringLiteral("bench-settings-acoustid-key"));

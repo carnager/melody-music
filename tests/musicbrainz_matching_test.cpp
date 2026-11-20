@@ -46,6 +46,7 @@ using namespace trackknife::musicbrainz;
 
 [[nodiscard]] Release two_disc_release() {
     Release release{
+        .source = ReleaseSource::musicbrainz,
         .id = "11111111-2222-3333-4444-555555555555",
         .title = "Alpha",
         .status = "Official",
@@ -480,6 +481,45 @@ void selectionsGroupIntoAlbums() {
           !is_disc_folder("CD 2 bonus") && !is_disc_folder("2"));
 }
 
+// ADR-0360: a Discogs release proposes its own ids, never MusicBrainz's.
+void discogsReleasesProposeTheirOwnIds() {
+    auto release = two_disc_release();
+    release.source = ReleaseSource::discogs;
+    release.id = "31";
+    release.release_group_id = "9";
+    const std::vector<LocalTrackDescriptor> locals{
+        LocalTrackDescriptor{.title = "One",
+                             .artist = "Band",
+                             .album = "Alpha",
+                             .track_number = 1U,
+                             .disc_number = 1U,
+                             .duration_ms = 61'000},
+    };
+    const auto alignment = align_release_tracks(locals, release);
+    const std::vector<std::size_t> items{0U};
+    const auto proposals = release_metadata_proposals(release, alignment, items);
+    CHECK(proposals.has_value());
+    if (!proposals || proposals->items.empty()) {
+        return;
+    }
+    CHECK(proposals->provider_name == "Discogs");
+    const auto& fields = proposals->items.front().fields;
+    const auto value = [&fields](const std::string_view canonical) -> std::string {
+        for (const auto& field : fields) {
+            if (field.canonical_field == canonical) {
+                return field.values.front();
+            }
+        }
+        return {};
+    };
+    CHECK(value("discogsreleaseid") == "31");
+    CHECK(value("discogsmasterid") == "9");
+    CHECK(value("title") == "One");
+    for (const auto& field : fields) {
+        CHECK(!field.canonical_field.starts_with("musicbrainz"));
+    }
+}
+
 } // namespace
 
 // ADR-0330: a pair coloured as Picard does: green when length and title
@@ -516,6 +556,7 @@ int main() {
     alignsByDiscAndTrackNumberPermutation();
     alignsByOrderAndThenGreedyTitles();
     proposalsCarryTagsIdentifiersAndVersion();
+    discogsReleasesProposeTheirOwnIds();
     lowConfidenceTracksReceiveNothing();
     clearMatchesNeedNoOne();
     selectionsGroupIntoAlbums();

@@ -133,7 +133,7 @@ release_metadata_proposals(const Release& release, const ReleaseAlignment& align
 
     const auto version = release_version_label(release);
     metadata::MetadataProposalSet proposals{
-        .provider_name = "MusicBrainz",
+        .provider_name = release.source == ReleaseSource::discogs ? "Discogs" : "MusicBrainz",
         .provider_detail = version,
         .items = {},
     };
@@ -196,7 +196,11 @@ release_metadata_proposals(const Release& release, const ReleaseAlignment& align
         propose(item, "MEDIA", {flattened.medium_format}, confidence, rationale);
         propose(item, "DISCSUBTITLE", {flattened.medium_title}, confidence, rationale);
         propose(item, "ISRC", track.isrcs, confidence, rationale);
-        if (options.include_identifiers) {
+        // ADR-0360: a Discogs release's own ids, never MusicBrainz's.
+        if (options.include_identifiers && release.source == ReleaseSource::discogs) {
+            propose(item, "DISCOGS_RELEASE_ID", {release.id}, confidence, rationale);
+            propose(item, "DISCOGS_MASTER_ID", {release.release_group_id}, confidence, rationale);
+        } else if (options.include_identifiers) {
             propose(item, "MUSICBRAINZ_TRACKID", {track.recording_id}, confidence, rationale);
             propose(item, "MUSICBRAINZ_RELEASETRACKID", {track.track_id}, confidence, rationale);
             propose(item, "MUSICBRAINZ_ALBUMID", {release.id}, confidence, rationale);

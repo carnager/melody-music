@@ -25,6 +25,7 @@ class BenchMainWindowTest::MusicBrainz final : public window_test::Fixture {
     void musicBrainzIdentifyStagesChosenVersion_data();
     void musicBrainzIdentifyStagesChosenVersion();
     void musicBrainzIdentifyLooksUpNamedReleases();
+    void identifyAsksDiscogsAfterMusicBrainz();
     void musicBrainzIdentifyStepsThroughAlbums();
     void identifyOpensTheTagEditorWithIdentify();
     void musicBrainzFingerprintScanRanksAndStages();
@@ -802,6 +803,173 @@ void BenchMainWindowTest::MusicBrainz::musicBrainzIdentifyLooksUpNamedReleases()
 // own search, versions and matching -- beside a list of them; those ahead
 // looked up meanwhile; each one's pairing chosen, or the album skipped, and
 // the next shown; Apply stages every album chosen.
+// ADR-0360: with a Discogs token, Identify asks Discogs after MusicBrainz and
+// lists its releases after MusicBrainz's; a Discogs release previewed is
+// loaded from Discogs and stages its own ids, never MusicBrainz's; its link
+// typed is looked up there.
+void BenchMainWindowTest::MusicBrainz::identifyAsksDiscogsAfterMusicBrainz() {
+    const auto field = [](std::string name, std::vector<std::string> values) {
+        return metadata::MetadataField{
+            .canonical_name = metadata::canonicalize_field_name(name),
+            .native_name = std::move(name),
+            .values = std::move(values),
+            .qualifier = {},
+            .provenance = metadata::FieldProvenance::embedded,
+        };
+    };
+    const auto make_source = [&field](const QString& title, const QString& track_number) {
+        return MetadataPropertiesSource{
+            .source =
+                metadata::StagedMetadataSource{
+                    .raw_path = "/music/" + title.toLower().toStdString() + ".flac",
+                    .source_revision = std::nullopt,
+                    .baseline =
+                        metadata::MetadataDocument{
+                            .fields = {field("ALBUM", {"Gamma"}), field("ARTIST", {"Band"}),
+                                       field("TITLE", {title.toStdString()}),
+                                       field("TRACKNUMBER", {track_number.toStdString()})},
+                            .unsupported_native_objects = {},
+                        },
+                },
+            .track_label = title,
+        };
+    };
+    const std::vector sources{make_source(QStringLiteral("One"), QStringLiteral("1")),
+                              make_source(QStringLiteral("Two"), QStringLiteral("2"))};
+    // MusicBrainz knows another album only.
+    static constexpr auto musicbrainz_search = R"json({
+      "count": 1, "offset": 0,
+      "releases": [{"id": "11111111-2222-3333-4444-555555555555", "score": 80,
+        "title": "Not Gamma", "track-count": 5,
+        "artist-credit": [{"name": "Band", "artist": {"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "name": "Band"}}],
+        "media": [{"format": "CD", "track-count": 5}]}]
+    })json";
+    static constexpr auto discogs_search = R"json({
+      "pagination": {"items": 1},
+      "results": [{"id": 31, "type": "release", "title": "Band - Gamma", "year": "2024",
+        "country": "Germany", "format": ["Vinyl", "LP", "Album"], "label": ["Self"],
+        "catno": "S1", "master_id": 0}]
+    })json";
+    static constexpr auto discogs_release = R"json({
+      "id": 31, "title": "Gamma", "released": "2024-02-00", "country": "Germany",
+      "artists": [{"name": "Band (3)", "anv": "", "join": "", "id": 7}],
+      "labels": [{"name": "Self", "catno": "S1"}],
+      "formats": [{"name": "Vinyl", "qty": "1", "descriptions": ["LP", "Album"]}],
+      "tracklist": [{"type_": "track", "position": "A", "title": "One", "duration": "1:01"},
+                    {"type_": "track", "position": "B", "title": "Two", "duration": "0:59"}]
+    })json";
+    QStringList asked;
+    const MusicBrainzLookupService service{
+        .fetch =
+            [&asked](const QString& url, std::function<void(core::Result<QByteArray>)> completion) {
+                if (url.startsWith(
+                        QStringLiteral("https://musicbrainz.org/ws/2/release/?query="))) {
+                    asked << QStringLiteral("musicbrainz search");
+                    completion(QByteArray{musicbrainz_search});
+                    return;
+                }
+                if (url.startsWith(
+                        QStringLiteral("https://api.discogs.com/database/search?type=release"))) {
+                    asked << QStringLiteral("discogs search");
+                    completion(QByteArray{discogs_search});
+                    return;
+                }
+                if (url == QStringLiteral("https://api.discogs.com/releases/31")) {
+                    asked << QStringLiteral("discogs release");
+                    completion(QByteArray{discogs_release});
+                    return;
+                }
+                asked << url;
+                completion(std::unexpected(core::Error{
+                    .code = core::ErrorCode::invalid_argument,
+                    .message = "unexpected url",
+                    .context = {},
+                }));
+            },
+        .fingerprint = {},
+        .acoustid_lookup = {},
+        .discogs = true,
+    };
+
+    auto* properties = new MetadataPropertiesDialog(
+        sources.size(),
+        [sources](const std::size_t index) -> std::optional<MetadataPropertiesSource> {
+            return index < sources.size() ? std::optional{sources[index]} : std::nullopt;
+        },
+        {}, {}, {}, {}, {}, {}, {}, nullptr, {}, service);
+    properties->show();
+    QTableView* files = nullptr;
+    QTRY_VERIFY((files = properties->fileListView()) != nullptr);
+    auto* grid_model = qobject_cast<MetadataGridModel*>(files->model());
+    auto* identify = properties->findChild<QPushButton*>(QStringLiteral("bench-metadata-identify"));
+    QVERIFY(grid_model != nullptr && identify != nullptr);
+    files->selectAll();
+    QTRY_VERIFY(identify->isEnabled());
+    QTest::mouseClick(identify, Qt::LeftButton);
+    QDialog* dialog = nullptr;
+    QTRY_VERIFY((dialog = properties->findChild<QDialog*>(
+                     QStringLiteral("bench-musicbrainz-identify"))) != nullptr);
+    auto* album =
+        dialog->findChild<QLineEdit*>(QStringLiteral("bench-musicbrainz-identify-release"));
+    auto* search =
+        dialog->findChild<QPushButton*>(QStringLiteral("bench-musicbrainz-identify-search"));
+    auto* results =
+        dialog->findChild<QTreeWidget*>(QStringLiteral("bench-musicbrainz-identify-results"));
+    auto* use = dialog->findChild<QPushButton*>(QStringLiteral("bench-musicbrainz-identify-apply"));
+    QVERIFY(album && search && results && use);
+    const auto found = [results](const int row) {
+        return results->topLevelItem(row)->data(0, Qt::UserRole + 1).toString();
+    };
+
+    // Searched by the files' tags: MusicBrainz, then Discogs, its release
+    // listed after.
+    QTRY_VERIFY(search->isEnabled() && results->topLevelItemCount() == 2);
+    QCOMPARE(asked.mid(0, 2),
+             (QStringList{QStringLiteral("musicbrainz search"), QStringLiteral("discogs search")}));
+    QVERIFY(!found(0).contains(QStringLiteral("Discogs")));
+    QVERIFY(found(1).contains(QStringLiteral("Discogs")));
+    QVERIFY(results->topLevelItem(1)->text(0).contains(QStringLiteral("Gamma")));
+
+    // Its link typed: looked up on Discogs, with no master to list.
+    album->setText(QStringLiteral("https://www.discogs.com/release/31-Band-Gamma"));
+    QTest::mouseClick(search, Qt::LeftButton);
+    QTRY_VERIFY(search->isEnabled() && results->topLevelItemCount() == 1);
+    QVERIFY(found(0).contains(QStringLiteral("Release named")));
+    QVERIFY(found(0).contains(QStringLiteral("Discogs")));
+    QVERIFY(asked.contains(QStringLiteral("discogs release")));
+
+    // Previewed and applied: Discogs' tags and ids, none of MusicBrainz's.
+    results->setCurrentItem(results->topLevelItem(0));
+    QTRY_VERIFY(
+        dialog->findChild<QLabel*>(QStringLiteral("bench-musicbrainz-identify-match-heading"))
+            ->text()
+            .contains(QStringLiteral("Gamma")));
+    QTRY_VERIFY(use->isEnabled());
+    QTest::mouseClick(use, Qt::LeftButton);
+    QTRY_VERIFY(properties->findChild<QDialog*>(QStringLiteral("bench-musicbrainz-identify")) ==
+                nullptr);
+    QTRY_VERIFY_WITH_TIMEOUT(grid_model->patches().patch_count() > 0U, 5'000);
+    const auto value = [grid_model](const QString& name, const int row) {
+        const auto column = grid_model->fieldColumn(name);
+        return column
+                   ? grid_model->index(row, *column).data(metadata_cell_values_role).toStringList()
+                   : QStringList{};
+    };
+    QCOMPARE(value(QStringLiteral("DISCOGS_RELEASE_ID"), 0), QStringList{QStringLiteral("31")});
+    QCOMPARE(value(QStringLiteral("Artist"), 1), QStringList{QStringLiteral("Band")});
+    QCOMPARE(value(QStringLiteral("Date"), 0), QStringList{QStringLiteral("2024-02")});
+    QVERIFY(value(QStringLiteral("MUSICBRAINZ_ALBUMID"), 0).isEmpty());
+    // Nothing asked but the sources' searches and releases -- MusicBrainz's
+    // first row previewed as the search came.
+    for (const auto& url : asked.filter(QStringLiteral("https://"))) {
+        QVERIFY2(url.startsWith(QStringLiteral(
+                     "https://musicbrainz.org/ws/2/release/11111111-2222-3333-4444-555555555555?")),
+                 qPrintable(url));
+    }
+    delete properties;
+}
+
 void BenchMainWindowTest::MusicBrainz::musicBrainzIdentifyStepsThroughAlbums() {
     const auto field = [](std::string name, std::vector<std::string> values) {
         return metadata::MetadataField{

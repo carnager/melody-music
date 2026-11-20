@@ -6,6 +6,7 @@
 #include "trackknife/engine/file_work_wire.hpp"
 #include "trackknife/musicbrainz/acoustid.hpp"
 #include "trackknife/musicbrainz/bandcamp.hpp"
+#include "trackknife/musicbrainz/discogs.hpp"
 #include "trackknife/musicbrainz/web_service.hpp"
 #include "trackknife/persistence/musicbrainz_cache.hpp"
 
@@ -70,14 +71,15 @@ int stop_when_cancelled(void* data, curl_off_t, curl_off_t, curl_off_t, curl_off
 
 // One HTTPS request: GET, or POST with a form body. Redirects are followed,
 // over HTTPS only -- the Cover Art Archive hands images out from archive.org.
+// `authorization`, when given, is sent as the Authorization header (curl
+// does not send it on to another host a redirect leads to).
 // `status`, when given, is told the HTTP status of the answer, and
 // `retry_after_seconds` how long the service asked to be left alone (0: it
 // did not say).
-[[nodiscard]] core::Result<std::string> perform(const std::string& url,
-                                                const std::optional<std::string>& form,
-                                                const core::CancellationToken& cancellation,
-                                                long* status_out = nullptr,
-                                                std::int64_t* retry_after_seconds = nullptr) {
+[[nodiscard]] core::Result<std::string>
+perform(const std::string& url, const std::optional<std::string>& form,
+        const core::CancellationToken& cancellation, long* status_out = nullptr,
+        std::int64_t* retry_after_seconds = nullptr, const std::string& authorization = {}) {
     std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl{curl_easy_init(), curl_easy_cleanup};
     if (!curl) {
         return std::unexpected(service_error(core::ErrorCode::backend, "curl did not start"));
@@ -100,6 +102,13 @@ int stop_when_cancelled(void* data, curl_off_t, curl_off_t, curl_off_t, curl_off
     curl_easy_setopt(curl.get(), CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl.get(), CURLOPT_XFERINFOFUNCTION, stop_when_cancelled);
     curl_easy_setopt(curl.get(), CURLOPT_XFERINFODATA, &transfer);
+    std::unique_ptr<curl_slist, decltype(&curl_slist_free_all)> headers{nullptr,
+                                                                        curl_slist_free_all};
+    if (!authorization.empty()) {
+        const auto header = "Authorization: " + authorization;
+        headers.reset(curl_slist_append(nullptr, header.c_str()));
+        curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, headers.get());
+    }
     if (form) {
         curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, form->c_str());
         curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDSIZE, static_cast<long>(form->size()));
@@ -152,13 +161,29 @@ namespace {
 }
 
 [[nodiscard]] bool answers_json(const std::string_view url) {
-    return url.starts_with("https://musicbrainz.org/ws/2/") || is_cover_listing(url);
+    return url.starts_with("https://musicbrainz.org/ws/2/") || is_cover_listing(url) ||
+           musicbrainz::is_discogs_api(url);
+}
+
+// The service a URL is of, as the tagger names it.
+[[nodiscard]] std::string service_name(const std::string_view url) {
+    if (url.starts_with("https://musicbrainz.org/")) {
+        return "MusicBrainz";
+    }
+    if (url.starts_with("https://coverartarchive.org/")) {
+        return "the Cover Art Archive";
+    }
+    if (musicbrainz::is_discogs_api(url) || musicbrainz::is_discogs_image(url)) {
+        return "Discogs";
+    }
+    return "Bandcamp";
 }
 
 } // namespace
 
 MetadataServices::MetadataServices(std::filesystem::path database, std::filesystem::path state)
-    : database_(std::move(database)), key_file_(state / "acoustid.key") {}
+    : database_(std::move(database)), key_file_(state / "acoustid.key"),
+      discogs_file_(state / "discogs.token") {}
 
 MetadataServices::Throttle MetadataServices::throttle(const long status,
                                                       const std::int64_t retry_after_seconds,
@@ -193,10 +218,12 @@ MetadataServices::Throttle MetadataServices::transient(const bool answered, cons
 
 bool MetadataServices::fetchable(const std::string_view url) {
     // ADR-0326: and Bandcamp's album pages and their images, found through
-    // a release's MusicBrainz links.
+    // a release's MusicBrainz links; ADR-0360: and Discogs' interface and
+    // images.
     return url.starts_with("https://musicbrainz.org/ws/2/") ||
            url.starts_with("https://coverartarchive.org/") ||
-           musicbrainz::is_bandcamp_album_page(url) || musicbrainz::is_bandcamp_image(url);
+           musicbrainz::is_bandcamp_album_page(url) || musicbrainz::is_bandcamp_image(url) ||
+           musicbrainz::is_discogs_api(url) || musicbrainz::is_discogs_image(url);
 }
 
 void MetadataServices::pace(std::chrono::steady_clock::time_point& last,
@@ -216,8 +243,22 @@ core::Result<std::string> MetadataServices::fetch(const std::string& url,
     if (!fetchable(url)) {
         return std::unexpected(service_error(
             core::ErrorCode::invalid_argument,
-            "an engine fetches only MusicBrainz, the Cover Art Archive and Bandcamp's album "
-            "pages, over HTTPS"));
+            "an engine fetches only MusicBrainz, the Cover Art Archive, Bandcamp's album "
+            "pages and Discogs, over HTTPS"));
+    }
+    // ADR-0360: Discogs' interface is asked with the engine's token, and
+    // not without one.
+    const auto discogs = musicbrainz::is_discogs_api(url) || musicbrainz::is_discogs_image(url);
+    std::string authorization;
+    if (musicbrainz::is_discogs_api(url)) {
+        const auto token = discogs_token();
+        if (token.empty()) {
+            return std::unexpected(service_error(
+                core::ErrorCode::unsupported,
+                "Set a Discogs token in Settings → Metadata services to look up releases on "
+                "Discogs"));
+        }
+        authorization = "Discogs token=" + token;
     }
     const auto now = static_cast<std::int64_t>(std::time(nullptr));
     // A release's listing of covers, as against one of its images.
@@ -252,11 +293,16 @@ core::Result<std::string> MetadataServices::fetch(const std::string& url,
     };
     int failures = 0;
     for (int attempt = 0;; ++attempt) {
-        pace(last_musicbrainz_,
-             std::chrono::milliseconds{musicbrainz::minimum_request_interval_ms});
+        if (discogs) {
+            pace(last_discogs_,
+                 std::chrono::milliseconds{musicbrainz::discogs_minimum_request_interval_ms});
+        } else {
+            pace(last_musicbrainz_,
+                 std::chrono::milliseconds{musicbrainz::minimum_request_interval_ms});
+        }
         std::int64_t retry_after = 0;
         status = 0;
-        body = perform(url, std::nullopt, cancellation, &status, &retry_after);
+        body = perform(url, std::nullopt, cancellation, &status, &retry_after, authorization);
         // ADR-0329: no answer, or a failure on the service's side, is asked
         // again before it is handed on: a lookup is not lost to one dropped
         // connection.
@@ -282,7 +328,7 @@ core::Result<std::string> MetadataServices::fetch(const std::string& url,
         }
         if (next.kind == Throttle::Kind::give_up) {
             return std::unexpected(service_error(core::ErrorCode::limit_exceeded,
-                                                 "MusicBrainz is busy and asked to wait " +
+                                                 service_name(url) + " is busy and asked to wait " +
                                                      std::to_string(next.seconds) +
                                                      " s; try again later"));
         }
@@ -307,10 +353,14 @@ core::Result<std::string> MetadataServices::fetch(const std::string& url,
         return std::unexpected(
             service_error(status == 404 ? core::ErrorCode::not_found : core::ErrorCode::io,
                           "the Cover Art Archive answered " + std::to_string(status)));
+    } else if (discogs && status == 401) {
+        return std::unexpected(
+            service_error(core::ErrorCode::unsupported,
+                          "Discogs did not accept the token set in Settings → Metadata services"));
     } else if (!url.starts_with("https://musicbrainz.org/")) {
         return std::unexpected(
             service_error(status == 404 ? core::ErrorCode::not_found : core::ErrorCode::io,
-                          "Bandcamp answered " + std::to_string(status)));
+                          service_name(url) + " answered " + std::to_string(status)));
     }
     return body;
 }
@@ -407,25 +457,40 @@ MetadataServices::acoustid_lookup(const Fingerprint& fingerprint,
     return perform(std::string{musicbrainz::acoustid_lookup_url}, *body, cancellation);
 }
 
-std::string MetadataServices::acoustid_key() {
+std::string MetadataServices::secret(const std::filesystem::path& file) {
     const std::lock_guard guard{key_mutex_};
-    std::ifstream input{key_file_};
+    std::ifstream input{file};
     std::string key;
     std::getline(input, key);
     return key;
 }
 
+std::string MetadataServices::acoustid_key() { return secret(key_file_); }
+
 bool MetadataServices::has_acoustid_key() { return !acoustid_key().empty(); }
 
 core::Result<void> MetadataServices::set_acoustid_key(const std::string& key) {
+    return keep_secret(key_file_, key);
+}
+
+std::string MetadataServices::discogs_token() { return secret(discogs_file_); }
+
+bool MetadataServices::has_discogs_token() { return !discogs_token().empty(); }
+
+core::Result<void> MetadataServices::set_discogs_token(const std::string& token) {
+    return keep_secret(discogs_file_, token);
+}
+
+core::Result<void> MetadataServices::keep_secret(const std::filesystem::path& file,
+                                                 const std::string& key) {
     const std::lock_guard guard{key_mutex_};
     std::error_code ignored;
     if (key.empty()) {
-        std::filesystem::remove(key_file_, ignored);
+        std::filesystem::remove(file, ignored);
         return {};
     }
     // Readable by its owner only, like the engine's password.
-    const auto partial = key_file_.string() + ".partial";
+    const auto partial = file.string() + ".partial";
     const auto descriptor = ::open(partial.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (descriptor < 0) {
         return std::unexpected(service_error(core::ErrorCode::io, "could not keep the key"));
@@ -436,7 +501,7 @@ core::Result<void> MetadataServices::set_acoustid_key(const std::string& key) {
     if (written != static_cast<ssize_t>(line.size())) {
         return std::unexpected(service_error(core::ErrorCode::io, "could not keep the key"));
     }
-    std::filesystem::rename(partial, key_file_, ignored);
+    std::filesystem::rename(partial, file, ignored);
     if (ignored) {
         return std::unexpected(service_error(core::ErrorCode::io, "could not keep the key"));
     }
@@ -453,8 +518,8 @@ void register_metadata_service_jobs(JobCatalog& jobs, MetadataServices& services
                 if (!MetadataServices::fetchable(url)) {
                     return std::unexpected(core::Error{
                         .code = core::ErrorCode::invalid_argument,
-                        .message = "an engine fetches only MusicBrainz and the Cover Art "
-                                   "Archive, over HTTPS",
+                        .message = "an engine fetches only MusicBrainz, the Cover Art "
+                                   "Archive, Bandcamp's album pages and Discogs, over HTTPS",
                         .context = {{.key = "param", .value = "url"}}});
                 }
                 return [&services, url, encoded_body](const core::CancellationToken& token,
@@ -506,20 +571,32 @@ void register_metadata_service_methods(protocol::Dispatcher& dispatcher,
                                        MetadataServices& services) {
     dispatcher.on("metadata_services.set", [&services](const Json& params) -> core::Result<Json> {
         const auto key = params.find("acoustid_client_key");
-        if (key == params.end() || !key->is_string()) {
-            return std::unexpected(
-                core::Error{.code = core::ErrorCode::invalid_argument,
-                            .message = "acoustid_client_key is required (empty to forget it)",
-                            .context = {{.key = "param", .value = "acoustid_client_key"}}});
+        const auto token = params.find("discogs_token");
+        const auto given = [&params](const Json::const_iterator found) {
+            return found != params.end() && found->is_string();
+        };
+        if (!given(key) && !given(token)) {
+            return std::unexpected(core::Error{
+                .code = core::ErrorCode::invalid_argument,
+                .message = "acoustid_client_key or discogs_token is required (empty to forget it)",
+                .context = {{.key = "param", .value = "acoustid_client_key"}}});
         }
-        auto kept = services.set_acoustid_key(key->get<std::string>());
-        if (!kept) {
-            return std::unexpected(std::move(kept.error()));
+        if (given(key)) {
+            if (auto kept = services.set_acoustid_key(key->get<std::string>()); !kept) {
+                return std::unexpected(std::move(kept.error()));
+            }
         }
-        return Json{{"acoustid", services.has_acoustid_key()}};
+        if (given(token)) {
+            if (auto kept = services.set_discogs_token(token->get<std::string>()); !kept) {
+                return std::unexpected(std::move(kept.error()));
+            }
+        }
+        return Json{{"acoustid", services.has_acoustid_key()},
+                    {"discogs", services.has_discogs_token()}};
     });
     dispatcher.on("metadata_services.status", [&services](const Json&) -> core::Result<Json> {
-        return Json{{"acoustid", services.has_acoustid_key()}};
+        return Json{{"acoustid", services.has_acoustid_key()},
+                    {"discogs", services.has_discogs_token()}};
     });
 }
 

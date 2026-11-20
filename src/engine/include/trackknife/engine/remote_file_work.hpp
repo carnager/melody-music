@@ -155,6 +155,8 @@ class RemoteFileWork final {
                     const core::CancellationToken& cancellation);
     // Hands the engine the AcoustID key it looks up with; empty forgets it.
     [[nodiscard]] core::Result<void> set_acoustid_key(const std::string& key);
+    // ADR-0360: the Discogs token the engine sends Discogs (empty: forgotten).
+    [[nodiscard]] core::Result<void> set_discogs_token(const std::string& token);
     // Stage 2: whether the engine also writes track ratings into the files,
     // and the scale other players' plain RATING tags are read on ("off",
     // "5", "10", "100").

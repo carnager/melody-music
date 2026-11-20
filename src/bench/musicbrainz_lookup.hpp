@@ -31,6 +31,9 @@ struct MusicBrainzLookupService {
     std::function<void(const AcoustIdFingerprint& fingerprint,
                        std::function<void(core::Result<QByteArray>)>)>
         acoustid_lookup;
+    // ADR-0360: a Discogs token is set; Identify asks Discogs too, through
+    // the same fetch.
+    bool discogs{false};
 };
 
 } // namespace trackknife::bench

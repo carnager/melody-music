@@ -666,6 +666,18 @@ core::Result<void> RemoteFileWork::set_acoustid_key(const std::string& key) {
     return {};
 }
 
+core::Result<void> RemoteFileWork::set_discogs_token(const std::string& token) {
+    auto connection = client();
+    if (!connection) {
+        return std::unexpected(std::move(connection.error()));
+    }
+    auto answer = (*connection)->call("metadata_services.set", Json{{"discogs_token", token}});
+    if (!answer) {
+        return std::unexpected(std::move(answer.error()));
+    }
+    return {};
+}
+
 namespace {
 
 // A call's answer, or the connection's failure, in one.

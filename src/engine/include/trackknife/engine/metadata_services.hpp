@@ -16,15 +16,17 @@
 namespace trackknife::engine {
 
 // ADR-0237: the tagger's online lookups, made by the engine that holds the
-// files -- MusicBrainz and the Cover Art Archive, and AcoustID with the key
-// the engine keeps. The client still reads the answers; the engine fetches,
-// paces and caches them, and fingerprints its own files.
+// files -- MusicBrainz and the Cover Art Archive, AcoustID with the key the
+// engine keeps, and (ADR-0360) Discogs with the token it keeps. The client still reads the answers;
+// the engine fetches, paces and caches them, and fingerprints its own files.
 //
-// Fetches reach only MusicBrainz's web service and the Cover Art Archive,
-// over HTTPS: an engine is not a way to fetch anything for anyone.
+// Fetches reach only MusicBrainz's web service, the Cover Art Archive,
+// Bandcamp's album pages and Discogs' interface and images, over HTTPS: an
+// engine is not a way to fetch anything for anyone.
 class MetadataServices final {
   public:
-    // `database` holds the response cache; `state` the AcoustID key.
+    // `database` holds the response cache; `state` the AcoustID key and the
+    // Discogs token.
     MetadataServices(std::filesystem::path database, std::filesystem::path state);
 
     [[nodiscard]] core::Result<std::string> fetch(const std::string& url,
@@ -43,6 +45,10 @@ class MetadataServices final {
 
     [[nodiscard]] core::Result<void> set_acoustid_key(const std::string& key);
     [[nodiscard]] bool has_acoustid_key();
+    // ADR-0360: sent with every request to Discogs' interface; an empty one
+    // forgets it.
+    [[nodiscard]] core::Result<void> set_discogs_token(const std::string& token);
+    [[nodiscard]] bool has_discogs_token();
 
     // Whether a URL is one fetch() will reach.
     [[nodiscard]] static bool fetchable(std::string_view url);
@@ -71,12 +77,19 @@ class MetadataServices final {
     // Waits until `interval` has passed since the last dispatch of its kind.
     void pace(std::chrono::steady_clock::time_point& last, std::chrono::milliseconds interval);
     [[nodiscard]] std::string acoustid_key();
+    [[nodiscard]] std::string discogs_token();
+    // A key or token kept in a file of its own, its owner's only.
+    [[nodiscard]] std::string secret(const std::filesystem::path& file);
+    [[nodiscard]] core::Result<void> keep_secret(const std::filesystem::path& file,
+                                                 const std::string& key);
 
     std::filesystem::path database_;
     std::filesystem::path key_file_;
+    std::filesystem::path discogs_file_;
     std::mutex pacing_;
     std::chrono::steady_clock::time_point last_musicbrainz_{};
     std::chrono::steady_clock::time_point last_acoustid_{};
+    std::chrono::steady_clock::time_point last_discogs_{};
     std::mutex key_mutex_;
 };
 
@@ -87,8 +100,9 @@ class MetadataServices final {
 // network make them slow, and they must not hold a connection.
 void register_metadata_service_jobs(JobCatalog& jobs, MetadataServices& services);
 
-// metadata_services.set {acoustid_client_key} keeps the key (an empty one
-// forgets it); metadata_services.status answers {acoustid: bool}.
+// metadata_services.set {acoustid_client_key?, discogs_token?} keeps what
+// it is given (an empty one forgets it); metadata_services.status answers
+// {acoustid: bool, discogs: bool}.
 void register_metadata_service_methods(protocol::Dispatcher& dispatcher,
                                        MetadataServices& services);
 
