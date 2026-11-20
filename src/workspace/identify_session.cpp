@@ -859,7 +859,10 @@ void IdentifySession::finishDiscogsSearch(core::Result<QByteArray> body) {
                    musicbrainz::WebServiceLimits{.releases = musicbrainz::discogs_search_page})
              : core::Result<musicbrainz::ReleaseSearchResult>{std::unexpected(body.error())};
     if (parsed) {
-        // CDs and digital releases only: what files are tagged from.
+        // The artist searched for, where Discogs has them, rather than
+        // others whose names hold the word; CDs and digital releases only:
+        // what files are tagged from.
+        musicbrainz::keep_artist(*parsed, searched_artist_.toStdString());
         musicbrainz::keep_cd_and_digital(*parsed, musicbrainz::discogs_search_limit);
         // In Discogs' own order, after MusicBrainz's: its search says no
         // track counts to rank by.
@@ -872,7 +875,7 @@ void IdentifySession::finishDiscogsSearch(core::Result<QByteArray> body) {
                 .album = text(release.title),
                 .album_tool_tip = QStringLiteral("Discogs release %1").arg(text(release.id)),
                 .artist = credit_text(release.artist_credits),
-                .tracks = QStringLiteral("—"),
+                .tracks = {},
                 .media = media_text(release),
                 .version = version_text(release),
             });
@@ -1086,8 +1089,7 @@ void IdentifySession::finishGroup(const musicbrainz::ReleaseSource source,
             .album_tool_tip = discogs ? QStringLiteral("Discogs release %1").arg(text(release.id))
                                       : text(release.id),
             .artist = credit_text(release.artist_credits),
-            .tracks = release.track_count == 0U ? QStringLiteral("—")
-                                                : QString::number(release.track_count),
+            .tracks = release.track_count == 0U ? QString{} : QString::number(release.track_count),
             .media = media_text(release),
             .version = version_text(release),
         });

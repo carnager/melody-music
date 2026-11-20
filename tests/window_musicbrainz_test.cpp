@@ -850,6 +850,8 @@ void BenchMainWindowTest::MusicBrainz::identifyAsksDiscogsAfterMusicBrainz() {
       "results": [{"id": 32, "type": "release", "title": "Band - Gamma", "year": "2024",
         "country": "Germany", "format": ["Vinyl", "LP", "Album"], "label": ["Self"],
         "catno": "S1V", "master_id": 0},
+        {"id": 33, "type": "release", "title": "Bandwagon - Gamma", "year": "2024",
+        "format": ["CD", "Album"], "label": ["Other"], "catno": "B1", "master_id": 0},
         {"id": 31, "type": "release", "title": "Band - Gamma", "year": "2024",
         "country": "Germany", "format": ["File", "FLAC", "Album"], "label": ["Self"],
         "catno": "S1", "master_id": 0}]
@@ -926,7 +928,7 @@ void BenchMainWindowTest::MusicBrainz::identifyAsksDiscogsAfterMusicBrainz() {
     };
 
     // Searched by the files' tags: MusicBrainz, then Discogs, its digital
-    // release listed after -- not its record.
+    // release listed after -- not its record, nor another artist's.
     QTRY_VERIFY(search->isEnabled() && results->topLevelItemCount() == 2);
     QCOMPARE(asked.mid(0, 2),
              (QStringList{QStringLiteral("musicbrainz search"), QStringLiteral("discogs search")}));
@@ -934,6 +936,8 @@ void BenchMainWindowTest::MusicBrainz::identifyAsksDiscogsAfterMusicBrainz() {
     QVERIFY(found(1).contains(QStringLiteral("Discogs")));
     QVERIFY(results->topLevelItem(1)->text(0).contains(QStringLiteral("Gamma")));
     QVERIFY(!found(1).contains(QStringLiteral("S1V")));
+    // Its track count is not known until it is previewed: none said.
+    QVERIFY(!found(1).contains(QStringLiteral("tracks")));
 
     // Its link typed: looked up on Discogs, with no master to list.
     album->setText(QStringLiteral("https://www.discogs.com/release/31-Band-Gamma"));

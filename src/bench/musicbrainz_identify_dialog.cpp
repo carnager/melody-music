@@ -239,9 +239,13 @@ class IdentifyAlbumPage final : public QWidget {
             if (!match.isEmpty()) {
                 details << match;
             }
-            details << (candidate.tracks == QStringLiteral("1")
-                            ? QStringLiteral("1 track")
-                            : QStringLiteral("%1 tracks").arg(candidate.tracks));
+            // ADR-0360: a Discogs release's count is not known until it
+            // is previewed: none said.
+            if (!candidate.tracks.isEmpty()) {
+                details << (candidate.tracks == QStringLiteral("1")
+                                ? QStringLiteral("1 track")
+                                : QStringLiteral("%1 tracks").arg(candidate.tracks));
+            }
             for (const auto& part : {candidate.media, candidate.version}) {
                 if (!part.isEmpty()) {
                     details << part;

@@ -63,6 +63,11 @@ parse_discogs_images(std::string_view body, const WebServiceLimits& limits = {})
 // of them, in order.
 [[nodiscard]] bool is_cd_or_digital(const Release& release);
 void keep_cd_and_digital(ReleaseSearchResult& result, std::size_t at_most);
+// Discogs' search matches an artist's name loosely ("Prong" finds "3 Prong
+// Outlet"): where any release is by the artist searched for -- its name
+// alike, case, accents, punctuation and a leading "The" aside -- only those
+// are kept. Where none is, all are.
+void keep_artist(ReleaseSearchResult& result, std::string_view artist);
 
 // An artist's name as Discogs gives it, as it is tagged: without the
 // " (N)" telling artists of one name apart; "Various" is "Various Artists".

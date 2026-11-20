@@ -505,6 +505,49 @@ void keep_cd_and_digital(ReleaseSearchResult& result, const std::size_t at_most)
     }
 }
 
+namespace {
+
+// A name as compared: folded, its accents and punctuation gone, a leading
+// "The" too.
+[[nodiscard]] QString compared_name(const std::string_view name) {
+    auto text = QString::fromUtf8(name.data(), static_cast<qsizetype>(name.size()))
+                    .normalized(QString::NormalizationForm_KD)
+                    .toCaseFolded();
+    QString kept;
+    for (const auto character : text) {
+        if (character.isLetterOrNumber()) {
+            kept.append(character);
+        } else if (character.isSpace() && !kept.endsWith(QLatin1Char{' '})) {
+            kept.append(QLatin1Char{' '});
+        }
+    }
+    kept = kept.trimmed();
+    if (kept.startsWith(QStringLiteral("the "))) {
+        kept.remove(0, 4);
+    }
+    kept.remove(QLatin1Char{' '});
+    return kept;
+}
+
+} // namespace
+
+void keep_artist(ReleaseSearchResult& result, const std::string_view artist) {
+    const auto wanted = compared_name(artist);
+    if (wanted.isEmpty()) {
+        return;
+    }
+    const auto by = [&wanted](const Release& release) {
+        std::string credited;
+        for (const auto& credit : release.artist_credits) {
+            credited += credit.name + credit.join_phrase;
+        }
+        return compared_name(credited) == wanted;
+    };
+    if (std::ranges::any_of(result.releases, by)) {
+        std::erase_if(result.releases, [&by](const Release& release) { return !by(release); });
+    }
+}
+
 std::string discogs_artist_name(const std::string_view name) {
     static const QRegularExpression suffix{QStringLiteral(R"(\s+\(\d+\)$)")};
     auto text = QString::fromUtf8(name.data(), static_cast<qsizetype>(name.size())).trimmed();
