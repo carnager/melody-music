@@ -9,6 +9,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPixmapCache>
 #include <QPushButton>
 #include <QStyleFactory>
 #include <QStyleOption>
@@ -28,6 +29,36 @@ namespace {
 }
 // Room for the tick before a combo box list item's text.
 constexpr int combo_tick_column = 20;
+
+#ifdef Q_OS_MACOS
+// Qt's native symbol engine keeps an unbounded per-icon pixmap cache keyed
+// by palette identity. Do not let a long-lived toolbar icon retain those
+// entries: render a detached copy on a miss in Qt's bounded pixmap cache.
+// Keep the original icon, so theme changes and other button states still
+// resolve through the icon engine rather than a permanently flattened image.
+[[nodiscard]] QIcon tool_button_icon(const QIcon& source, const QSize size, const qreal dpr,
+                                     const QIcon::Mode mode, const QIcon::State state) {
+    const auto key = QStringLiteral("melody/tool-button/%1/%2/%3/%4/%5/%6/%7/%8/%9")
+                         .arg(source.cacheKey())
+                         .arg(QPalette{}.cacheKey())
+                         .arg(size.width())
+                         .arg(size.height())
+                         .arg(dpr, 0, 'g', 17)
+                         .arg(mode)
+                         .arg(state)
+                         .arg(QIcon::themeName(), QIcon::fallbackThemeName());
+    QPixmap pixmap;
+    if (!QPixmapCache::find(key, &pixmap)) {
+        auto detached = source;
+        detached.detach();
+        pixmap = detached.pixmap(size, dpr, mode, state);
+        QPixmapCache::insert(key, pixmap);
+    }
+    QIcon rendered;
+    rendered.addPixmap(pixmap, mode, state);
+    return rendered;
+}
+#endif
 
 // A rounded rectangle on whole pixels, its 1 px edge on the pixel centres.
 void fill_rounded(QPainter* painter, const QRectF& rect, const QColor& fill, const qreal radius,
@@ -572,6 +603,27 @@ void TrackknifeStyle::drawControl(const ControlElement element, const QStyleOpti
                                   QPainter* painter, const QWidget* widget) const {
     const auto& palette = option->palette;
     switch (element) {
+#ifdef Q_OS_MACOS
+    case CE_ToolButtonLabel: {
+        const auto* button = qstyleoption_cast<const QStyleOptionToolButton*>(option);
+        if (button == nullptr || button->icon.isNull() ||
+            button->toolButtonStyle == Qt::ToolButtonTextOnly) {
+            break;
+        }
+        auto label = *button;
+        const auto mode = !button->state.testFlag(State_Enabled)
+                              ? QIcon::Disabled
+                              : (button->state.testFlag(State_MouseOver) &&
+                                         button->state.testFlag(State_AutoRaise)
+                                     ? QIcon::Active
+                                     : QIcon::Normal);
+        const auto state = button->state.testFlag(State_On) ? QIcon::On : QIcon::Off;
+        label.icon = tool_button_icon(button->icon, button->rect.size().boundedTo(button->iconSize),
+                                      painter->device()->devicePixelRatioF(), mode, state);
+        QProxyStyle::drawControl(element, &label, painter, widget);
+        return;
+    }
+#endif
     case CE_PushButtonBevel: {
         proxy()->drawPrimitive(PE_PanelButtonCommand, option, painter, widget);
         const auto* button = qstyleoption_cast<const QStyleOptionButton*>(option);

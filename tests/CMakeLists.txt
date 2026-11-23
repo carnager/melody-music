@@ -987,6 +987,13 @@ if(MELODY_BUILD_UI)
         missingFilesOnARemountedShareArePruned)
     set_tests_properties(local-library-mounts PROPERTIES TIMEOUT 60 ENVIRONMENT
         "QT_QPA_PLATFORM=offscreen;LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/lsan.supp")
+    qt_add_executable(trackknife_style_icon_cache_tests style_icon_cache_test.cpp)
+    target_link_libraries(trackknife_style_icon_cache_tests PRIVATE Trackknife::BenchUi Qt6::Test
+        trackknife_project_options trackknife_project_warnings)
+    add_test(NAME style-icon-cache COMMAND trackknife_style_icon_cache_tests)
+    set_tests_properties(style-icon-cache PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
     # The window's tests: a program for each feature, so that a case added or
     # changed rebuilds its feature's file alone. What they share is
     # window_test.hpp and the fixture, built once.
