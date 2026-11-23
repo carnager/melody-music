@@ -51,3 +51,26 @@ parts.
 - A desktop's own widget style (Kvantum, Breeze) no longer reaches Trackknife.
 - The main window, the queue and the remaining dialogs follow, window by
   window; until then they get the style's controls in their old arrangement.
+
+## Amendment, 2026-11-23: bounded toolbar icon rendering on macOS
+
+**Melody decision:** toolbar labels on macOS render their icons through Qt's
+bounded `QPixmapCache`. A cache miss renders a detached copy of the source
+icon, discarded after obtaining the pixels. The source stays available for
+later theme, palette, size, scale and enabled/checked/hover-state changes;
+those choices are part of the pixel-cache key. Eviction simply renders again.
+
+Qt 6.12's native `QAppleIconEngine` retains a per-icon hash of rendered pixels
+keyed by palette identity, without an eviction policy; its hash omits palette
+identity even though equality includes it. Two samples of a long-running
+Melody window at a full core and 13.1 GB footprint were inside insertion into
+that hash from `CE_ToolButtonLabel`. An independent native-symbol probe with
+6,000 changing palettes grew from about 64 to 73 MiB peak RSS; detaching the
+icon per draw stayed about 62 MiB. Each iteration drained its autorelease pool.
+This workaround avoids retaining that cache along the observed toolbar path;
+it does not change Qt or establish that all possible sources of memory growth
+are gone. Linux continues to draw its toolbar icons directly.
+
+`style-icon-cache` verifies reuse, safe eviction, temporary engine lifetime
+under 512 palette changes, and preservation of mode, state and Retina scale.
+The multi-day symptom still needs a long-running qualification after shipping.
